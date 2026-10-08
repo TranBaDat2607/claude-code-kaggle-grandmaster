@@ -1,20 +1,39 @@
 {
   "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
-  "name": "ultimate-grandmaster-kaggle-kit",
-  "description": "Marketplace for the Kaggle Grandmaster plugin: a full competition operating system for Claude Code.",
+  "name": "claude-code-kaggle-grandmaster",
+  "description": "Claude Code marketplace for kaggle-grandmaster, a plugin for winning Kaggle competitions with Claude.",
   "owner": {
-    "name": "Tran Ba Dat"
+    "name": "Tran Ba Dat",
+    "url": "https://github.com/TranBaDat2607"
   },
   "plugins": [
     {
       "name": "kaggle-grandmaster",
-      "description": "Elevates Claude Code to Kaggle Grandmaster level: competition recon, bulletproof validation, domain playbooks (tabular, CV, NLP/LLM, time series, audio, RL, optimization), experiment ledger, ensembling, code-competition packaging and final-submission selection.",
+      "description": "Claude Code plugin for Kaggle competitions: turns Claude into a Grandmaster-level AI teammate with leak-free cross-validation, experiment tracking, tabular/vision/NLP/LLM/time-series playbooks, ensembling, code-competition kernels and final-submission selection.",
       "version": "1.0.0",
       "author": {
         "name": "Tran Ba Dat"
       },
       "category": "data-science",
-      "source": "./plugins/kaggle-grandmaster"
+      "source": "./plugins/kaggle-grandmaster",
+      "homepage": "https://github.com/TranBaDat2607/claude-code-kaggle-grandmaster",
+      "repository": "https://github.com/TranBaDat2607/claude-code-kaggle-grandmaster",
+      "keywords": [
+        "kaggle",
+        "kaggle-competition",
+        "claude-code",
+        "claude-code-plugin",
+        "machine-learning",
+        "data-science",
+        "cross-validation",
+        "ensembling",
+        "lightgbm",
+        "xgboost",
+        "catboost",
+        "deep-learning",
+        "llm",
+        "ai-agent"
+      ]
     }
   ]
 }

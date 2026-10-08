@@ -1,10 +1,28 @@
 {
   "name": "kaggle-grandmaster",
   "version": "1.0.0",
-  "description": "Elevates Claude Code to Kaggle Grandmaster level: competition recon, bulletproof validation, domain playbooks (tabular, CV, NLP/LLM, time series, audio, RL, optimization), experiment ledger, ensembling, code-competition packaging and final-submission selection.",
+  "description": "Claude Code plugin for Kaggle competitions: turns Claude into a Grandmaster-level AI teammate with leak-free cross-validation, experiment tracking, tabular/vision/NLP/LLM/time-series playbooks, ensembling, code-competition kernels and final-submission selection.",
   "author": {
-    "name": "Tran Ba Dat"
+    "name": "Tran Ba Dat",
+    "url": "https://github.com/TranBaDat2607"
   },
-  "keywords": ["kaggle", "machine-learning", "data-science", "competitions", "ensembling", "cross-validation", "deep-learning"],
-  "license": "MIT"
+  "keywords": [
+    "kaggle",
+    "kaggle-competition",
+    "claude-code",
+    "claude-code-plugin",
+    "machine-learning",
+    "data-science",
+    "cross-validation",
+    "ensembling",
+    "lightgbm",
+    "xgboost",
+    "catboost",
+    "deep-learning",
+    "llm",
+    "ai-agent"
+  ],
+  "license": "MIT",
+  "homepage": "https://github.com/TranBaDat2607/claude-code-kaggle-grandmaster",
+  "repository": "https://github.com/TranBaDat2607/claude-code-kaggle-grandmaster"
 }

@@ -1,17 +1,54 @@
-# Ultimate Grandmaster Kaggle Kit
+# Kaggle Grandmaster for Claude Code
 
-A Claude Code plugin that makes Claude compete like a Kaggle Grandmaster. It gives Claude a
-working method on top of model knowledge: validation it can trust, a high rate of small
-experiments that are all logged, honest ensembling, offline packaging for code competitions,
-and careful choice of final submissions. It covers every competition type: tabular, computer
-vision, NLP/LLM, time series, audio/signal, recsys, simulation agents and combinatorial
-optimisation.
+**A Claude Code plugin that helps you win Kaggle competitions.** Install it and Claude works the way a
+Kaggle Grandmaster does. It builds validation you can trust, runs and logs many small experiments,
+ensembles honestly, packages offline notebooks for code competitions and picks final submissions
+that hold up on the private leaderboard.
 
-```
+[![tests](https://github.com/TranBaDat2607/claude-code-kaggle-grandmaster/actions/workflows/tests.yml/badge.svg)](https://github.com/TranBaDat2607/claude-code-kaggle-grandmaster/actions/workflows/tests.yml)
+![Claude Code plugin](https://img.shields.io/badge/Claude%20Code-plugin-d97757)
+![Kaggle](https://img.shields.io/badge/Kaggle-competitions-20beff)
+![License: MIT](https://img.shields.io/badge/license-MIT-green)
+
+It covers every type of Kaggle competition: **tabular** (LightGBM, XGBoost, CatBoost, Playground
+Series), **computer vision** (classification, detection, segmentation, medical imaging), **NLP and
+LLMs** (DeBERTa, LoRA fine-tuning, vLLM inference), **time series and forecasting**, **audio and
+biosignals**, **recommender systems and ranking**, **simulation agents** and **combinatorial
+optimisation**.
+
+## Quick start
+
+```bash
+# 1. add this repo as a plugin marketplace and install the plugin
+claude plugin marketplace add TranBaDat2607/claude-code-kaggle-grandmaster
+claude plugin install kaggle-grandmaster@claude-code-kaggle-grandmaster
+
+# 2. inside Claude Code, start a competition
 /kaggle-grandmaster:kg-start playground-series-s6e2
 ```
-This one command runs recon, data download, workspace setup, EDA, adversarial validation,
-frozen folds, a baseline model and a validated submission file.
+
+`kg-start` runs competition recon, downloads the data, sets up a workspace, runs EDA and
+adversarial validation, freezes the CV folds, trains a baseline and writes a validated
+submission file.
+
+**Requirements:** [Claude Code](https://claude.com/claude-code); Python ≥ 3.9 with
+`numpy pandas scikit-learn scipy` (LightGBM, PyTorch and similar libraries are only needed for the
+matching templates); `pip install kaggle` and a Kaggle API token; a POSIX `sh` for the hooks (Git
+Bash on Windows, which Claude Code already uses). To try the plugin without installing it, clone
+the repo and run `claude --plugin-dir plugins/kaggle-grandmaster`.
+
+Plugin commands are namespaced (`/kaggle-grandmaster:kg-status`). Plain `/kg-status` also works
+when no other plugin uses the same name.
+
+## Who is this for?
+
+- Kaggle competitors who use Claude Code as an AI pair-programmer and want it to follow a winning
+  process, not just write models.
+- Anyone who wants an AI agent that catches the classic mistakes before they cost a medal:
+  target leakage, group or time leakage in cross-validation, tuning on the public LB, blending
+  OOFs from different folds, notebooks that time out on the hidden test set.
+- Data scientists who want a reusable, tested toolkit for CV folds, metrics, ensembling and
+  experiment tracking (`kgkit`), with or without Claude.
 
 ---
 
@@ -26,25 +63,6 @@ frozen folds, a baseline model and a validated submission file.
 | **`kgkit` toolkit** | 11 modules | Tested Python: leak-free folds, 35+ metrics, threshold/rounding optimisers, hill climbing / stacking, adversarial validation, leak-safe features, EDA red flags, experiment ledger, submission validator, CLI |
 | **Templates** | 4 + metadata | GBDT (LightGBM/XGBoost/CatBoost/HGB), timm image models, HF transformers, offline inference kernel |
 | **Evals** | 7 cases | `claude plugin eval` suite with a no-plugin baseline arm |
-
-## Install
-
-Requirements: Claude Code, Python ≥ 3.9 with `numpy pandas scikit-learn scipy` (the GBDT/DL
-libraries are only needed for the matching templates), and a POSIX `sh` for hooks (Git Bash
-on Windows, which Claude Code already uses). For Kaggle access: `pip install kaggle` plus an
-API token.
-
-```bash
-# from a clone of this repo
-claude plugin marketplace add /path/to/ultimate-grandmaster-kaggle-kit
-claude plugin install kaggle-grandmaster@ultimate-grandmaster-kaggle-kit
-
-# or just try it for one session
-claude --plugin-dir /path/to/ultimate-grandmaster-kaggle-kit/plugins/kaggle-grandmaster
-```
-
-Plugin commands are namespaced: `/kaggle-grandmaster:kg-status`. Plain `/kg-status` also works
-when no other plugin uses the same name.
 
 ## How a competition flows
 

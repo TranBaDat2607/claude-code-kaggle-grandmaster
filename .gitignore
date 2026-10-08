@@ -1,7 +1,6 @@
 # IDE / local
 .idea/
 .vscode/
-main.py
 
 # Python
 __pycache__/
