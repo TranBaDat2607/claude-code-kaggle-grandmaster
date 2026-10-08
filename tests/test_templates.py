@@ -83,3 +83,47 @@ def test_gbdt_template_lgbm_smoke_and_full(tmp_path, plugin_root):
     _run(["src/train_gbdt.py", "--params", '{"n_estimators": 300, "learning_rate": 0.1}', "--seeds", "1", "2"], ws, plugin_root)
     rec = Ledger(ws).records()[-1]
     assert rec["cv"] > 0.8 and len(rec["fold_scores"]) == 5
+
+
+@pytest.mark.skipif(importlib.util.find_spec("timm") is None or importlib.util.find_spec("torch") is None,
+                    reason="needs torch + timm")
+def test_image_template_tiny(tmp_path, plugin_root):
+    from PIL import Image
+
+    rng = np.random.default_rng(0)
+    colors = {"red": (220, 30, 30), "green": (30, 200, 30), "blue": (30, 30, 220)}
+    (tmp_path / "data" / "train_images").mkdir(parents=True)
+    (tmp_path / "data" / "test_images").mkdir(parents=True)
+    rows, trows = [], []
+    for i in range(60):
+        lab = list(colors)[i % 3]
+        arr = np.clip(np.array(colors[lab]) + rng.normal(0, 25, (32, 32, 3)), 0, 255).astype(np.uint8)
+        Image.fromarray(arr).save(tmp_path / "data" / "train_images" / f"{i}.png")
+        rows.append({"image_id": i, "image_path": f"{i}.png", "label": lab})
+    for i in range(9):
+        lab = list(colors)[i % 3]
+        arr = np.clip(np.array(colors[lab]) + rng.normal(0, 25, (32, 32, 3)), 0, 255).astype(np.uint8)
+        Image.fromarray(arr).save(tmp_path / "data" / "test_images" / f"t{i}.png")
+        trows.append({"image_id": 1000 + i, "image_path": f"t{i}.png"})
+    pd.DataFrame(rows).to_csv(tmp_path / "data" / "train.csv", index=False)
+    pd.DataFrame(trows).to_csv(tmp_path / "data" / "test.csv", index=False)
+    pd.DataFrame({"image_id": [1000 + i for i in range(9)], "label": "red"}).to_csv(
+        tmp_path / "data" / "sample_submission.csv", index=False)
+    _run(["-m", "kgkit", "init", "img", "--metric", "accuracy", "--target", "label", "--id-col", "image_id"],
+         tmp_path, plugin_root)
+    _run(["-m", "kgkit", "folds", "data/train.csv", "--target", "label", "--id-col", "image_id", "--n-splits", "3",
+          "--out", "data/folds.csv"], tmp_path, plugin_root)
+    (tmp_path / "src").mkdir(exist_ok=True)
+    src = (plugin_root / "templates" / "train_image.py").read_text(encoding="utf-8")
+    (tmp_path / "src" / "train_image.py").write_text(src.replace("num_workers=4", "num_workers=0"), encoding="utf-8")
+    args = ["src/train_image.py", "--backbone", "resnet18", "--no-pretrained", "--img-size", "32",
+            "--batch-size", "8", "--lr", "3e-3"]
+    assert "smoke run OK" in _run([*args, "--smoke"], tmp_path, plugin_root)
+    # split folds across two "GPUs": first call must not log, second completes the set
+    out1 = _run([*args, "--epochs", "3", "--name", "r18", "--folds", "0"], tmp_path, plugin_root)
+    assert "the run that completes the set" in out1
+    _run([*args, "--epochs", "3", "--name", "r18", "--folds", "1", "2"], tmp_path, plugin_root)
+    rec = Ledger(tmp_path).records()[-1]
+    assert rec["name"] == "r18" and len(rec["fold_scores"]) == 3
+    res = validate_submission(tmp_path / rec["submission"], tmp_path / "data" / "sample_submission.csv")
+    assert res["ok"], res
