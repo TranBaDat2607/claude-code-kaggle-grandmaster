@@ -129,21 +129,29 @@ def test_image_template_tiny(tmp_path, plugin_root):
     assert res["ok"], res
 
 
-def _tiny_local_bert(path):
-    """Build a tiny BERT + word-level tokenizer on disk (no network)."""
-    from tokenizers import Tokenizer, models, pre_tokenizers
-    from transformers import BertConfig, BertModel, PreTrainedTokenizerFast
+_TINY_BERT = """
+import sys, torch
+from tokenizers import Tokenizer, models, pre_tokenizers
+from transformers import BertConfig, BertModel, PreTrainedTokenizerFast
+path = sys.argv[1]
+vocab = {t: i for i, t in enumerate(["[PAD]", "[UNK]", "[CLS]", "[SEP]", "good", "bad", "movie", "very",
+                                      "plot", "the", "was", "not"])}
+tk = Tokenizer(models.WordLevel(vocab=vocab, unk_token="[UNK]"))
+tk.pre_tokenizer = pre_tokenizers.Whitespace()
+PreTrainedTokenizerFast(tokenizer_object=tk, unk_token="[UNK]", pad_token="[PAD]", cls_token="[CLS]",
+                        sep_token="[SEP]").save_pretrained(path)
+torch.manual_seed(0)
+cfg = BertConfig(vocab_size=len(vocab), hidden_size=32, num_hidden_layers=2, num_attention_heads=2,
+                 intermediate_size=64, max_position_embeddings=64)
+BertModel(cfg).save_pretrained(path)
+"""
 
-    vocab = {t: i for i, t in enumerate(["[PAD]", "[UNK]", "[CLS]", "[SEP]", "good", "bad", "movie", "very",
-                                          "plot", "the", "was", "not"])}
-    tk = Tokenizer(models.WordLevel(vocab=vocab, unk_token="[UNK]"))
-    tk.pre_tokenizer = pre_tokenizers.Whitespace()
-    fast = PreTrainedTokenizerFast(tokenizer_object=tk, unk_token="[UNK]", pad_token="[PAD]", cls_token="[CLS]",
-                                   sep_token="[SEP]")
-    fast.save_pretrained(path)
-    cfg = BertConfig(vocab_size=len(vocab), hidden_size=32, num_hidden_layers=2, num_attention_heads=2,
-                     intermediate_size=64, max_position_embeddings=64)
-    BertModel(cfg).save_pretrained(path)
+
+def _tiny_local_bert(path):
+    """Build a tiny BERT + word-level tokenizer on disk (no network). Runs in a subprocess: importing torch
+    inside the pytest process after scipy/sklearn can hit DLL-order conflicts on Windows."""
+    r = subprocess.run([sys.executable, "-c", _TINY_BERT, str(path)], capture_output=True, text=True, timeout=300)
+    assert r.returncode == 0, r.stderr[-2000:]
 
 
 @pytest.mark.skipif(importlib.util.find_spec("transformers") is None or importlib.util.find_spec("tokenizers") is None,
@@ -169,9 +177,23 @@ def test_transformer_template_tiny(tmp_path, plugin_root):
     (tmp_path / "src" / "train_transformer.py").write_text(src.replace("num_workers=2", "num_workers=0"), encoding="utf-8")
     args = ["src/train_transformer.py", "--model", "tinybert", "--max-len", "16", "--batch-size", "8", "--lr", "1e-3"]
     assert "smoke run OK" in _run([*args, "--smoke"], tmp_path, plugin_root)
-    _run([*args, "--epochs", "4", "--name", "tiny"], tmp_path, plugin_root)
+    _run([*args, "--epochs", "10", "--name", "tiny"], tmp_path, plugin_root)
     rec = Ledger(tmp_path).records()[-1]
     assert rec["name"] == "tiny" and len(rec["fold_scores"]) == 2
     assert rec["cv"] < df["score"].std()  # learned something beyond predicting the mean
     res = validate_submission(tmp_path / rec["submission"], tmp_path / "data" / "sample_submission.csv")
     assert res["ok"], res
+
+
+def test_inference_kernel_dry_run(tmp_path, plugin_root):
+    comp = tmp_path / "input" / "COMPETITION-SLUG"
+    comp.mkdir(parents=True)
+    (tmp_path / "working").mkdir()
+    pd.DataFrame({"id": [5, 6, 7], "x": [1, 2, 3]}).to_csv(comp / "test.csv", index=False)
+    pd.DataFrame({"id": [5, 6, 7], "target": 0.5}).to_csv(comp / "sample_submission.csv", index=False)
+    env = dict(os.environ, KAGGLE_INPUT=str(tmp_path / "input"), KAGGLE_WORKING=str(tmp_path / "working"))
+    r = subprocess.run([sys.executable, str(plugin_root / "templates" / "inference_kernel.py")], env=env,
+                       capture_output=True, text=True, timeout=120)
+    assert r.returncode == 0, r.stderr
+    sub = pd.read_csv(tmp_path / "working" / "submission.csv")
+    assert list(sub.columns) == ["id", "target"] and len(sub) == 3
