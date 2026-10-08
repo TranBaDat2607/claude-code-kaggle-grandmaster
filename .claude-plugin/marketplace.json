@@ -1,0 +1,20 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "ultimate-grandmaster-kaggle-kit",
+  "description": "Marketplace for the Kaggle Grandmaster plugin: a full competition operating system for Claude Code.",
+  "owner": {
+    "name": "Tran Ba Dat"
+  },
+  "plugins": [
+    {
+      "name": "kaggle-grandmaster",
+      "description": "Elevates Claude Code to Kaggle Grandmaster level: competition recon, bulletproof validation, domain playbooks (tabular, CV, NLP/LLM, time series, audio, RL, optimization), experiment ledger, ensembling, code-competition packaging and final-submission selection.",
+      "version": "0.1.0",
+      "author": {
+        "name": "Tran Ba Dat"
+      },
+      "category": "data-science",
+      "source": "./plugins/kaggle-grandmaster"
+    }
+  ]
+}

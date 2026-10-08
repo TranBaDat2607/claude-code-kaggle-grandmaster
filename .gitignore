@@ -1,0 +1,30 @@
+# IDE / local
+.idea/
+.vscode/
+main.py
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+*.egg-info/
+.venv/
+venv/
+
+# Kaggle data & artifacts (never commit competition data or credentials)
+kaggle.json
+data/
+input/
+*.zip
+*.parquet
+*.feather
+*.npy
+*.pkl
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+
+# OS
+.DS_Store
+Thumbs.db

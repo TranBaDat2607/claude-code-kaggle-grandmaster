@@ -1,0 +1,10 @@
+{
+  "name": "kaggle-grandmaster",
+  "version": "0.1.0",
+  "description": "Elevates Claude Code to Kaggle Grandmaster level: competition recon, bulletproof validation, domain playbooks (tabular, CV, NLP/LLM, time series, audio, RL, optimization), experiment ledger, ensembling, code-competition packaging and final-submission selection.",
+  "author": {
+    "name": "Tran Ba Dat"
+  },
+  "keywords": ["kaggle", "machine-learning", "data-science", "competitions", "ensembling", "cross-validation", "deep-learning"],
+  "license": "MIT"
+}
