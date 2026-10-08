@@ -28,3 +28,6 @@ input/
 # OS
 .DS_Store
 Thumbs.db
+
+# plugin eval run outputs
+plugins/kaggle-grandmaster/evals/results/

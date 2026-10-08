@@ -108,3 +108,23 @@ def test_parse_submit_variants(plugin_root):
     assert C.parse_submit("kaggle competitions submissions comp") is None
     p = C.parse_submit('kaggle competitions submit comp -f subs\\x.csv -m "0003_x"; Write-Host ok')
     assert p["file"] == "subs/x.csv" and p["message"] == "0003_x"
+
+
+def test_prompt_router(plugin_root, tmp_path_factory, ws):
+    plain = tmp_path_factory.mktemp("plain")
+    def ask(prompt, cwd):
+        return hook(plugin_root, "prompt_router.py",
+                    {"hook_event_name": "UserPromptSubmit", "prompt": prompt, "cwd": str(cwd)})
+
+    out = ask("My Kaggle CV is 0.95 but the public LB is 0.81, I used KFold on daily sales with lag features", plain)
+    ctx = out["additionalContext"]
+    assert "kaggle-grandmaster:cv-lb-debugging" in ctx and "kaggle-grandmaster:validation-strategy" in ctx
+    out = ask("How should I blend OOF predictions from 9 models for this competition?", plain)
+    assert "kaggle-grandmaster:ensembling" in out["additionalContext"]
+    # generic prompt outside a workspace: silent
+    assert ask("Refactor this React component to use hooks", plain) is None
+    # inside a workspace even generic wording routes (falls back to the playbook)
+    out = ask("what should I try next?", ws)
+    assert "kaggle-grandmaster:grandmaster-playbook" in out["additionalContext"]
+    # slash commands are left alone
+    assert ask("/kaggle-grandmaster:kg-status", ws) is None

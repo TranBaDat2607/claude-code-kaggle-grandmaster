@@ -1,5 +1,5 @@
 {
-  "description": "kaggle-grandmaster: competition context at session start, submission validation/budget guard, credential protection, submission logging",
+  "description": "kaggle-grandmaster: competition context at session start, Kaggle prompt -> skill routing, submission validation/budget guard, credential protection, submission logging",
   "hooks": {
     "SessionStart": [
       {
@@ -32,6 +32,17 @@
             "type": "command",
             "command": "sh \"${CLAUDE_PLUGIN_ROOT}/hooks/run.sh\" post_tool.py",
             "timeout": 15
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh \"${CLAUDE_PLUGIN_ROOT}/hooks/run.sh\" prompt_router.py",
+            "timeout": 10
           }
         ]
       }
