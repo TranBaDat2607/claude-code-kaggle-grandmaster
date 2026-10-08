@@ -1,0 +1,40 @@
+{
+  "description": "kaggle-grandmaster: competition context at session start, submission validation/budget guard, credential protection, submission logging",
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh \"${CLAUDE_PLUGIN_ROOT}/hooks/run.sh\" session_start.py",
+            "timeout": 15
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Bash|PowerShell",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh \"${CLAUDE_PLUGIN_ROOT}/hooks/run.sh\" pre_tool.py",
+            "timeout": 60
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Bash|PowerShell",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh \"${CLAUDE_PLUGIN_ROOT}/hooks/run.sh\" post_tool.py",
+            "timeout": 15
+          }
+        ]
+      }
+    ]
+  }
+}
