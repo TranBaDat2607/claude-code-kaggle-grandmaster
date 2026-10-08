@@ -251,7 +251,7 @@ def fold_report(
         if target:
             y = part[target]
             if not pd.api.types.is_numeric_dtype(y) or pd.api.types.is_bool_dtype(y):
-                y = pd.Series(pd.factorize(df[target])[0], index=df.index).loc[part.index]
+                y = pd.Series(pd.factorize(df[target], sort=True)[0], index=df.index).loc[part.index]
             row += f" {y.mean():.4f} | {y.std():.4f} |"
         lines.append(row)
     sizes = df[fold_col].value_counts()

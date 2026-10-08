@@ -13,8 +13,20 @@ import pandas as pd
 
 
 def validate_submission(sub: str | Path | pd.DataFrame, sample: str | Path | pd.DataFrame,
-                        id_col: str | None = None, prob_cols: list[str] | None = None) -> dict:
-    """Return {"ok": bool, "errors": [...], "warnings": [...], "summary": str}."""
+                        id_col: str | None = None, prob_cols: list[str] | None = None,
+                        metric: str | None = None) -> dict:
+    """Return {"ok": bool, "errors": [...], "warnings": [...], "summary": str}.
+
+    ``metric`` (a kgkit metric name) sharpens the value checks: probability metrics expect values in
+    [0, 1] and ignore the sample's integer placeholders; label metrics expect integer/class labels."""
+    kind = None
+    if metric:
+        from . import metrics as M
+
+        try:
+            kind = M.get(metric).kind
+        except KeyError:
+            kind = None
     s = pd.read_csv(sub) if not isinstance(sub, pd.DataFrame) else sub
     ref = pd.read_csv(sample) if not isinstance(sample, pd.DataFrame) else sample
     errors, warnings = [], []
@@ -56,12 +68,17 @@ def validate_submission(sub: str | Path | pd.DataFrame, sample: str | Path | pd.
                 errors.append(f"`{c}` has infinite values")
             if col.nunique() <= 1 and len(col) > 1:
                 warnings.append(f"`{c}` is constant ({col.iloc[0]}) — is the model actually predicting?")
-            is_prob = (prob_cols is not None and c in prob_cols)
+            is_prob = (prob_cols is not None and c in prob_cols) or kind == "proba"
             if is_prob and ((col < 0) | (col > 1)).any():
-                errors.append(f"`{c}` has values outside [0, 1] but is declared a probability column")
-            ref_int = pd.api.types.is_integer_dtype(ref[c])
-            if ref_int and not np.allclose(col.dropna() % 1, 0):
-                warnings.append(f"`{c}` is integer in the sample but your values are fractional — labels expected?")
+                msg = f"`{c}` has values outside [0, 1] for a probability metric"
+                (errors if prob_cols is not None and c in prob_cols else warnings).append(
+                    msg + ("" if prob_cols is not None and c in prob_cols else " (fine if the metric only uses ranks, e.g. AUC)"))
+            fractional = not np.allclose(col.dropna() % 1, 0)
+            if kind == "label" and fractional:
+                errors.append(f"`{c}` must contain class labels for metric {metric!r} but has fractional values")
+            elif kind is None and pd.api.types.is_integer_dtype(ref[c]) and fractional:
+                warnings.append(f"`{c}` is integer in the sample but your values are fractional — labels expected? "
+                                "(pass --metric to check precisely)")
 
     summary = f"{len(s)} rows, columns {list(s.columns)}"
     return {"ok": not errors, "errors": errors, "warnings": warnings, "summary": summary}

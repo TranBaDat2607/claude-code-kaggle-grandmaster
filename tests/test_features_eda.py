@@ -58,3 +58,10 @@ def test_quick_eda_flags(binary_df):
     assert "`const` is constant" in rep
     assert "`leak`" in rep and "LEAK" in rep
     assert "`x2` drifts" in rep
+
+
+def test_quick_eda_ignores_declared_id(binary_df):
+    test = binary_df.drop(columns="target").copy()
+    test["id"] = test["id"] + 100_000  # ids never overlap — must not be reported as drift
+    rep = eda.quick_eda(binary_df, test, target="target", id_col="id")
+    assert "`id` drifts" not in rep

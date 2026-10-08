@@ -222,7 +222,12 @@ def cmd_blend(a):
     metric = a.metric or (st.metric if st else None)
     if not metric:
         raise SystemExit("--metric required (no competition state found)")
-    y = _col(a.truth).to_numpy()
+    y_raw = _col(a.truth)
+    if pd.api.types.is_numeric_dtype(y_raw) and not pd.api.types.is_bool_dtype(y_raw):
+        y = y_raw.to_numpy()
+    else:  # string / bool labels: sorted-class codes, the same encoding the training templates use
+        classes, y = np.unique(y_raw.astype(str).to_numpy(), return_inverse=True)
+        print("encoded truth labels: " + ", ".join(f"{c}={i}" for i, c in enumerate(classes)))
     oofs = {e: led.load_oof(e) for e in a.exp}
     for e, o in oofs.items():
         if len(o) != len(y):
@@ -272,7 +277,13 @@ def cmd_blend(a):
 def cmd_validate(a):
     from .submission import format_report, validate_submission
 
-    res = validate_submission(a.sub, a.sample, a.id_col, a.prob_cols.split(",") if a.prob_cols else None)
+    metric = a.metric
+    if metric is None:
+        from . import state as S
+
+        st = S.load()
+        metric = st.metric if st and st.metric else None
+    res = validate_submission(a.sub, a.sample, a.id_col, a.prob_cols.split(",") if a.prob_cols else None, metric)
     print(format_report(res))
     sys.exit(0 if res["ok"] else 1)
 
@@ -372,6 +383,7 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("sample")
     s.add_argument("--id-col")
     s.add_argument("--prob-cols")
+    s.add_argument("--metric", help="kgkit metric name (default: from competition.json)")
     s.set_defaults(fn=cmd_validate)
 
     s = sub.add_parser("vendor", help="copy kgkit into DEST/kgkit")

@@ -32,10 +32,11 @@ def _univariate_strength(x: pd.Series, y: pd.Series) -> float:
     return np.nan
 
 
-def column_profile(train: pd.DataFrame, test: pd.DataFrame | None = None, target: str | None = None) -> pd.DataFrame:
+def column_profile(train: pd.DataFrame, test: pd.DataFrame | None = None, target: str | None = None,
+                   id_col: str | None = None) -> pd.DataFrame:
     rows = []
     for c in train.columns:
-        if c == target:
+        if c in (target, id_col):
             continue
         s = train[c]
         r = {
@@ -100,7 +101,7 @@ def quick_eda(train: pd.DataFrame, test: pd.DataFrame | None = None, target: str
         if y.isna().any():
             flags.append(f"target has {int(y.isna().sum())} missing values")
 
-    prof = column_profile(train, test, target)
+    prof = column_profile(train, test, target, id_col)
     out += ["", "## Columns", "", _md_table(prof)]
 
     n = len(train)

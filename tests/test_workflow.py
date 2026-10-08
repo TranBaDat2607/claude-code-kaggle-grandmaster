@@ -107,3 +107,24 @@ def test_blend_warns_on_mismatched_folds(workspace, plugin_root):
     assert "DIFFERENT fold splits" in r.stdout
     c = led.log("c", 0.8)  # no explicit folds: fingerprint of data/folds.csv when present, else None
     assert c["folds_hash"] is None or len(c["folds_hash"]) == 12
+
+
+def test_validate_is_metric_aware():
+    sample = pd.DataFrame({"id": [1, 2, 3], "target": [0, 0, 0]})  # int placeholders
+    probs = pd.DataFrame({"id": [1, 2, 3], "target": [0.1, 0.7, 0.4]})
+    assert not validate_submission(probs, sample, metric="auc")["warnings"]
+    assert validate_submission(probs, sample)["warnings"]  # unknown metric: cautious warning
+    res = validate_submission(probs, sample, metric="qwk")
+    assert not res["ok"] and "class labels" in res["errors"][0]
+
+
+def test_blend_accepts_string_truth(workspace, plugin_root):
+    train = pd.read_csv(workspace / "data" / "train.csv")
+    train["label"] = np.where(train["target"] == 1, "yes", "no")
+    train.to_csv(workspace / "data" / "train_str.csv", index=False)
+    rng = np.random.default_rng(2)
+    led = Ledger(workspace)
+    ids = [led.log(n, 0.8, oof=1 / (1 + np.exp(-(train["target"] + rng.normal(0, 1, len(train))))),
+                   test_pred=rng.random(300))["id"] for n in ("s1", "s2")]
+    r = run(["blend", "--exp", *ids, "--truth", "data/train_str.csv:label"], workspace, plugin_root)
+    assert "no=0, yes=1" in r.stdout and "blended OOF auc" in r.stdout

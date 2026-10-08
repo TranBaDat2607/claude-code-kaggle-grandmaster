@@ -110,7 +110,14 @@ def fit(model, kind, X_tr, y_tr, X_va, y_va, cats, es):
     if kind == "lgbm":
         import lightgbm as lgb
 
-        model.fit(X_tr, y_tr, eval_set=[(X_va, y_va)], callbacks=[lgb.early_stopping(es, verbose=False)])
+        import inspect
+
+        # LightGBM >= 4.7 renamed eval_set to eval_X/eval_y; Kaggle images may ship older versions
+        if "eval_X" in inspect.signature(model.fit).parameters:
+            evals = dict(eval_X=(X_va,), eval_y=(y_va,))
+        else:
+            evals = dict(eval_set=[(X_va, y_va)])
+        model.fit(X_tr, y_tr, callbacks=[lgb.early_stopping(es, verbose=False)], **evals)
         return model, getattr(model, "best_iteration_", None)
     if kind == "xgb":
         model.set_params(early_stopping_rounds=es)
