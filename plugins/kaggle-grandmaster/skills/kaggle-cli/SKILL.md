@@ -30,7 +30,7 @@ kaggle competitions leaderboard <slug> --show         # top of public LB; --down
 Submission messages should always contain the ledger experiment id and CV so the LB score can be
 attached back (`python -m kgkit ledger lb <id> <score>`). Code competitions: submit via the
 notebook: `kaggle competitions submit <slug> -k <user>/<kernel> -v <version> -f submission.csv -m "..."`
-(CLI ≥ 1.6; verified against 2.x), or through the website.
+(verified against Kaggle CLI 2.2), or through the website.
 
 ## Notebooks (kernels)
 
