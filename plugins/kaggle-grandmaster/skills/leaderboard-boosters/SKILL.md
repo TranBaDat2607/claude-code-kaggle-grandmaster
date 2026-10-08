@@ -15,7 +15,10 @@ Apply these only once validation is trustworthy — each one can silently leak.
 **Leak-safe protocol:** pseudo-label only *test / unlabelled* data, add the same PL set to every
 fold's training data, and keep validation folds pure (real labels only). Never pseudo-label
 training rows with predictions from a model that saw their validation fold — that leaks the
-validation labels back into training and inflates CV. Gains are largest when test is big relative to train or domain-shifted.
+validation labels back into training and inflates CV. Strictest variant: for fold k, use test
+pseudo-labels produced only by models that never trained on fold k (e.g. the fold-k model's own
+test predictions) — ensemble PLs from all-fold models carry a little fold-k information and
+slightly inflate CV. Gains are largest when test is big relative to train or domain-shifted.
 Soft labels + a weight < 1 for PL samples is usually safer than hard thresholds.
 
 ## Knowledge distillation
