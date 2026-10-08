@@ -127,3 +127,51 @@ def test_image_template_tiny(tmp_path, plugin_root):
     assert rec["name"] == "r18" and len(rec["fold_scores"]) == 3
     res = validate_submission(tmp_path / rec["submission"], tmp_path / "data" / "sample_submission.csv")
     assert res["ok"], res
+
+
+def _tiny_local_bert(path):
+    """Build a tiny BERT + word-level tokenizer on disk (no network)."""
+    from tokenizers import Tokenizer, models, pre_tokenizers
+    from transformers import BertConfig, BertModel, PreTrainedTokenizerFast
+
+    vocab = {t: i for i, t in enumerate(["[PAD]", "[UNK]", "[CLS]", "[SEP]", "good", "bad", "movie", "very",
+                                          "plot", "the", "was", "not"])}
+    tk = Tokenizer(models.WordLevel(vocab=vocab, unk_token="[UNK]"))
+    tk.pre_tokenizer = pre_tokenizers.Whitespace()
+    fast = PreTrainedTokenizerFast(tokenizer_object=tk, unk_token="[UNK]", pad_token="[PAD]", cls_token="[CLS]",
+                                   sep_token="[SEP]")
+    fast.save_pretrained(path)
+    cfg = BertConfig(vocab_size=len(vocab), hidden_size=32, num_hidden_layers=2, num_attention_heads=2,
+                     intermediate_size=64, max_position_embeddings=64)
+    BertModel(cfg).save_pretrained(path)
+
+
+@pytest.mark.skipif(importlib.util.find_spec("transformers") is None or importlib.util.find_spec("tokenizers") is None,
+                    reason="needs transformers + tokenizers")
+def test_transformer_template_tiny(tmp_path, plugin_root):
+    rng = np.random.default_rng(0)
+    words = ["good", "bad", "movie", "very", "plot", "the", "was", "not"]
+    rows = []
+    for i in range(120):
+        toks = list(rng.choice(words, size=8))
+        rows.append({"id": i, "text": " ".join(toks), "score": toks.count("good") - toks.count("bad")})
+    df = pd.DataFrame(rows)
+    (tmp_path / "data").mkdir()
+    df.iloc[:100].to_csv(tmp_path / "data" / "train.csv", index=False)
+    df.iloc[100:].drop(columns="score").to_csv(tmp_path / "data" / "test.csv", index=False)
+    pd.DataFrame({"id": df["id"].iloc[100:], "score": 0.0}).to_csv(tmp_path / "data" / "sample_submission.csv", index=False)
+    _tiny_local_bert(tmp_path / "tinybert")
+    _run(["-m", "kgkit", "init", "nlp", "--metric", "rmse", "--target", "score", "--id-col", "id"], tmp_path, plugin_root)
+    _run(["-m", "kgkit", "folds", "data/train.csv", "--target", "score", "--id-col", "id", "--n-splits", "2",
+          "--out", "data/folds.csv"], tmp_path, plugin_root)
+    (tmp_path / "src").mkdir(exist_ok=True)
+    src = (plugin_root / "templates" / "train_transformer.py").read_text(encoding="utf-8")
+    (tmp_path / "src" / "train_transformer.py").write_text(src.replace("num_workers=2", "num_workers=0"), encoding="utf-8")
+    args = ["src/train_transformer.py", "--model", "tinybert", "--max-len", "16", "--batch-size", "8", "--lr", "1e-3"]
+    assert "smoke run OK" in _run([*args, "--smoke"], tmp_path, plugin_root)
+    _run([*args, "--epochs", "4", "--name", "tiny"], tmp_path, plugin_root)
+    rec = Ledger(tmp_path).records()[-1]
+    assert rec["name"] == "tiny" and len(rec["fold_scores"]) == 2
+    assert rec["cv"] < df["score"].std()  # learned something beyond predicting the mean
+    res = validate_submission(tmp_path / rec["submission"], tmp_path / "data" / "sample_submission.csv")
+    assert res["ok"], res
