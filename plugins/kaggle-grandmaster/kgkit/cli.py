@@ -227,6 +227,12 @@ def cmd_blend(a):
     for e, o in oofs.items():
         if len(o) != len(y):
             raise SystemExit(f"OOF of {e} has {len(o)} rows but truth has {len(y)}")
+    hashes = {e: led.get(e).get("folds_hash") for e in a.exp}
+    if len({h for h in hashes.values() if h}) > 1:
+        print("WARNING: members were trained on DIFFERENT fold splits: "
+              + ", ".join(f"{e}={h}" for e, h in hashes.items())
+              + "\n  Blend weights fit on mismatched OOFs leak held-out labels into the level-2 fit, so nested/"
+                "stacked scores are optimistic. Re-run members on the shared folds, or keep the blend simple.\n")
     print("OOF correlation:\n" + E.oof_correlation(oofs).round(4).to_string() + "\n")
     if a.method == "hill":
         res = E.hill_climb(oofs, y, metric, allow_negative=a.allow_negative)

@@ -17,6 +17,7 @@ Only the ledger (not the artefacts) should be committed to git.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import random
@@ -126,8 +127,11 @@ class Ledger:
         test_pred: np.ndarray | None = None,
         tags: Sequence[str] = (),
         metric: str | None = None,
+        folds: Sequence[int] | None = None,
         **extra,
     ) -> dict:
+        """Append an experiment. ``folds_hash`` fingerprints the CV split (from ``folds`` if given,
+        else the bytes of ``data/folds.csv``) so blends can detect members trained on different splits."""
         recs = self.records()
         num = 1 + max([int(r["id"].split("_")[0]) for r in recs if r["id"].split("_")[0].isdigit()] or [0])
         exp_id = f"{num:04d}_{_slug(name)}"
@@ -149,6 +153,7 @@ class Ledger:
             "lb_public": None,
             "lb_private": None,
             "submission": None,
+            "folds_hash": self._folds_hash(folds),
             **_git_info(self.root),
             **_jsonable(extra),
         }
@@ -165,6 +170,14 @@ class Ledger:
         with self.path.open("a", encoding="utf-8") as f:
             f.write(json.dumps(rec) + "\n")
         return rec
+
+    def _folds_hash(self, folds: Sequence[int] | None) -> str | None:
+        if folds is not None:
+            return hashlib.sha1(np.asarray(folds, dtype=np.int64).tobytes()).hexdigest()[:12]
+        f = self.root / "data" / "folds.csv"
+        if f.is_file():
+            return hashlib.sha1(f.read_bytes()).hexdigest()[:12]
+        return None
 
     def update(self, exp_id: str, **fields) -> dict:
         recs = self.records()

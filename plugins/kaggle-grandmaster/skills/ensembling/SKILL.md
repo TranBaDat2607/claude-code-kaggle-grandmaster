@@ -9,6 +9,16 @@ description: How Kaggle Grandmasters build ensembles — OOF management, diversi
 
 - Every candidate model has **OOF predictions on the same frozen folds** and **test
   predictions** averaged over its fold models — saved via `Ledger().log(oof=..., test_pred=...)`.
+  *Why it matters (be precise about the mechanism):* each OOF value is individually honest
+  whatever the split, but when splits differ, the level-1 models that produced the OOFs you use
+  to **fit** blend weights / a stacker on folds ≠ k were themselves trained on fold k's rows —
+  so fold k's labels leak into the level-2 fit, and nested blend scores and stacking CV become
+  optimistic. The leak is small for a plain average or a few hill-climbing weights, and grows with
+  meta-model flexibility (stacking, many weights, post-processing fit on the blend).
+  Remedy: regenerate OOFs on the shared folds (cheap models first); if impossible, keep
+  mismatched models to simple/low-degree-of-freedom blends and treat their blended CV as
+  optimistic. The ledger records a `folds_hash` per experiment and `kgkit blend` warns when
+  members' folds differ.
 - OOFs and test preds are on the same scale (probabilities vs logits vs ranks) and same row order.
 - The blend is scored with the exact competition metric.
 

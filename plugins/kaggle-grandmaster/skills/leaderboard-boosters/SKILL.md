@@ -12,13 +12,16 @@ Apply these only once validation is trustworthy — each one can silently leak.
 1. Train an ensemble; predict test (and/or external unlabelled data).
 2. Select confident predictions (or keep *soft* labels for all), add them to training.
 3. Retrain; repeat 1–3 rounds.
-**Leak-safe protocol:** pseudo-label only *test / unlabelled* data, add the same PL set to every
-fold's training data, and keep validation folds pure (real labels only). Never pseudo-label
-training rows with predictions from a model that saw their validation fold — that leaks the
-validation labels back into training and inflates CV. Strictest variant: for fold k, use test
-pseudo-labels produced only by models that never trained on fold k (e.g. the fold-k model's own
-test predictions) — ensemble PLs from all-fold models carry a little fold-k information and
-slightly inflate CV. Gains are largest when test is big relative to train or domain-shifted.
+**Leak-safe protocol:** pseudo-label only *test / unlabelled* data and keep validation folds pure
+(real labels only). For fold k, build the pseudo-labels with models that never trained on fold k —
+in practice the fold-k model's own test predictions (or an ensemble of fold-k models across seeds
+and architectures). The common shortcut — one PL set from the all-fold ensemble added to every
+fold — leaks: 4 of the 5 teachers learned fold k's labels and distil them into fold k's student
+through the pseudo-labels. No train/test duplicates are needed for this leak (near-duplicates make
+it much worse). Symptom: CV jumps far more than LB. If you use the shortcut anyway, judge the gain on
+LB or a clean holdout, never on that CV. Never pseudo-label *training* rows with predictions from a
+model that saw their validation fold. Gains are largest when test is big relative to train or
+domain-shifted.
 Soft labels + a weight < 1 for PL samples is usually safer than hard thresholds.
 
 ## Knowledge distillation

@@ -93,3 +93,17 @@ def test_ledger_best_respects_direction(tmp_path):
     assert led.best(1)[0]["name"] == "b"
     rec = json.loads((tmp_path / ".kaggle-gm" / "ledger.jsonl").read_text().splitlines()[0])
     assert rec["metric"] == "rmse"
+
+
+def test_blend_warns_on_mismatched_folds(workspace, plugin_root):
+    train = pd.read_csv(workspace / "data" / "train.csv")
+    y = train["target"].to_numpy()
+    rng = np.random.default_rng(1)
+    led = Ledger(workspace)
+    a = led.log("a", 0.8, oof=rng.random(len(y)), test_pred=rng.random(300), folds=np.arange(len(y)) % 5)
+    b = led.log("b", 0.8, oof=rng.random(len(y)), test_pred=rng.random(300), folds=(np.arange(len(y)) + 1) % 5)
+    assert a["folds_hash"] != b["folds_hash"]
+    r = run(["blend", "--exp", a["id"], b["id"], "--truth", "data/train.csv:target"], workspace, plugin_root)
+    assert "DIFFERENT fold splits" in r.stdout
+    c = led.log("c", 0.8)  # no explicit folds: fingerprint of data/folds.csv when present, else None
+    assert c["folds_hash"] is None or len(c["folds_hash"]) == 12
