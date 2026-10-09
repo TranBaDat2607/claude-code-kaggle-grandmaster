@@ -10,7 +10,7 @@
     {
       "name": "kaggle-grandmaster",
       "description": "Claude Code plugin for Kaggle competitions: turns Claude into a Grandmaster-level AI teammate with leak-free cross-validation, experiment tracking, tabular/vision/NLP/LLM/time-series playbooks, ensembling, code-competition kernels and final-submission selection.",
-      "version": "1.1.0",
+      "version": "1.2.0",
       "author": {
         "name": "Tran Ba Dat"
       },

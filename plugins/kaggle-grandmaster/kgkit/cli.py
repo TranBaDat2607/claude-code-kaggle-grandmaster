@@ -8,8 +8,13 @@ Commands
   adv         adversarial validation (train vs test)
   score       score a prediction column against a truth column with a registered metric
   metrics     list registered metrics
-  ledger      list | best | show | lb | add  — the experiment ledger
-  blend       hill-climb / weight-optimise / rank-average ledger experiments' OOFs and write a submission
+  ledger      list | best | show | lb | add | compare | decide | baseline | lineage | import
+  backlog     add | list | set | render | fidelity  — the ranked idea backlog
+  features    search  — generate and screen thousands of candidate features on the frozen folds
+  kernels     top | pull | review  — study and reproduce public notebooks
+  discussions sync | top | search | solutions | read  — competition forum via Meta Kaggle
+  recheck     re-draw the folds with a new seed, re-run old vs current pipeline: does the gain survive?
+  blend       hill / weights / rank / multi-level stack / residual stack over ledger OOFs + submission
   validate    validate a submission against sample_submission
   vendor      copy kgkit into a project or a Kaggle dataset folder (for offline kernels)
   gpu         quota | plan | build | push | status | wait | collect | log  — training on Kaggle GPUs
@@ -43,6 +48,39 @@ def _col(spec: str):
     if not path or (len(path) == 1 and path.isalpha()):  # windows drive letter, no column
         raise SystemExit(f"expected FILE:COLUMN, got {spec!r}")
     return _read(path)[col]
+
+
+def _truth(spec: str):
+    """Training target as a numpy array; string/bool labels become sorted-class codes (the template encoding)."""
+    import numpy as np
+    import pandas as pd
+
+    y_raw = _col(spec)
+    if pd.api.types.is_numeric_dtype(y_raw) and not pd.api.types.is_bool_dtype(y_raw):
+        return y_raw.to_numpy()
+    classes, y = np.unique(y_raw.astype(str).to_numpy(), return_inverse=True)
+    print("encoded truth labels: " + ", ".join(f"{c}={i}" for i, c in enumerate(classes)))
+    return y
+
+
+def _load_pred(led, ref: str, n: int | None):
+    """OOF of a ledger experiment, or of a per-fold artefact folder (artifacts/<name>/fold<k>_oof.npy +
+    fold<k>_idx.npy, e.g. an unassembled 1-fold screen) as a full-length array with NaN elsewhere."""
+    import numpy as np
+
+    d = Path(ref)
+    if d.is_dir() and list(d.glob("fold*_oof.npy")):
+        if n is None:
+            raise SystemExit(f"{ref}: --truth is needed to place per-fold predictions")
+        out = None
+        for f in sorted(d.glob("fold*_oof.npy")):
+            idx = np.load(f.with_name(f.name.replace("_oof.npy", "_idx.npy")))
+            p = np.load(f)
+            if out is None:
+                out = np.full((n, *p.shape[1:]), np.nan)
+            out[idx] = p
+        return out, ref
+    return led.load_oof(ref), led.get(ref)["id"]
 
 
 # ---------------------------------------------------------------------------- commands
@@ -120,6 +158,16 @@ def cmd_status(a):
     if recs:
         b = led.best(1)[0]
         print(f"best CV: {b['cv']:.5f} ({b['id']})")
+        base = led.baseline(fallback=False)
+        if base is not None:
+            print(f"accepted baseline: {base['cv']:.5f} ({base['id']}, {base.get('decision')}) - new ideas are "
+                  f"compared against this, not against the best CV")
+        else:
+            print("no accepted baseline yet: mark one with `kgkit ledger decide <id> baseline`")
+        n_dec = led.decisions_on_folds(led._folds_hash(None))
+        if n_dec >= 20:
+            print(f"{n_dec} keep/discard decisions taken on the current folds: the CV is getting optimistic. "
+                  "Re-check on a fresh fold seed: `kgkit recheck --seed 7 --run <old> --run <current> --exp <root> <baseline>`")
         with_lb = [r for r in recs if r.get("lb_public") is not None]
         if with_lb:
             bl = sorted(with_lb, key=lambda r: r["lb_public"], reverse=st.greater_is_better)[0]
@@ -129,6 +177,11 @@ def cmd_status(a):
             print(f"CV-LB correlation over {corr['n']} subs: pearson {corr['pearson']:.2f}, spearman {corr['spearman']:.2f}")
         print()
         print(led.table(a.n))
+    from .backlog import Backlog
+
+    top = Backlog(root).ranked()[:3]
+    if top:
+        print("\ntop of the backlog: " + "; ".join(f"#{i['id']} {i['idea'][:60]}" for i in top))
 
 
 def cmd_folds(a):
@@ -140,6 +193,13 @@ def cmd_folds(a):
     df["fold"] = folds
     keep = [c for c in [a.id_col] if c and c in df.columns] + ["fold"]
     df[keep].to_csv(a.out, index=False)
+    from . import state as S
+
+    root = S.find_root()
+    if root is not None:  # remember how the split was made, so `kgkit recheck` can re-draw it with another seed
+        spec = {"train": a.train, "strategy": a.strategy, "target": a.target, "group": a.group,
+                "n_splits": a.n_splits, "seed": a.seed, "id_col": a.id_col, "out": a.out}
+        (root / S.STATE_DIR / "folds_spec.json").write_text(json.dumps(spec, indent=1), encoding="utf-8")
     print(fold_report(df, "fold", target=target if isinstance(target, str) else None, group=a.group))
     print(f"\nwrote {a.out} ({len(df)} rows, strategy={a.strategy}, seed={a.seed})")
 
@@ -212,8 +272,121 @@ def cmd_ledger(a):
     elif a.action == "add":
         if len(a.args) < 2:
             raise SystemExit("usage: ledger add <name> <cv> [notes]")
-        r = led.log(a.args[0], float(a.args[1]), notes=" ".join(a.args[2:]))
+        r = led.log(a.args[0], float(a.args[1]), notes=" ".join(a.args[2:]), parent=a.parent)
         print(f"logged {r['id']}")
+    elif a.action == "compare":
+        _ledger_compare(led, a)
+    elif a.action == "decide":
+        if len(a.args) < 2:
+            raise SystemExit("usage: ledger decide <exp_id> baseline|keep|discard|inconclusive [note] [--parent ID]")
+        r = led.decide(a.args[0], a.args[1], " ".join(a.args[2:]), parent=a.parent)
+        print(f"{r['id']}: {r['decision']}" + (f" (vs {r['parent']})" if r.get("parent") else ""))
+        if r["decision"] in ("keep", "baseline"):
+            print(f"accepted baseline is now {r['id']} (CV {r['cv']:.5f})")
+    elif a.action == "baseline":
+        r = led.baseline()
+        if r is None:
+            print("(ledger is empty)")
+        else:
+            src = r.get("decision") if r.get("decision") in ("keep", "baseline") else "highest CV - nothing accepted yet"
+            print(f"{r['id']}  CV {r['cv']:.5f}  [{src}]")
+    elif a.action == "lineage":
+        chain = led.lineage(a.args[0] if a.args else led.baseline()["id"])
+        prev = None
+        for r in chain:
+            d = f"{r['cv'] - prev:+.5f}" if prev is not None else "root"
+            print(f"{r['id']:40s} CV {r['cv']:.5f} ({d})  {r.get('decision') or '-':12s} "
+                  f"{(r.get('decision_note') or r.get('notes') or '')[:60]}")
+            prev = r["cv"]
+        if len(chain) > 2:
+            print("\nreverse ablation: re-test removing each marginal KEEP above from the current baseline; "
+                  "small gains decided on the same folds can be noise that compounded.")
+    elif a.action == "import":
+        import numpy as np
+
+        if len(a.args) < 2:
+            raise SystemExit("usage: ledger import <name> <oof.npy|FILE:COLUMN> [--test test.npy|FILE:COLUMN] "
+                             "[--truth FILE:COL --folds FILE:COL | --cv X] [--source teammate|notebook]")
+
+        def arr(spec):
+            return np.load(spec) if spec.endswith(".npy") else _col(spec).to_numpy()
+
+        y = _truth(a.truth) if a.truth else None
+        folds = _col(a.folds).to_numpy() if a.folds else None
+        r = led.import_preds(a.args[0], arr(a.args[1]), arr(a.test) if a.test else None, y_true=y, folds=folds,
+                             cv=a.cv, notes=a.notes or "", source=a.source)
+        print(f"logged {r['id']}: CV {r['cv']:.5f}" + (f" +/- {r['cv_std']:.5f}" if r.get("cv_std") else "")
+              + f" [{a.source}]")
+
+
+def _ledger_compare(led, a):
+    import numpy as np
+
+    from . import metrics as M
+    from . import state as S
+    from .compare import compare_folds, format_comparison, paired_bootstrap, verdict
+
+    if len(a.args) < 1:
+        raise SystemExit("usage: ledger compare <new> [baseline] [--truth FILE:COL] [--folds FILE:COL] "
+                         "[--fold K] [--groups FILE:COL]   (baseline defaults to the accepted baseline)")
+    st = S.load()
+    if len(a.args) > 1:
+        base_ref = a.args[1]
+    else:
+        base = led.baseline()
+        if base is None:
+            raise SystemExit("the ledger is empty: nothing to compare against")
+        base_ref = base["id"]
+    for ref in (a.args[0], base_ref):
+        if not Path(ref).is_dir():
+            led.get(ref)  # fail early on a typo
+    if not Path(a.args[0]).is_dir() and not Path(base_ref).is_dir():
+        ha, hb = led.get(a.args[0]).get("folds_hash"), led.get(base_ref).get("folds_hash")
+        if led.get(a.args[0])["id"] == led.get(base_ref)["id"]:
+            raise SystemExit(f"{base_ref} is both the new experiment and the baseline (no accepted baseline yet? "
+                             "pass the baseline explicitly, or `ledger decide <id> baseline`)")
+        if ha and hb and ha != hb:
+            print("WARNING: the two experiments used different fold splits - the per-fold pairing is not valid; "
+                  "only the OOF bootstrap (with --truth) is meaningful")
+    y = _truth(a.truth) if a.truth else None
+    n = len(y) if y is not None else None
+    metric_name = a.metric or (st.metric if st else None)
+    gib = st.greater_is_better if st else True
+    folds_res = boot = None
+    if y is None:
+        if Path(a.args[0]).is_dir() or Path(base_ref).is_dir():
+            raise SystemExit("artifact folders have no stored fold scores: pass --truth FILE:COL --folds FILE:COL")
+        ra, rb = led.get(a.args[0]), led.get(base_ref)
+        if not (ra.get("fold_scores") and rb.get("fold_scores")) or len(ra["fold_scores"]) != len(rb["fold_scores"]):
+            raise SystemExit("no comparable fold_scores in the ledger: pass --truth (and --folds) to compare OOFs")
+        folds_res = compare_folds(ra["fold_scores"], rb["fold_scores"], gib)
+        new_id, base_id = ra["id"], rb["id"]
+    else:
+        if not metric_name:
+            raise SystemExit("--metric required (no competition state found)")
+        m = M.get(metric_name)
+        gib = m.greater_is_better
+        pa, new_id = _load_pred(led, a.args[0], n)
+        pb, base_id = _load_pred(led, base_ref, n)
+        ok = ~np.isnan(pa.reshape(n, -1)).any(1) & ~np.isnan(pb.reshape(n, -1)).any(1)
+        folds = _col(a.folds).to_numpy() if a.folds else None
+        if a.fold is not None:
+            if folds is None:
+                raise SystemExit("--fold needs --folds FILE:COL")
+            ok &= folds == a.fold
+        if folds is not None:
+            ks = [k for k in sorted(set(folds[ok & (folds >= 0)].tolist()))]
+            if len(ks) >= 2:
+                fa = [m(y[ok & (folds == k)], pa[ok & (folds == k)]) for k in ks]
+                fb = [m(y[ok & (folds == k)], pb[ok & (folds == k)]) for k in ks]
+                folds_res = compare_folds(fa, fb, gib)
+        if m.kind == "label":
+            print(f"note: {m.name} scores labels; OOFs are compared as stored (decode them first if they are "
+                  "probabilities)")
+        groups = _col(a.groups).to_numpy() if a.groups else None
+        boot = paired_bootstrap(y, pa, pb, m.name, n_boot=a.boot, groups=groups, mask=ok)
+    print(format_comparison(new_id, base_id, verdict(folds_res, boot)))
+    print(f"\nrecord it: python -m kgkit ledger decide {new_id} keep|discard|inconclusive \"<why>\" --parent {base_id}")
 
 
 def cmd_blend(a):
@@ -230,13 +403,14 @@ def cmd_blend(a):
     metric = a.metric or (st.metric if st else None)
     if not metric:
         raise SystemExit("--metric required (no competition state found)")
-    y_raw = _col(a.truth)
-    if pd.api.types.is_numeric_dtype(y_raw) and not pd.api.types.is_bool_dtype(y_raw):
-        y = y_raw.to_numpy()
-    else:  # string / bool labels: sorted-class codes, the same encoding the training templates use
-        classes, y = np.unique(y_raw.astype(str).to_numpy(), return_inverse=True)
-        print("encoded truth labels: " + ", ".join(f"{c}={i}" for i, c in enumerate(classes)))
+    y = _truth(a.truth)  # string / bool labels: sorted-class codes, the same encoding the training templates use
     oofs = {e: led.load_oof(e) for e in a.exp}
+    if a.prune:
+        pr = E.prune_library(oofs, y, metric, max_models=a.prune, corr_threshold=a.corr_threshold)
+        for n, why in pr["dropped"].items():
+            print(f"pruned {n}: {why}")
+        oofs = {e: oofs[e] for e in pr["kept"]}
+        a.exp = pr["kept"]
     for e, o in oofs.items():
         if len(o) != len(y):
             raise SystemExit(f"OOF of {e} has {len(o)} rows but truth has {len(y)}")
@@ -246,7 +420,33 @@ def cmd_blend(a):
               + ", ".join(f"{e}={h}" for e, h in hashes.items())
               + "\n  Blend weights fit on mismatched OOFs leak held-out labels into the level-2 fit, so nested/"
                 "stacked scores are optimistic. Re-run members on the shared folds, or keep the blend simple.\n")
-    print("OOF correlation:\n" + E.oof_correlation(oofs).round(4).to_string() + "\n")
+    if len(oofs) <= 25:
+        print("OOF correlation:\n" + E.oof_correlation(oofs).round(4).to_string() + "\n")
+    if a.method in ("stack", "residual"):
+        if not a.folds:
+            raise SystemExit(f"--method {a.method} needs --folds FILE:COLUMN (meta-models are fit out-of-fold)")
+        folds = _col(a.folds).to_numpy()
+        tests = {e: led.load_test(e) for e in oofs}
+        if a.method == "stack":
+            res = E.multi_level_stack(oofs, tests, y, folds, metric, n_layers=a.levels)
+            for i, ls in enumerate(res["layer_scores"], start=2):
+                print(f"level {i}: " + ", ".join(f"{k}={v:.6f}" for k, v in ls.items()))
+            print(f"final blend of the last level: " + ", ".join(f"{k}={v:.3f}" for k, v in res["weights"].items()))
+            params = {"method": "stack", "levels": a.levels + 1, "members": list(oofs), "final_weights": res["weights"]}
+        else:
+            base = a.base or max(oofs, key=lambda e: M.score(metric, y, oofs[e]) * (1 if M.get(metric).greater_is_better else -1))
+            res = E.residual_stack(oofs, tests, y, folds, base=base)
+            print(f"residual stack on base {base}: base OOF {M.score(metric, y, oofs[base]):.6f}")
+            params = {"method": "residual", "base": base, "members": list(oofs)}
+        score = M.score(metric, y, res["oof"])
+        print(f"meta OOF {metric}: {score:.6f} (out-of-fold; stacking on the same folds is still slightly optimistic)")
+        if res.get("final_honest") is not None:
+            print(f"honest (nested) final-blend {metric}: {res['final_honest']:.6f}")
+        rec = led.log(a.name, score, model="blend", params=params, oof=res["oof"], test_pred=res["test"],
+                      notes=f"{a.method} of {', '.join(oofs)}", metric=metric)
+        print(f"logged {rec['id']}")
+        _write_blend_sub(led, rec, res["test"], a)
+        return
     if a.method == "hill":
         res = E.hill_climb(oofs, y, metric, allow_negative=a.allow_negative)
     elif a.method == "weights":
@@ -267,6 +467,13 @@ def cmd_blend(a):
     rec = led.log(a.name, res["score"], model="blend", params={"weights": res["weights"], "method": a.method},
                   oof=blended_oof, test_pred=blended_test, notes=f"blend of {', '.join(a.exp)}", metric=metric)
     print(f"logged {rec['id']}")
+    _write_blend_sub(led, rec, blended_test, a)
+
+
+def _write_blend_sub(led, rec, blended_test, a):
+    import numpy as np
+    import pandas as pd
+
     if a.sample:
         sub = pd.read_csv(a.sample)
         cols = [c for c in sub.columns[1:]] if not a.pred_cols else a.pred_cols.split(",")
@@ -280,6 +487,187 @@ def cmd_blend(a):
         sub.to_csv(out, index=False)
         led.update(rec["id"], submission=str(out))
         print(f"wrote {out}")
+
+
+def cmd_backlog(a):
+    from .backlog import Backlog
+
+    bl = Backlog()
+    if a.action == "add":
+        if not a.args:
+            raise SystemExit('usage: backlog add "<idea>" --gain 1-5 --prob 0-1 --cost HOURS [--evidence ..] [--source ..]')
+        i = bl.add(" ".join(a.args), gain=a.gain or 2, prob=a.prob if a.prob is not None else 0.3,
+                   cost=a.cost or 1, evidence=a.evidence or "", source=a.source or "",
+                   first_experiment=a.first_experiment or "")
+        print(f"#{i['id']} {i['idea']} (status {i['status']})")
+    elif a.action == "list":
+        print(bl.table(include_closed=a.all, n=a.n))
+    elif a.action == "set":
+        if not a.args:
+            raise SystemExit("usage: backlog set <id> [--status ..] [--exp ID] [--result ..] [--screen-gain X] [--full-gain Y]")
+        i = bl.set(int(a.args[0]), exp=a.exp, status=a.status, result=a.result, gain=a.gain, prob=a.prob,
+                   cost=a.cost, evidence=a.evidence, screen_gain=a.screen_gain, full_gain=a.full_gain)
+        print(f"#{i['id']} {i['idea']} -> {i['status']}" + (f": {i['result']}" if i.get("result") else ""))
+    elif a.action == "render":
+        print(f"wrote {bl.render(a.out)}")
+    elif a.action == "fidelity":
+        f = bl.fidelity()
+        if f is None:
+            print("need >= 3 ideas with both --screen-gain and --full-gain recorded")
+        else:
+            print(f"screens vs full CV over {f['n']} ideas: sign agreement {f['sign_agreement']:.0%}, "
+                  f"spearman {f['spearman']:.2f}")
+            if f["sign_agreement"] < 0.7 or f["spearman"] < 0.5:
+                print("screens are a poor proxy here: screen on 2 folds, at closer-to-final resolution/epochs, "
+                      "or with 2 seeds before promoting")
+
+
+def cmd_features(a):
+    import numpy as np
+    import pandas as pd
+
+    from . import featsearch as FS
+    from . import state as S
+
+    st = S.load()
+    train = _read(a.train)
+    target = a.target or (st.target if st else None)
+    if not target:
+        raise SystemExit("--target required")
+    y = _truth(f"{a.train}:{target}") if not a.truth else _truth(a.truth)
+    folds = _col(a.folds).to_numpy()
+    test = _read(a.test) if a.test else None
+    id_col = a.id_col or (st.id_col if st else None)
+    drop = {target, id_col, "fold"} | set((a.drop or "").split(","))
+    cols = [c for c in train.columns if c not in drop]
+    is_num = {c: pd.api.types.is_numeric_dtype(train[c]) and not pd.api.types.is_bool_dtype(train[c]) for c in cols}
+    # integer columns with few distinct values are usually codes: use them as group keys too (they stay numeric)
+    int_codes = [c for c in cols if is_num[c] and train[c].nunique() <= 200
+                 and np.allclose(train[c].dropna() % 1, 0)]
+    cats = a.cat.split(",") if a.cat else [c for c in cols if not is_num[c]] + int_codes
+    nums = a.num.split(",") if a.num else [c for c in cols if is_num[c]]
+    print(f"categorical keys: {', '.join(cats) or '-'}\nnumeric: {', '.join(nums) or '-'}  (override with --cat/--num)")
+    metric = a.metric or (st.metric if st else None)
+    if not metric:
+        raise SystemExit("--metric required (no competition state found)")
+    specs = FS.generate_specs(cats, nums, kinds=a.kinds.split(","), aggs=a.aggs.split(","),
+                              max_candidates=a.max_candidates, seed=a.seed)
+    print(f"{len(specs)} candidates from {len(cats)} categorical x {len(nums)} numeric columns")
+    recheck = None
+    if a.recheck_seed is not None:
+        from .cv import assign_folds
+
+        k = len(set(folds[folds >= 0].tolist()))
+        df = pd.DataFrame({"__y": y, "__g": train[a.group].to_numpy() if a.group else 0})
+        recheck = assign_folds(df, k, "auto", target="__y", group="__g" if a.group else None, seed=a.recheck_seed)
+        if (recheck == folds).all():
+            print("WARNING: the recheck split equals the screening split (deterministic splitter); recheck skipped")
+            recheck = None
+    res = FS.feature_search(train, y, folds, cats, nums, metric, base_cols=list(dict.fromkeys(cats + nums)),
+                            test=test, specs=specs,
+                            batch_size=a.batch, max_batches=a.max_batches,
+                            screen_folds=[int(x) for x in a.screen_folds.split(",")] if a.screen_folds else None,
+                            model=a.model, time_budget_s=a.minutes * 60 if a.minutes else None,
+                            recheck_folds=recheck, seed=a.seed)
+    out = FS.save_specs(a.out, res)
+    md = Path(a.out).with_suffix(".md")
+    md.write_text(FS.report(res), encoding="utf-8")
+    print(FS.report(res).split("## Kept features")[0])
+    print(f"wrote {out} and {md}")
+
+
+def cmd_kernels(a):
+    from . import kernels as K
+    from . import state as S
+
+    st = S.load()
+    slug = a.competition or (st.slug if st else None)
+    if a.action == "top":
+        if not slug:
+            raise SystemExit("--competition required (no competition state found)")
+        rows = K.top(slug, a.n, a.sort_by)
+        for r in rows:
+            print(f"{r.get('totalVotes', ''):>5}  {r.get('ref', '')}  |  {r.get('title', '')}  ({r.get('lastRunTime', '')})")
+        print("\nnext: python -m kgkit kernels pull <ref>   (review + local script under ref/)")
+    elif a.action in ("pull", "review"):
+        if not a.ref:
+            raise SystemExit(f"usage: kernels {a.action} <owner/slug>")
+        if a.action == "pull":
+            rev = K.pull(a.ref, a.dest, slug, check_access=a.check_access)
+        else:
+            rev = K.analyse_dir(Path(a.dest) / a.ref.split("/")[-1], a.ref, slug, check_access=a.check_access)
+        print((Path(rev["dir"]) / "REVIEW.md").read_text(encoding="utf-8"))
+        print(f"local script: {rev['dir']}/{a.ref.split('/')[-1]}_local.py")
+
+
+def cmd_discussions(a):
+    import pandas as pd
+
+    from . import discussions as D
+    from . import state as S
+
+    st = S.load()
+    slug = a.competition or (st.slug if st else None)
+    if not slug:
+        raise SystemExit("--competition required (no competition state found)")
+    root = S.find_root()
+    idx_path = (root / "reports" if root else Path("reports")) / (
+        "discussions.csv" if not a.competition or (st and a.competition == st.slug) else f"discussions_{slug}.csv")
+    if a.action == "sync":
+        files = ["Competitions.csv", "ForumTopics.csv"] + (["ForumMessages.csv"] if a.messages else [])
+        d = D.ensure(files, max_age_days=a.max_age, force=a.force)
+        comp = D.competition_row(slug, d)
+        t = D.index(slug, d)
+        idx_path.parent.mkdir(parents=True, exist_ok=True)
+        t.to_csv(idx_path, index=False)
+        print(f"{slug}: {len(t)} topics -> {idx_path} (Meta Kaggle cache {d})")
+        f = D.facts(comp)
+        if f:
+            print("facts: " + f)
+        print("\nmost voted:\n" + D.format_table(D.top(t, min(a.n, 10), "votes")))
+        return
+    if a.action == "read":
+        if not a.query:
+            raise SystemExit("usage: discussions read <topic_id>")
+        tid = int(a.query)
+        url = f"https://www.kaggle.com/competitions/{slug}/discussion/{tid}"
+        try:
+            msgs = D.read_thread(tid)
+        except FileNotFoundError:
+            print(f"ForumMessages.csv is not cached (run `discussions sync --messages`, ~1.8 GB once).\nRead it at {url}")
+            return
+        if not msgs:
+            print(f"topic {tid} not in the cached export (newer than the last daily refresh?). Read it at {url}")
+            return
+        for m in msgs[: a.n if a.n else None]:
+            medal = f" [medal {int(m['Medal'])}]" if pd.notna(m.get("Medal")) and m.get("Medal") else ""
+            print(f"--- {m.get('PostDate')}{medal}\n{m['text'][:a.max_chars]}\n")
+        print(url)
+        return
+    if idx_path.is_file():
+        t = pd.read_csv(idx_path, parse_dates=["Created"])
+    else:
+        t = D.index(slug, D.ensure(["Competitions.csv", "ForumTopics.csv"], max_age_days=a.max_age))
+    if a.action == "top":
+        out = D.top(t, a.n, a.sort)
+    elif a.action == "search":
+        if not a.query:
+            raise SystemExit('usage: discussions search "<regex>"')
+        out = D.search(t, a.query).head(a.n)
+    else:  # solutions
+        out = D.solutions(t).head(a.n)
+        if out.empty:
+            print("no write-up threads found (competition still running, or write-ups not in the export yet)")
+            return
+    print(D.format_table(out))
+    print("\nread one: python -m kgkit discussions read <id>   (or WebFetch its URL: "
+          f"https://www.kaggle.com/competitions/{slug}/discussion/<id>)")
+
+
+def cmd_recheck(a):
+    from .recheck import main_recheck
+
+    main_recheck(a)
 
 
 def cmd_validate(a):
@@ -414,16 +802,116 @@ def build_parser() -> argparse.ArgumentParser:
     s.set_defaults(fn=cmd_metrics)
 
     s = sub.add_parser("ledger", help="experiment ledger")
-    s.add_argument("action", choices=["list", "best", "show", "lb", "add"])
+    s.add_argument("action", choices=["list", "best", "show", "lb", "add", "compare", "decide", "baseline", "lineage",
+                                      "import"])
     s.add_argument("args", nargs="*")
     s.add_argument("-n", type=int, default=15)
+    s.add_argument("--parent", help="baseline experiment this one was compared against")
+    s.add_argument("--truth", help="FILE:COLUMN training target (compare: paired bootstrap on OOFs; import: CV)")
+    s.add_argument("--folds", help="FILE:COLUMN fold ids (per-fold paired scores; import: fold scores)")
+    s.add_argument("--fold", type=int, help="compare: restrict to one fold (1-fold screens)")
+    s.add_argument("--groups", help="compare: FILE:COLUMN groups to resample whole (patients, sessions)")
+    s.add_argument("--boot", type=int, default=300, help="compare: bootstrap resamples")
+    s.add_argument("--metric")
+    s.add_argument("--test", help="import: test predictions (.npy or FILE:COLUMN)")
+    s.add_argument("--cv", type=float, help="import: reported CV when no --truth is given")
+    s.add_argument("--source", default="external", help="import: teammate | notebook | external")
+    s.add_argument("--notes")
     s.set_defaults(fn=cmd_ledger)
+
+    s = sub.add_parser("backlog", help="ranked idea backlog")
+    s.add_argument("action", choices=["add", "list", "set", "render", "fidelity"])
+    s.add_argument("args", nargs="*")
+    s.add_argument("--gain", type=float, help="expected gain 1-5 (1 = noise level, 5 = leak/new data scale)")
+    s.add_argument("--prob", type=float, help="probability it works, 0-1")
+    s.add_argument("--cost", type=float, help="hours of work + compute")
+    s.add_argument("--evidence")
+    s.add_argument("--source", help="error-analysis | eda | forum | notebook | prior-art | brainstorm | domain")
+    s.add_argument("--first-experiment")
+    s.add_argument("--status", choices=["todo", "running", "done", "dropped"])
+    s.add_argument("--exp", help="ledger id of an experiment testing this idea")
+    s.add_argument("--result")
+    s.add_argument("--screen-gain", type=float, help="gain measured by the cheap screen")
+    s.add_argument("--full-gain", type=float, help="gain measured by the full CV run")
+    s.add_argument("--all", action="store_true", help="list: include done/dropped")
+    s.add_argument("-n", type=int, default=30)
+    s.add_argument("--out", help="render: output path (default reports/backlog.md)")
+    s.set_defaults(fn=cmd_backlog)
+
+    s = sub.add_parser("features", help="automated feature search")
+    s.add_argument("action", choices=["search"])
+    s.add_argument("train")
+    s.add_argument("--folds", required=True, help="FILE:COLUMN fold ids, same row order as train")
+    s.add_argument("--target")
+    s.add_argument("--truth", help="FILE:COLUMN target if not a column of train")
+    s.add_argument("--test", help="test file (pooled for count / groupby statistics)")
+    s.add_argument("--id-col")
+    s.add_argument("--drop", help="comma-separated columns to ignore")
+    s.add_argument("--cat", help="categorical columns (default: non-numeric)")
+    s.add_argument("--num", help="numeric columns (default: numeric)")
+    s.add_argument("--kinds", default="cnt,te,grp,num2")
+    s.add_argument("--aggs", default="mean,std,nunique,diff_mean,rank")
+    s.add_argument("--metric")
+    s.add_argument("--batch", type=int, default=40)
+    s.add_argument("--max-candidates", type=int, default=3000)
+    s.add_argument("--max-batches", type=int)
+    s.add_argument("--minutes", type=float, help="time budget")
+    s.add_argument("--screen-folds", help="e.g. 0,1: screen on a subset of folds for speed")
+    s.add_argument("--model", default="auto", choices=["auto", "lgbm", "hgb"])
+    s.add_argument("--recheck-seed", type=int, help="re-check the kept set on folds re-drawn with this seed")
+    s.add_argument("--group", help="group column for the recheck split")
+    s.add_argument("--seed", type=int, default=0)
+    s.add_argument("--out", default="reports/featsearch.json")
+    s.set_defaults(fn=cmd_features)
+
+    s = sub.add_parser("discussions", help="competition forum via Meta Kaggle")
+    s.add_argument("action", choices=["sync", "top", "search", "solutions", "read"])
+    s.add_argument("query", nargs="?", help="search: regex on titles; read: topic id")
+    s.add_argument("--competition", help="default: competition.json slug (any slug works, e.g. a past competition)")
+    s.add_argument("-n", type=int, default=20)
+    s.add_argument("--sort", default="votes", choices=["votes", "recent", "replies", "views"])
+    s.add_argument("--messages", action="store_true", help="sync: also cache ForumMessages.csv (~1.8 GB) for `read`")
+    s.add_argument("--max-age", type=float, default=3, help="refresh cached files older than this many days")
+    s.add_argument("--force", action="store_true", help="re-download the cached files")
+    s.add_argument("--max-chars", type=int, default=4000, help="read: characters per message")
+    s.set_defaults(fn=cmd_discussions)
+
+    s = sub.add_parser("recheck", help="does the baseline's gain survive a re-drawn fold split?")
+    s.add_argument("--seed", type=int, default=7, help="seed for the re-drawn split")
+    s.add_argument("--run", action="append", default=[],
+                   help="shell command training one pipeline (old first, current last); runs with KG_FOLDS_FILE set")
+    s.add_argument("--existing", nargs=2, metavar=("OLD", "NEW"), help="use already-run recheck records instead of --run")
+    s.add_argument("--exp", nargs=2, metavar=("OLD", "NEW"), help="the same pipelines' records on the frozen split")
+    s.add_argument("--truth", help="FILE:COLUMN: add a paired OOF bootstrap")
+    s.add_argument("--metric")
+    s.add_argument("--boot", type=int, default=300)
+    s.add_argument("--strategy", help="override the recorded fold strategy (e.g. a seeded one)")
+    s.add_argument("--target")
+    s.add_argument("--group")
+    s.add_argument("--n-splits", type=int)
+    s.add_argument("--train")
+    s.add_argument("--id-col")
+    s.set_defaults(fn=cmd_recheck)
+
+    s = sub.add_parser("kernels", help="study and reproduce public notebooks")
+    s.add_argument("action", choices=["top", "pull", "review"])
+    s.add_argument("ref", nargs="?", help="owner/slug (pull, review)")
+    s.add_argument("--competition", help="default: competition.json slug")
+    s.add_argument("-n", type=int, default=20)
+    s.add_argument("--sort-by", default="voteCount", help="voteCount | scoreDescending | dateRun | hotness")
+    s.add_argument("--dest", default="ref")
+    s.add_argument("--check-access", action="store_true", help="check attached datasets are accessible")
+    s.set_defaults(fn=cmd_kernels)
 
     s = sub.add_parser("blend", help="blend ledger experiments")
     s.add_argument("--exp", nargs="+", required=True, help="experiment ids")
     s.add_argument("--truth", required=True, help="FILE:COLUMN with the training target, same row order as OOFs")
     s.add_argument("--metric")
-    s.add_argument("--method", choices=["hill", "weights", "rank"], default="hill")
+    s.add_argument("--method", choices=["hill", "weights", "rank", "stack", "residual"], default="hill")
+    s.add_argument("--levels", type=int, default=1, help="stack: number of meta-model layers before the final blend")
+    s.add_argument("--base", help="residual: the experiment whose errors stage 2 learns (default: best single)")
+    s.add_argument("--prune", type=int, help="keep at most N models, dropping near-duplicates (corr > threshold)")
+    s.add_argument("--corr-threshold", type=float, default=0.995)
     s.add_argument("--allow-negative", action="store_true")
     s.add_argument("--folds", help="FILE:COLUMN of fold ids for an honest nested blend score")
     s.add_argument("--name", default="blend")

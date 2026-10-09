@@ -1,6 +1,6 @@
 ---
 name: ensembling
-description: How Kaggle Grandmasters build ensembles — OOF management, diversity, averaging/rank/geometric blending, Caruana hill climbing, constrained weight optimisation, stacking with nested CV, multi-seed and multi-fold averaging, and avoiding blend overfitting. Use when combining models or when asked to squeeze the final points out of a leaderboard.
+description: How Kaggle Grandmasters build ensembles — OOF management, diversity, averaging/rank/geometric blending, Caruana hill climbing, constrained weight optimisation, stacking with nested CV, multi-level and residual stacking over large model libraries, library pruning, multi-seed and multi-fold averaging, and avoiding blend overfitting. Use when combining models or when asked to squeeze the final points out of a leaderboard.
 ---
 
 # Ensembling
@@ -43,7 +43,9 @@ at 0.85 correlation can add a lot.
 | **Hill climbing (Caruana)** with replacement | default; `python -m kgkit blend --method hill` |
 | Constrained weights (SLSQP, simplex) | smooth metrics (logloss/RMSE), few models |
 | Geometric mean / power average | probabilities for logloss; power>1 for AUC-ish sharpening |
-| Stacking (ridge/logistic/LightGBM meta on OOFs) | many models; potentially non-linear interactions; validate nested |
+| Stacking (ridge/logistic/shallow GBDT meta on OOFs) | many models; potentially non-linear interactions; `--method stack` |
+| Residual stacking | one strong model with systematic errors that other models or raw features can explain; `--method residual --base <id>` |
+| Multi-level stack + final hill climb | Playground-scale libraries (50–800 OOFs); `--method stack --levels 2` after `--prune` |
 
 `kgkit.ensemble.cv_blend_score` gives the **honest** blended score (weights fit on k−1 folds,
 scored on the held-out fold). If the honest score is much worse than the in-sample blend
@@ -51,10 +53,27 @@ score, you're overfitting the blend — use fewer models, simpler weights, or pl
 
 ## 3. Stacking
 
-- Level-1: OOFs of many models (+ optionally a few strong raw features / meta-features).
-- Level-2: Ridge / logistic regression (robust), or shallow LightGBM / small MLP; use the
+- Level-1: OOFs of many models (+ optionally a few strong raw features / meta-features, via
+  `kgkit.ensemble.stack(..., X_extra=...)`, so the meta-model can learn *where* each model is right).
+- Level-2: Ridge / logistic regression (robust), or shallow GBDT / small MLP; use the
   **same folds** to produce level-2 OOF; never fit level-2 on test-time predictions.
-- Multi-level stacking rarely pays except in very large Playground-style ensembles.
+- **Large libraries.** Playground winners now stack 100+ models in 3–4 levels (2026 churn: 150 of
+  850 experiments, 4 levels). Recipe:
+  1. `kgkit blend --exp <all> --prune 40` drops near-duplicates (OOF corr > 0.995 with a better
+     model). Duplicates only add weight-fitting noise.
+  2. `--method stack --levels 1`: a layer of [linear, shallow GBDT] meta-models on the same folds, then
+     a hill-climbed blend of that layer. Then try `--levels 2`.
+  3. Accept the deeper stack only if its *honest* final score (printed: blend weights fit on k−1 folds)
+     beats the shallower one by more than paired noise (`kgkit ledger compare`). Each level reuses the
+     same folds, so it adds a little optimism. A gain that appears only in the in-sample score is that
+     optimism.
+- **Residual stacking.** Instead of re-weighting everything, a stage-2 model learns the errors of one
+  strong base model from the other OOFs (+ raw features): `--method residual --base <id>`
+  (`kgkit.ensemble.residual_stack`). It is useful when error analysis shows a slice where another model is
+  right. For GBDT bases the equivalent is boosting from the base margin (`init_score`).
+- **Distillation of the stack**: one model trained on the stack's OOF/test predictions as soft targets
+  can match much of the stack at a fraction of the inference cost (`leaderboard-boosters`), which matters
+  in code competitions.
 
 ## 4. Post-blend steps
 
@@ -66,7 +85,12 @@ score, you're overfitting the blend — use fewer models, simpler weights, or pl
 
 - Blend weights must be learned on OOF, not on public LB. One or two LB probes to sanity-check
   a blend is fine; LB-tuned weights are a classic shake-up victim.
-- Prefer fewer, stronger, diverse models over a huge pile; prune models with ~0 weight.
+- With a handful of models, prefer fewer, stronger, diverse models over a pile and prune those with ~0
+  weight. With hundreds of logged experiments, keep the library: prune duplicates and let a stack +
+  honest scoring choose. Either way, save OOF + test predictions for *every* experiment, including
+  failed ones. A model that loses alone can still add to the blend.
+- Teammates' and public notebooks' predictions join through `kgkit ledger import` (CV recomputed on
+  the shared folds); see `competition-strategy` for the merge protocol.
 - Keep the blend reproducible: the ledger entry records weights and member experiment ids.
 - For code competitions, account for inference time of every member; drop the members with the
   worst (Δscore / runtime) ratio first.

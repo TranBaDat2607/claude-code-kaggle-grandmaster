@@ -14,6 +14,7 @@ from pathlib import Path
 PLUGIN_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PLUGIN_ROOT))
 
+from kgkit import backlog as B  # noqa: E402  (stdlib-only module)
 from kgkit import gpu as G  # noqa: E402  (stdlib-only module)
 from kgkit import state as S  # noqa: E402  (stdlib-only module)
 

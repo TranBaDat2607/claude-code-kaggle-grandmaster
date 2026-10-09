@@ -48,7 +48,20 @@ kaggle quota --format json                                    # weekly GPU/TPU q
 `kernel-metadata.json` keys: `id`, `title`, `code_file`, `language` (python), `kernel_type`
 (script|notebook), `is_private`, `enable_gpu`, `enable_tpu`, `enable_internet`, `machine_shape`
 (`NvidiaTeslaT4` = 2x T4, `NvidiaTeslaP100`, `Tpu1VmV38`; `--accelerator` overrides it),
-`dataset_sources`, `competition_sources`, `kernel_sources`, `model_sources`. The title must slugify
+`dataset_sources`, `competition_sources`, `kernel_sources`, `model_sources`.
+
+To *study* a public notebook, prefer `python -m kgkit kernels pull <owner>/<slug>`. It pulls the
+notebook with its metadata into `ref/<slug>/`, writes a `REVIEW.md` (CV scheme, model families, printed
+scores, external inputs, with `--check-access` testing that attached datasets are reachable) and a
+local script with Kaggle paths mapped to the workspace. `kgkit kernels top` lists the competition's top
+notebooks.
+
+## Discussions
+
+The CLI has no discussion commands. `python -m kgkit discussions sync|top|search|solutions|read` reads
+the forum from Meta Kaggle (`kaggle datasets download kaggle/meta-kaggle -f ForumTopics.csv`, Kaggle's
+official daily export; cached in `~/.kaggle-gm/meta-kaggle`). It works for any competition slug,
+including finished ones (`discussions solutions --competition <slug>` for write-ups). The title must slugify
 to the id's slug. `kaggle kernels output` pages through all output files (`--page-size 200` means fewer
 requests), and `--file-pattern <regex>` filters them, e.g. to skip weights.
 

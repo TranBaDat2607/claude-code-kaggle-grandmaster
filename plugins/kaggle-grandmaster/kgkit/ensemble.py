@@ -6,6 +6,8 @@ Rules of thumb that win competitions:
     :func:`oof_correlation`; > 0.98 correlated models add little.
   * Hill climbing (Caruana ensemble selection) is the robust default. Constrained
     weight optimisation is fine with few models. Stacking needs nested CV discipline.
+  * Large libraries (100s of OOFs): :func:`prune_library` first, then hill climbing or a
+    :func:`multi_level_stack`; :func:`residual_stack` lets a stage-2 model fix one strong model's errors.
   * For AUC / ranking metrics blend ranks, not raw probabilities, when models are
     calibrated differently.
   * Weights fit on full OOF are slightly optimistic; use :func:`cv_blend_score` to
@@ -212,8 +214,13 @@ def stack(
     meta_model=None,
     task: str = "auto",
     use_ranks: bool = False,
+    X_extra: np.ndarray | None = None,
+    X_extra_test: np.ndarray | None = None,
 ) -> dict:
     """Level-2 stacking on OOF predictions using the *same* folds.
+
+    ``X_extra`` / ``X_extra_test``: a few raw features appended to the meta inputs, so the
+    meta-model can learn *where* each model is trustworthy.
 
     The meta-model is refit per fold (meta-OOF for honest scoring) and test meta
     predictions are averaged over folds. Defaults: Ridge for regression,
@@ -233,6 +240,9 @@ def stack(
         return np.hstack(cols)
 
     X, Xt = mat(oofs), mat(tests)
+    if X_extra is not None:
+        X = np.hstack([X, np.asarray(X_extra, dtype=float).reshape(len(X), -1)])
+        Xt = np.hstack([Xt, np.asarray(X_extra_test, dtype=float).reshape(len(Xt), -1)])
     if task == "auto":
         task = "classification" if len(np.unique(y_true)) <= 20 and np.allclose(y_true % 1, 0) else "regression"
     if meta_model is None:
@@ -257,3 +267,154 @@ def stack(
         meta_oof[va] = pv
         meta_test += pt / len(fold_ids)
     return {"oof": meta_oof, "test": meta_test, "task": task}
+
+
+def prune_library(
+    oofs: Mapping[str, np.ndarray],
+    y_true,
+    metric: str | Callable,
+    greater_is_better: bool | None = None,
+    max_models: int = 40,
+    corr_threshold: float = 0.995,
+) -> dict:
+    """Shrink a library of hundreds of OOFs to a blendable set before hill climbing or stacking.
+
+    Models are visited best-first; a model is dropped when its OOF correlates above
+    ``corr_threshold`` with an already kept (better) model — a near-duplicate adds weight-fitting
+    noise, not information. Stops at ``max_models``. Returns {"kept": [...], "dropped": {name: reason}}.
+    """
+    fn, gib = _metric(metric, greater_is_better)
+    y_true = np.asarray(y_true)
+    singles = {n: fn(y_true, np.asarray(p)) for n, p in oofs.items()}
+    order = sorted(singles, key=singles.get, reverse=gib)
+    flat = {n: np.asarray(oofs[n], dtype=float).ravel() for n in order}
+    kept, dropped = [], {}
+    for n in order:
+        if len(kept) >= max_models:
+            dropped[n] = f"beyond max_models={max_models}"
+            continue
+        twin = next((k for k in kept if np.corrcoef(flat[n], flat[k])[0, 1] > corr_threshold), None)
+        if twin is not None:
+            dropped[n] = f"corr > {corr_threshold} with better model {twin}"
+            continue
+        kept.append(n)
+    return {"kept": kept, "dropped": dropped, "single_scores": {n: float(s) for n, s in singles.items()}}
+
+
+def _default_meta_models(task: str) -> list[tuple[str, object]]:
+    from sklearn.ensemble import HistGradientBoostingClassifier, HistGradientBoostingRegressor
+    from sklearn.linear_model import LogisticRegression, Ridge
+
+    if task == "classification":
+        return [("lin", LogisticRegression(C=1.0, max_iter=2000)),
+                ("gbm", HistGradientBoostingClassifier(max_depth=3, learning_rate=0.05, max_iter=200,
+                                                       l2_regularization=1.0, random_state=0))]
+    return [("lin", Ridge(alpha=1.0)),
+            ("gbm", HistGradientBoostingRegressor(max_depth=3, learning_rate=0.05, max_iter=200,
+                                                  l2_regularization=1.0, random_state=0))]
+
+
+def _infer_task(y_true) -> str:
+    y = np.asarray(y_true)
+    return "classification" if len(np.unique(y)) <= 20 and np.allclose(y % 1, 0) else "regression"
+
+
+def multi_level_stack(
+    oofs: Mapping[str, np.ndarray],
+    tests: Mapping[str, np.ndarray],
+    y_true,
+    folds,
+    metric: str,
+    n_layers: int = 1,
+    layers: list[list[tuple[str, object]]] | None = None,
+    passthrough: bool = False,
+    final: str = "hill_climb",
+    task: str = "auto",
+    use_ranks: bool = False,
+) -> dict:
+    """Stack of meta-model layers on the same folds, finished by a hill-climbed (or mean) blend.
+
+    Layer 1 sees the level-1 OOFs; each further layer sees the previous layer's meta-OOFs (plus the
+    level-1 OOFs with ``passthrough``). Default layer = [linear, shallow GBDT] — two views that
+    disagree usefully. This is the Playground-style deep stack (e.g. 3-4 levels over 100+ models);
+    every layer adds optimism, so accept a deeper stack only when its *honest* final score
+    (``final_honest``: blend weights fit on k-1 folds) beats the shallower one by more than noise.
+    """
+    from sklearn.base import clone
+
+    task = _infer_task(y_true) if task == "auto" else task
+    m = M.get(metric)
+    y_arr, f_arr = np.asarray(y_true), np.asarray(folds)
+    layers = layers or [_default_meta_models(task) for _ in range(max(1, n_layers))]
+    cur_oof, cur_test = dict(oofs), dict(tests)
+    trace = []
+    for li, layer in enumerate(layers, start=1):
+        nxt_oof, nxt_test = {}, {}
+        for name, est in layer:
+            res = stack(cur_oof, cur_test, y_true, folds, meta_model=clone(est), task=task, use_ranks=use_ranks)
+            key = f"L{li + 1}_{name}"
+            nxt_oof[key], nxt_test[key] = res["oof"], res["test"]
+        trace.append({k: float(m(y_arr[f_arr >= 0], v[f_arr >= 0])) for k, v in nxt_oof.items()})
+        if passthrough:
+            nxt_oof.update(oofs)
+            nxt_test.update(tests)
+        cur_oof, cur_test = nxt_oof, nxt_test
+    if final == "hill_climb":
+        weights = hill_climb(cur_oof, y_true, metric)["weights"]
+        honest = cv_blend_score(cur_oof, y_true, folds, metric)["oof_score"]
+    else:
+        weights = {k: 1 / len(cur_oof) for k in cur_oof}
+        honest = None
+    oof = blend(cur_oof, weights)
+    test = blend({k: cur_test[k] for k in weights}, weights)
+    return {"oof": oof, "test": test, "weights": weights, "layer_scores": trace,
+            "score": float(m(y_arr, oof)), "final_honest": honest, "task": task}
+
+
+def residual_stack(
+    oofs: Mapping[str, np.ndarray],
+    tests: Mapping[str, np.ndarray],
+    y_true,
+    folds,
+    base: str,
+    model=None,
+    X_extra: np.ndarray | None = None,
+    X_extra_test: np.ndarray | None = None,
+    shrink: float = 1.0,
+) -> dict:
+    """Residual stacking: a stage-2 model learns the errors of the ``base`` model from the other models'
+    OOFs (and optional raw features), out-of-fold on the same folds; prediction = base + shrink * residual.
+
+    For regression and binary probabilities (clipped to [0, 1]). It recovers structure the base model
+    systematically misses (a slice where another model is right) without re-weighting everything.
+    For GBDT bases, an equivalent alternative is boosting from the base margin (``init_score``).
+    """
+    from sklearn.base import clone
+    from sklearn.ensemble import HistGradientBoostingRegressor
+
+    y = np.asarray(y_true, dtype=float)
+    folds = np.asarray(folds)
+    b_oof, b_test = np.asarray(oofs[base], dtype=float), np.asarray(tests[base], dtype=float)
+    if b_oof.ndim != 1:
+        raise ValueError("residual stacking supports regression / binary (1-D predictions)")
+    names = list(oofs)
+    X = np.column_stack([np.asarray(oofs[n], dtype=float) for n in names])
+    Xt = np.column_stack([np.asarray(tests[n], dtype=float) for n in names])
+    if X_extra is not None:
+        X = np.hstack([X, np.asarray(X_extra, dtype=float).reshape(len(X), -1)])
+        Xt = np.hstack([Xt, np.asarray(X_extra_test, dtype=float).reshape(len(Xt), -1)])
+    model = model or HistGradientBoostingRegressor(max_depth=3, learning_rate=0.05, max_iter=200,
+                                                   l2_regularization=1.0, random_state=0)
+    r = y - b_oof
+    is_prob = set(np.unique(y)).issubset({0.0, 1.0}) and b_oof.min() >= 0 and b_oof.max() <= 1
+    r_oof, r_test = np.zeros_like(y), np.zeros(len(Xt))
+    fold_ids = sorted(set(folds[folds >= 0].tolist()))
+    for f in fold_ids:
+        tr, va = folds != f, folds == f
+        mdl = clone(model).fit(X[tr], r[tr])
+        r_oof[va] = mdl.predict(X[va])
+        r_test += mdl.predict(Xt) / len(fold_ids)
+    oof, test = b_oof + shrink * r_oof, b_test + shrink * r_test
+    if is_prob:
+        oof, test = np.clip(oof, 0, 1), np.clip(test, 0, 1)
+    return {"oof": oof, "test": test, "base": base}

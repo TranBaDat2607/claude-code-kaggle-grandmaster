@@ -1,7 +1,7 @@
 ---
 name: kg-baseline
-description: Build a fast, strong, correctly-validated baseline for the current competition from the plugin's templates, log it to the ledger and produce a validated submission file.
-argument-hint: "[model: lgbm|xgb|catboost|image|transformer]"
+description: Build fast, strong, correctly-validated baselines for the current competition from the plugin's templates — the main model plus diverse families on the same folds — log them to the ledger, decide the accepted baseline and produce a validated submission file.
+argument-hint: "[model: lgbm|xgb|cat|hgb|linear|knn|svm|mlp|image|transformer]"
 allowed-tools: [Bash, PowerShell, Read, Write, Edit, Glob, Grep]
 ---
 
@@ -17,7 +17,13 @@ Arguments: `$ARGUMENTS`
    (paths, target, id, metric, features, model).
 3. Smoke test (1 fold, tiny settings), then the full run. Keep the baseline simple and fast — its
    job is to be correct and to calibrate CV vs LB.
-4. Ensure it logs to the ledger with OOF + test predictions and writes `subs/<exp_id>.csv`.
-5. `python -m kgkit validate subs/<exp_id>.csv data/sample_submission.csv`.
-6. Report CV ± std, per-fold scores, runtime, and recommend submitting it (via `/kg-submit`) to
-   calibrate CV↔LB.
+4. **Tabular: diverse baselines on the same folds.** Also run `--model linear` and `--model mlp`
+   (plus `knn` / `svm` on data below ~50k rows, or a row subsample), each a few minutes. Report
+   which families fit (GBDT ≫ linear → interactions to engineer; linear ≈ GBDT → simple signal or a leak
+   to check). Their OOFs are kept for the blend. Images/text: one fast backbone is enough on day 1;
+   a second family comes in the exploration phase.
+5. Ensure each run logs to the ledger with OOF + test predictions and writes `subs/<exp_id>.csv`.
+6. Mark the main baseline as the reference: `python -m kgkit ledger decide <exp_id> baseline "<why>"`.
+7. `python -m kgkit validate subs/<exp_id>.csv data/sample_submission.csv`.
+8. Report CV ± std, per-fold scores, runtime per family, and recommend submitting the main baseline
+   (via `/kg-submit`) to calibrate CV↔LB.

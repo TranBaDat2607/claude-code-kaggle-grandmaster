@@ -64,14 +64,24 @@ for deadline, resume and pruning. The image and transformer templates already do
    and cache as uint8 PNG/npy, either locally or in a CPU kernel. Upload the result as a private dataset and attach it with
    `--dataset`. This is usually the single biggest speed-up (2-5× on image tasks).
 3. **Screen, then promote.** Test ideas on **one fold** at reduced cost (lower resolution,
-   fewer epochs, or a smaller backbone), against the baseline's score *on the same fold*.
+   fewer epochs, or a smaller backbone), against the baseline *run under the same reduced settings on
+   the same fold* (a "control" screen, run once per screening setting and reused). The baseline's
+   full-run fold score is not a fair reference for a cheaper run.
    - Pack two screens into one session so both T4s work:
      `gpu build --name idea-a --folds 0 --cmd "...idea-a... --folds {fold}" --extra-job idea-b "...idea-b... --folds {fold}"`.
-   - `--prune-against best` stops a screen whose best-so-far trails the baseline's learning curve,
-     compared at the same fraction of the schedule, by more than the baseline's fold std. Bad ideas then cost
-     30-40% of a run instead of 100%.
-   - Promote only if Δ(fold) > baseline fold std (or it holds on a second fold/seed). Everything
-     else is noise you would pay full price to confirm.
+   - `--prune-against baseline` stops a screen whose best-so-far trails the accepted baseline's
+     learning curve, compared at the same fraction of the schedule, by more than the baseline's fold
+     std. This margin is deliberately generous, so only clearly bad ideas are stopped, and they then
+     cost 30-40% of a run instead of 100%. (`best` is accepted as an alias.)
+   - Promote on a paired test of that fold's OOF against the control:
+     `kgkit ledger compare artifacts/<idea> artifacts/<control> --truth data/train.csv:<target>
+     --folds data/folds.csv:fold --fold 0` (`--groups` for patients/sessions). z ≥ 2 → promote;
+     a positive gain below that → a second fold or seed first. The bootstrap does not see seed noise,
+     so treat a z that only just clears 2 on one seed with suspicion. Comparing against the baseline's fold std
+     is the wrong test: one fold has no fold-to-fold variance, and the fold std overstates the noise
+     of a paired difference.
+   - Record `--screen-gain` and, after the full run, `--full-gain` on the backlog item. `kgkit backlog
+     fidelity` then tells you whether these screens rank ideas the way full CV does.
 4. **Full CV only for promoted ideas.** Run all folds so the ensemble has OOFs on the frozen split. Cap at
    ~1.3× the estimate (per-fold time from `gpu log` × folds ÷ 2 GPUs + ~15 min overhead).
 5. **Progressive resizing.** Train most epochs at a lower resolution and fine-tune the last 20-30% at

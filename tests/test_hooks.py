@@ -53,6 +53,13 @@ def test_session_start_inside_workspace(plugin_root, ws):
     out = hook(plugin_root, "session_start.py", {"hook_event_name": "SessionStart", "cwd": str(ws / "subs")})
     ctx = out["additionalContext"]
     assert "demo" in ctx and "best CV 0.81000" in ctx and "days left" in ctx and "folds.csv" in ctx
+    assert "No accepted baseline yet" in ctx
+    led.decide("1", "baseline")
+    from kgkit.backlog import Backlog
+
+    Backlog(ws).add("pseudo-label the test set", gain=3, prob=0.5, cost=2)
+    ctx = hook(plugin_root, "session_start.py", {"hook_event_name": "SessionStart", "cwd": str(ws)})["additionalContext"]
+    assert "Accepted baseline" in ctx and "0001_lgbm" in ctx and "Backlog top: #1 pseudo-label" in ctx
 
 
 def test_secret_read_denied(plugin_root, tmp_path):
@@ -177,3 +184,19 @@ def test_prompt_router_gpu(plugin_root, tmp_path_factory):
     out = hook(plugin_root, "prompt_router.py", {"hook_event_name": "UserPromptSubmit", "cwd": str(plain),
                "prompt": "How do I train my model on Kaggle GPUs without wasting my weekly quota?"})
     assert "kaggle-grandmaster:kaggle-gpu" in out["additionalContext"]
+
+
+def test_prompt_router_strategy_and_noise(plugin_root, tmp_path_factory):
+    plain = tmp_path_factory.mktemp("plain3")
+
+    def ask(prompt):
+        return hook(plugin_root, "prompt_router.py",
+                    {"hook_event_name": "UserPromptSubmit", "prompt": prompt, "cwd": str(plain)})["additionalContext"]
+
+    assert "kaggle-grandmaster:competition-strategy" in ask(
+        "Should I merge teams with a friend in this Kaggle competition? We'd swap OOF predictions first")
+    assert "kaggle-grandmaster:competition-strategy" in ask("Which Kaggle competitions should I pick to get a solo gold?")
+    assert "kaggle-grandmaster:grandmaster-playbook" in ask(
+        "Kaggle: my new model is +0.002 AUC but the fold std is 0.006, is the gain real or noise?")
+    assert "kaggle-grandmaster:tabular-mastery" in ask("Run a groupby feature search for this Kaggle playground")
+    assert "kaggle-grandmaster:competition-recon" in ask("Reproduce the top public notebook of this Kaggle comp")

@@ -296,8 +296,19 @@ def build_bundle(root: Path, include: list[str], baseline_dir: Path | None = Non
     return buf.getvalue()
 
 
+def _accepted_or_best(cands: list[dict], gib: bool) -> dict | None:
+    """The accepted baseline (latest record decided keep/baseline), else the highest CV — the same rule
+    as ``kgkit.experiment.Ledger.baseline`` (duplicated here: this module stays standard-library only)."""
+    cands = [r for r in cands if not r.get("recheck")]  # re-drawn-split runs are not comparable references
+    for r in reversed(cands):
+        if r.get("decision") in ("baseline", "keep"):
+            return r
+    return sorted(cands, key=lambda r: r["cv"], reverse=gib)[0] if cands else None
+
+
 def _resolve_baseline(root: Path, ref: str) -> tuple[Path, dict | None]:
-    """``ref``: 'best', a ledger id/name, or an artifacts/<name> directory with curve_fold*.json."""
+    """``ref``: 'baseline' (the accepted baseline; 'best' is an alias), a ledger id/name, or an
+    artifacts/<name> directory with curve_fold*.json."""
     p = Path(ref)
     if (root / p).is_dir():
         return root / p, None
@@ -307,10 +318,10 @@ def _resolve_baseline(root: Path, ref: str) -> tuple[Path, dict | None]:
         recs = [json.loads(l) for l in lp.read_text(encoding="utf-8").splitlines() if l.strip()]
     st = S.load(root)
     gib = st.greater_is_better if st else True
-    if ref == "best":
+    if ref in ("best", "baseline"):
         cands = [r for r in recs if isinstance(r.get("cv"), (int, float)) and r.get("model") != "blend"
                  and (root / "artifacts" / r.get("name", "")).is_dir()]
-        rec = sorted(cands, key=lambda r: r["cv"], reverse=gib)[0] if cands else None
+        rec = _accepted_or_best(cands, gib)
     else:
         rec = next((r for r in reversed(recs) if r.get("id") == ref or r.get("name") == ref), None)
     if rec is None:
@@ -576,7 +587,7 @@ def import_ledger(root: Path, out: Path, report: dict, kernel: str, version: int
 
 
 def _baseline_fold_score(root: Path, ref: str | None, fold: int) -> tuple[str | None, float | None, float | None]:
-    """(baseline id, its score on ``fold``, its fold std) for a ledger id/name, or the best single model."""
+    """(baseline id, its score on ``fold``, its fold std) for a ledger id/name, or the accepted baseline."""
     lp = root / S.STATE_DIR / "ledger.jsonl"
     if not lp.is_file():
         return None, None, None
@@ -588,11 +599,11 @@ def _baseline_fold_score(root: Path, ref: str | None, fold: int) -> tuple[str | 
             continue
         if r.get("fold_scores") and r.get("model") != "blend":
             recs.append(r)
-    if not ref or ref == "best":
+    if not ref or ref in ("best", "baseline"):
         st = S.load(root)
         gib = st.greater_is_better if st else True
         cands = [r for r in recs if isinstance(r.get("cv"), (int, float))]
-        rec = sorted(cands, key=lambda r: r["cv"], reverse=gib)[0] if cands else None
+        rec = _accepted_or_best(cands, gib)
     else:
         rec = next((r for r in reversed(recs) if r.get("id") == ref or r.get("name") == ref), None)
     if rec is None or fold >= len(rec["fold_scores"]):

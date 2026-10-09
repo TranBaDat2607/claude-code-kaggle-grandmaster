@@ -13,7 +13,9 @@ Competition: `$ARGUMENTS` (default: from `.kaggle-gm/competition.json`).
    and attach them: `python -m kgkit ledger lb <id> <public> <private>`.
 2. Analyse: correlation of CV vs private and public vs private; was our final pick our best private?
    Which risky components helped/hurt? Shake-up magnitude for us and for the top of the LB.
-3. Launch `solution-researcher` to digest the top-5 write-ups of *this* competition: what did
+3. `python -m kgkit discussions sync --max-age 0` (write-ups appear in the next daily export), then
+   `python -m kgkit discussions solutions`, and launch `solution-researcher` with those thread ids to
+   digest the top-5 write-ups of *this* competition: what did
    winners do that we didn't? Which of our ideas matched theirs?
 4. Write `reports/postmortem.md`: result, what worked, what didn't, what winners did, validation
    lessons, process lessons (time allocation, mistakes), and 5 reusable takeaways.
