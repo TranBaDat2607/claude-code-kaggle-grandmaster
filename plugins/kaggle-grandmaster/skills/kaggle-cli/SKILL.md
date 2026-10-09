@@ -39,13 +39,21 @@ kaggle kernels list --competition <slug> --sort-by voteCount --page-size 20
 kaggle kernels pull <user>/<kernel> -p notebooks/ref/ -m     # -m also pulls metadata
 kaggle kernels output <user>/<kernel> -p artifacts/ref/      # download a public notebook's outputs
 kaggle kernels init -p kernels/infer                          # creates kernel-metadata.json
-kaggle kernels push -p kernels/infer
+kaggle kernels push -p kernels/infer -t 21600 --accelerator NvidiaTeslaT4   # -t caps the run (s)
 kaggle kernels status <user>/<kernel>
+kaggle kernels logs <user>/<kernel>                           # execution log (-f to follow)
+kaggle quota --format json                                    # weekly GPU/TPU quota + refreshAt
 ```
 
 `kernel-metadata.json` keys: `id`, `title`, `code_file`, `language` (python), `kernel_type`
-(script|notebook), `is_private`, `enable_gpu`, `enable_tpu`, `enable_internet`,
-`dataset_sources`, `competition_sources`, `kernel_sources`, `model_sources`.
+(script|notebook), `is_private`, `enable_gpu`, `enable_tpu`, `enable_internet`, `machine_shape`
+(`NvidiaTeslaT4` = 2x T4, `NvidiaTeslaP100`, `Tpu1VmV38`; `--accelerator` overrides it),
+`dataset_sources`, `competition_sources`, `kernel_sources`, `model_sources`. The title must slugify
+to the id's slug. `kaggle kernels output` pages through all output files (`--page-size 200` means fewer
+requests), and `--file-pattern <regex>` filters them, e.g. to skip weights.
+
+For GPU **training** runs use `python -m kgkit gpu build/push/wait/collect` (skill `kaggle-gpu`). It
+adds the quota check, a `-t` cap, deadline-aware checkpoints, both T4s busy and ledger import.
 
 ## Datasets & models
 

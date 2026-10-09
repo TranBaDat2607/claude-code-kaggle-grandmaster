@@ -27,6 +27,7 @@ evaluation-API loop.
 | Python packages not in the image | `pip download <pkg> -d wheels/ --no-deps` (matching Python/CUDA), upload as dataset, install with `pip install --no-index --find-links /kaggle/input/<wheels-ds> <pkg>` |
 | HF models/tokenizers | `save_pretrained` to a folder → dataset; load with `local_files_only=True` |
 | Pretrained timm weights | save state_dict; create model with `pretrained=False` and load |
+| Weights trained in a Kaggle kernel (`kgkit gpu`) | attach the training kernel's output via `kernel_sources` — no download/re-upload |
 
 Pin the exact Kaggle docker image version used when developing (notebook settings → environment
 "pin to original") so packages don't change under you.

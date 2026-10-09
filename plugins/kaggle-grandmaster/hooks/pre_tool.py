@@ -4,6 +4,8 @@
 2. Before `kaggle competitions submit -f FILE`: validates FILE against sample_submission
    (deny with reasons when invalid) and asks for confirmation when today's local submission
    count has reached the competition's daily limit.
+3. Before a GPU `kaggle kernels push`: asks for confirmation when the cached weekly GPU quota
+   (minus kernels still running) is exhausted or smaller than the push's -t cap.
 Valid submissions produce no output, so the normal permission flow is unchanged.
 """
 
@@ -27,6 +29,35 @@ SECRET_READ = re.compile(
 )
 
 
+def gpu_push_guard(payload: dict, push: dict) -> None:
+    """Ask before a GPU kernel push when the cached weekly quota cannot cover it."""
+    target = C.push_target(payload, push)
+    root = C.workspace(payload)
+    if target is None or root is None or not C.push_uses_gpu(push, target[1]):
+        return
+    q = C.G.cached_quota(root)
+    if q is None:
+        sys.stderr.write("kaggle-grandmaster: GPU quota unknown - run `python -m kgkit gpu quota` before pushing.\n")
+        return
+    avail = C.G.available_hours(root, q)
+    try:
+        cap = float(push["timeout"]) / 3600 if push.get("timeout") else None
+    except ValueError:
+        cap = None
+    when = f" (quota checked {q.get('fetched_at')}, resets {q.get('refresh_at')})"
+    if avail <= 0.05:
+        C.emit("PreToolUse", permissionDecision="ask",
+               permissionDecisionReason=f"kaggle-grandmaster: the weekly Kaggle GPU quota looks exhausted: "
+                                        f"{avail:.2f}h plannable after running kernels{when}. Push anyway?")
+    elif cap is not None and cap > avail:
+        C.emit("PreToolUse", permissionDecision="ask",
+               permissionDecisionReason=f"kaggle-grandmaster: this GPU run is capped at {cap:.2f}h but only "
+                                        f"{avail:.2f}h of GPU quota is plannable{when}. Push anyway?")
+    elif cap is None:
+        sys.stderr.write("kaggle-grandmaster: GPU push without -t: a hung session can burn up to 12h of quota. "
+                         "Prefer `python -m kgkit gpu push <dir>` (quota check + cap + run log).\n")
+
+
 def main() -> None:
     payload = C.read_input()
     cmd = C.command_of(payload)
@@ -37,6 +68,11 @@ def main() -> None:
         C.emit("PreToolUse", permissionDecision="deny",
                permissionDecisionReason="kaggle-grandmaster: this command would print Kaggle API credentials. "
                                         "Never display or copy the key; check auth with `kaggle competitions list` instead.")
+        return
+
+    push = C.parse_push(cmd)
+    if push is not None:
+        gpu_push_guard(payload, push)
         return
 
     sub = C.parse_submit(cmd)

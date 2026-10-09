@@ -21,7 +21,9 @@ environment and produce a valid submission on the hidden test set.
    `local_files_only`, tracks elapsed time with a safe fallback, frees memory between models,
    asserts output validity, writes `/kaggle/working/submission.csv` (or the required format).
 4. Write `kernel-metadata.json` (`enable_internet: false`, `enable_gpu` per need, competition +
-   dataset + model sources).
+   dataset + model sources). If the weights came from a remote training kernel (`kgkit gpu`), list
+   that kernel in `kernel_sources` (its `artifacts/<name>/fold*.pt`) instead of re-uploading them.
+   GPU inference pushes spend the weekly quota: check `python -m kgkit gpu quota` first.
 5. Locally: run the inference script against a synthetic test of the hidden-test size (or the
    training data reshaped like test) to measure runtime and verify parity with OOF predictions on a
    validation fold.

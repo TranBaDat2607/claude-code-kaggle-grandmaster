@@ -12,6 +12,7 @@ Commands
   blend       hill-climb / weight-optimise / rank-average ledger experiments' OOFs and write a submission
   validate    validate a submission against sample_submission
   vendor      copy kgkit into a project or a Kaggle dataset folder (for offline kernels)
+  gpu         quota | plan | build | push | status | wait | collect | log  — training on Kaggle GPUs
 """
 
 from __future__ import annotations
@@ -108,6 +109,13 @@ def cmd_status(a):
         bits.append(f"deadline {st.deadline}")
     bits.append(f"{st.daily_submissions} subs/day, {st.final_submissions} final picks")
     print("; ".join(bits))
+    from . import gpu as G
+
+    q = G.cached_quota(root)
+    if q is not None:
+        active = [r["kernel"] for r in G.runs(root) if r.get("status") in G.ACTIVE]
+        print(f"Kaggle GPU: {G.available_hours(root, q):.1f}h plannable (cached {q.get('fetched_at')}, resets "
+              f"{q.get('refresh_at')})" + (f"; in flight: {', '.join(active)}" if active else ""))
     print(f"experiments logged: {len(recs)}")
     if recs:
         b = led.best(1)[0]
@@ -296,6 +304,52 @@ def cmd_vendor(a):
     print(f"copied kgkit to {dest}")
 
 
+def cmd_gpu(a):
+    from . import gpu as G
+
+    if a.gpu_cmd == "quota":
+        print(G.quota_report(refresh=not a.cached))
+    elif a.gpu_cmd == "plan":
+        print(G.plan(refresh=not a.cached, deadline=a.deadline))
+    elif a.gpu_cmd == "build":
+        kdir = G.build_kernel(
+            None, a.name, a.cmd, a.hours, folds=a.folds, accelerator=a.accelerator, user=a.user,
+            datasets=a.dataset, kernels=a.kernel, models=a.model, resume_from=a.resume_from, include=a.include,
+            internet=not a.no_internet, pip=a.pip, wheel_sources=a.wheels, assemble_cmd=a.assemble_cmd,
+            post_cmds=a.post_cmd, prune_against=a.prune_against, prune_margin=a.prune_margin,
+            prune_min_frac=a.prune_min_frac, slug=a.slug, public=a.public,
+            extra_jobs=[tuple(j) for j in a.extra_job or []])
+        tm = json.loads((kdir / "kg-train.json").read_text(encoding="utf-8"))
+        print(f"wrote {kdir} (kernel {tm['kernel']}, jobs {tm['jobs']}, {tm['accelerator']}, cap {tm['hours']}h, "
+              f"folds {tm['folds']}, code bundle {tm['bundle_kb']} KB)")
+        if tm.get("prune"):
+            print(f"pruning against {tm['prune']['baseline']} with margin {tm['prune']['margin']:.5f}")
+        print(f"next: smoke-test the command locally, then  python -m kgkit gpu push {kdir.as_posix()}")
+    elif a.gpu_cmd == "push":
+        rec = G.push(None, a.dir, force=a.force)
+        print(f"pushed {rec['kernel']} v{rec['version']} (cap {rec['hours']}h). Next: "
+              f"python -m kgkit gpu wait {rec['kernel']}  (run it in the background), then gpu collect")
+    elif a.gpu_cmd == "status":
+        root = G._root(None)
+        active = [r for r in G.runs(root) if r.get("status") in G.ACTIVE]
+        for k in a.kernel or sorted({r["kernel"] for r in active}):
+            s, text = G.kernel_status(k)
+            if s in ("queued", "running", "complete", "error", "cancelled"):
+                G.update_run(root, k, status=s)
+            print(f"{k}: {s}" + (f"  ({text})" if s == "unknown" else ""))
+        if not (a.kernel or active):
+            print("no active remote runs")
+    elif a.gpu_cmd == "wait":
+        s = G.wait(None, a.kernel, interval=a.interval, max_hours=a.max_hours)
+        if s == "complete" and a.collect:
+            G.collect(None, a.kernel)
+        sys.exit(0 if s == "complete" else 1)
+    elif a.gpu_cmd == "collect":
+        G.collect(None, a.kernel, from_dir=a.from_dir, weights=a.weights)
+    elif a.gpu_cmd == "log":
+        print(G.run_table(n=a.n))
+
+
 # ---------------------------------------------------------------------------- parser
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="kgkit", description="Kaggle Grandmaster toolkit")
@@ -389,6 +443,56 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("vendor", help="copy kgkit into DEST/kgkit")
     s.add_argument("dest")
     s.set_defaults(fn=cmd_vendor)
+
+    g = sub.add_parser("gpu", help="train on Kaggle GPUs: quota, remote kernels, GPU-hour accounting")
+    gs = g.add_subparsers(dest="gpu_cmd", required=True)
+    s = gs.add_parser("quota", help="live weekly GPU quota and reset countdown")
+    s.add_argument("--cached", action="store_true", help="do not call the API; use the cached value")
+    s = gs.add_parser("plan", help="GPU-hour budget until the deadline")
+    s.add_argument("--cached", action="store_true")
+    s.add_argument("--deadline", help="YYYY-MM-DD (default: competition.json)")
+    s = gs.add_parser("build", help="write a remote training kernel for a local training command")
+    s.add_argument("--name", required=True, help="experiment name (artifacts/<name>/ fold files)")
+    s.add_argument("--cmd", required=True,
+                   help='training command run from the project root; "{fold}" = one fold per process/GPU')
+    s.add_argument("--hours", type=float, required=True, help="session cap (~1.3x the estimate, <= 12)")
+    s.add_argument("--folds", type=int, nargs="+", help="folds to run (default: all in data/folds.csv)")
+    s.add_argument("--accelerator", default="NvidiaTeslaT4", help="NvidiaTeslaT4 (2x T4) | NvidiaTeslaP100 | none")
+    s.add_argument("--user", help="Kaggle username (default: KAGGLE_USERNAME / kaggle.json)")
+    s.add_argument("--dataset", nargs="*", default=[], help="owner/slug datasets linked into data/")
+    s.add_argument("--kernel", nargs="*", default=[], help="owner/slug kernel outputs linked into data/")
+    s.add_argument("--model", nargs="*", default=[], help="Kaggle model sources")
+    s.add_argument("--resume-from", nargs="*", default=[], help="previous training kernel(s) to resume from")
+    s.add_argument("--include", nargs="*", default=["src"], help="code paths bundled into the kernel")
+    s.add_argument("--no-internet", action="store_true")
+    s.add_argument("--pip", nargs="*", default=[], help="extra packages to pip install in the session")
+    s.add_argument("--wheels", nargs="*", default=[], help="datasets holding wheels for offline pip installs")
+    s.add_argument("--assemble-cmd", help='default: --cmd with "--folds {fold}" replaced by "--assemble"')
+    s.add_argument("--extra-job", nargs=2, action="append", metavar=("NAME", "CMD"),
+                   help="another job in the same session (e.g. a second 1-fold screen for the other T4)")
+    s.add_argument("--post-cmd", nargs="*", default=[], help="commands run after assembly (e.g. pseudo-labels)")
+    s.add_argument("--prune-against", help="'best', a ledger id/name, or artifacts/<name>: stop losing runs early")
+    s.add_argument("--prune-margin", type=float, help="default: the baseline's CV fold std")
+    s.add_argument("--prune-min-frac", type=float, default=0.3)
+    s.add_argument("--slug", help="kernel slug (default: <name>-train)")
+    s.add_argument("--public", action="store_true")
+    s = gs.add_parser("push", help="check the quota and push a built kernel (starts the GPU session)")
+    s.add_argument("dir")
+    s.add_argument("--force", action="store_true", help="push even if the cap exceeds the plannable quota")
+    s = gs.add_parser("status", help="status of active remote runs")
+    s.add_argument("kernel", nargs="*")
+    s = gs.add_parser("wait", help="poll a kernel until it finishes")
+    s.add_argument("kernel")
+    s.add_argument("--interval", type=float, default=90)
+    s.add_argument("--max-hours", type=float, default=13)
+    s.add_argument("--collect", action="store_true", help="collect the outputs when it completes")
+    s = gs.add_parser("collect", help="download outputs, import ledger records, account GPU hours")
+    s.add_argument("kernel")
+    s.add_argument("--from-dir", help="use an already-downloaded output folder")
+    s.add_argument("--weights", action="store_true", help="also download model weights (*.pt etc.)")
+    s = gs.add_parser("log", help="remote GPU runs and their cost")
+    s.add_argument("-n", type=int, default=20)
+    g.set_defaults(fn=cmd_gpu)
     return p
 
 
