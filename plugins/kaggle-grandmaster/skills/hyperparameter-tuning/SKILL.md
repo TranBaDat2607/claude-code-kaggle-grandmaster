@@ -7,7 +7,7 @@ description: Efficient hyperparameter optimisation for Kaggle — when tuning is
 
 **Priority:** validation > data/features > model family > loss/augmentation > hyperparameters.
 Tune *after* the feature set stabilises, and spend tuning budget where gains are measurable
-(> fold std).
+(beyond paired noise: `kgkit ledger compare` the tuned config against the accepted baseline).
 
 ## Optuna recipe (GBDT)
 

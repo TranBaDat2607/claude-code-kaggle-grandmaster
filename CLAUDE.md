@@ -10,8 +10,8 @@ This repo is a Claude Code marketplace (`.claude-plugin/marketplace.json`) conta
 - Evals (cheap): `cd plugins/kaggle-grandmaster && claude plugin eval . --runs 3 --model haiku --no-publish`
 
 ## Conventions
-- `kgkit/state.py`, `kgkit/gpu.py`, `kgkit/budget.py`, `templates/kaggle_gpu_runner.py` and everything under `hooks/` must
-  stay **standard-library only** (hooks import them, the runner executes inside Kaggle; they must be fast and never fail closed).
+- `kgkit/state.py`, `kgkit/gpu.py`, `kgkit/budget.py`, `kgkit/backlog.py`, `templates/kaggle_gpu_runner.py` and everything
+  under `hooks/` must stay **standard-library only** (hooks import them, the runner executes inside Kaggle; they must be fast and never fail closed).
 - Hooks exit 0 on any internal error; only deny/ask for credentials, invalid submissions, an exhausted daily budget,
   or a GPU push that the cached weekly GPU quota cannot cover.
 - Templates print ASCII only (Windows consoles are often cp1252).

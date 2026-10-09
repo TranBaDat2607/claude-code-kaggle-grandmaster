@@ -29,6 +29,11 @@ file:line evidence and a concrete fix.
    code path, same preprocessing objects, same column order, inverse target transforms)? Are test
    predictions averaged over fold models in the right order and aligned to ids?
 7. **Submission**: id alignment, row count, dtype, value ranges (`kgkit validate`).
+8. **Overfitting the CV through decisions**: how many keep/discard decisions were taken on these folds
+   (`kgkit status` warns at 20), and how much of the baseline's lineage (`kgkit ledger lineage`) rests on
+   marginal KEEPs? Large automated searches (feature search, Optuna, big stacks) count heavily. Without a
+   fresh-seed recheck (`reports/recheck_s*.md` from `kgkit recheck`) or a holdout, report the CV as
+   optimistic and give the exact `kgkit recheck` command to run.
 
 ## Output format
 ```

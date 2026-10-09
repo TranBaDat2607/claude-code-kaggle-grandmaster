@@ -1,6 +1,6 @@
 """SessionStart: expose kgkit to the session and, inside a competition workspace, inject a compact
-status brief (facts, deadline countdown, best CV/LB, CV-LB agreement, recent experiments,
-submissions today, lessons from past competitions)."""
+status brief (facts, deadline countdown, best CV/LB, accepted baseline, CV-LB agreement, recent
+experiments, top of the idea backlog, submissions today, lessons from past competitions)."""
 
 from __future__ import annotations
 
@@ -103,12 +103,21 @@ def brief(root: Path) -> str:
             if corr is not None:
                 s += f"; CV-LB pearson {corr:.2f} over {len(with_lb)} subs"
         lines.append(s + ".")
+        accepted = next((r for r in reversed(scored) if r.get("decision") in ("baseline", "keep")), None)
+        if accepted is not None:
+            lines.append(f"Accepted baseline (compare new ideas against this): {accepted['id']} CV {accepted['cv']:.5f}.")
+        elif len(scored) >= 2:
+            lines.append("No accepted baseline yet: decide one (`kgkit ledger decide <id> baseline`) so experiments "
+                         "are compared against a deliberate choice, not the luckiest CV.")
         for r in recs[-3:]:
             note = (r.get("notes") or "").replace("\n", " ")[:80]
             cv = f"{r['cv']:.5f}" if isinstance(r.get("cv"), (int, float)) else "?"
             lines.append(f"  - {r['id']}: CV {cv} {('— ' + note) if note else ''}")
     else:
         lines.append("Ledger is empty — next step is usually /kg-cv then /kg-baseline.")
+    top = C.B.Backlog(root).ranked()[:3]
+    if top:
+        lines.append("Backlog top: " + "; ".join(f"#{i['id']} {i['idea'][:60]}" for i in top) + ".")
     used = C.submissions_today(root)
     lines.append(f"Submissions logged today (UTC): {used}/{st.daily_submissions}.")
     gq = gpu_line(root)

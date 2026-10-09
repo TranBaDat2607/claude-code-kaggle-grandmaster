@@ -54,7 +54,9 @@ std; treat LB gaps below ~2 std as ties broken by CV.
 | 1 day | buffer for failures (Kaggle queue gets slow near deadlines); select finals |
 | deadline | 23:59 UTC — never submit in the last hour if avoidable |
 
-Team merger deadlines usually fall ~1 week before the end; team up early if you plan to.
+Team merger deadlines usually fall ~1 week before the end; team up early if you plan to. Merging has rules
+(no private sharing before the merge, combined submission counts) and a technical protocol (shared folds,
+OOF exchange via `kgkit ledger import`): see `competition-strategy`.
 
 ## 6. Post-competition
 

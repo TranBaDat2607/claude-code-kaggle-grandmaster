@@ -25,6 +25,8 @@ GATE = re.compile(
 ROUTES: list[tuple[str, str]] = [
     ("cv-lb-debugging", r"(cv|validation|local)\b.{0,60}\b(lb|leaderboard)|(lb|leaderboard)\b.{0,60}\bcv\b|"
                         r"\bgap\b|doesn'?t (match|transfer|track)|disagree|too good|suspicious"),
+    ("grandmaster-playbook", r"\bnoise\b|significan|fold[- ]std|(gain|improvement)s? (is|are|was|were) real|"
+                             r"keep or discard|reverse ablation|overfit\w* (the |my )?cv|\bbacklog\b|what (to|should i) try"),
     ("validation-strategy", r"cross[- ]?validation|\bk-?fold|\bfolds?\b|\bsplit\b|\bholdout\b|\bleak|adversarial|"
                             r"\bgroup(ed)?\b|stratif"),
     ("ensembling", r"\bensembl|\bblend|\bstack(ing)?\b|hill[- ]?climb|\boof\b|out[- ]of[- ]fold|weights?\b"),
@@ -36,7 +38,7 @@ ROUTES: list[tuple[str, str]] = [
     ("code-competitions", r"code competition|internet (off|disabled)|offline|\bkernel\b|notebook submission|"
                           r"runtime limit|hidden test|\bwheels?\b"),
     ("tabular-mastery", r"lightgbm|\blgbm\b|xgboost|catboost|\bgbdt\b|tabular|feature engineering|playground|"
-                        r"target encod"),
+                        r"target encod|feature search|tabpfn|autogluon|groupby"),
     ("computer-vision", r"\bimages?\b|x-?ray|\bct\b|\bmri\b|segmentation|detection|\btimm\b|\byolo\b|convnext|"
                         r"efficientnet|\bvit\b|\bcnn\b|dicom"),
     ("nlp-and-llm", r"deberta|transformer|\bllm\b|\bnlp\b|\btext\b|essay|token|\blora\b|\bbert\b|vllm|prompt"),
@@ -51,6 +53,11 @@ ROUTES: list[tuple[str, str]] = [
     ("kaggle-gpu", r"\bgpu (quota|hours?|budget|time)|\bquota\b|\bp100\b|\bt4s?\b|accelerator|"
                    r"\b(train|run)\w*\b.{0,40}\bon kaggle\b|kaggle(?:'s)? (gpus?|notebooks?|kernels?)\b.{0,40}\btrain|"
                    r"remote(ly)? train|session (limit|timeout)"),
+    ("competition-recon", r"public (notebooks?|kernels?)|top(-voted)? notebooks?|\bdiscussions?\b|write-?ups?|"
+                          r"prior art|\brecon\b|reproduce (a|the|this) (notebook|kernel)"),
+    ("competition-strategy", r"\bteam(ing|mates?| up)\b|\bmerg(e|er|ing)\b.{0,40}\bteams?\b|\bteams?\b.{0,40}\bmerg|"
+                             r"which competitions?|grandmaster (title|tier|rank)|solo gold|\bgold medals?\b|"
+                             r"join(ing|ed)? (late|the competition late)|several competitions"),
     ("kaggle-cli", r"kaggle (api|cli)|kaggle competitions|kaggle kernels|kaggle datasets|download (the )?data"),
 ]
 COMPILED = [(name, re.compile(rx, re.IGNORECASE)) for name, rx in ROUTES]

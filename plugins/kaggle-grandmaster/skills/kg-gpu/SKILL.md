@@ -15,7 +15,8 @@ Load the `kaggle-gpu` skill first and follow its protocol. Commands below are
 
 ## Always first
 1. `gpu quota` and `gpu log`: hours plannable, reset time, runs in flight, measured cost per fold.
-2. `python -m kgkit status`: current best experiment, its fold scores and std (the baseline).
+2. `python -m kgkit status` and `python -m kgkit ledger baseline`: the accepted baseline, its fold
+   scores and std.
 
 ## plan
 `gpu plan`, then propose a concrete schedule until the next reset and until the deadline: which screens
@@ -24,17 +25,23 @@ use-it-or-lose-it hours before the reset.
 
 ## screen <idea> [<idea2>]
 1. Implement each idea behind a flag in the training script and run `--smoke` locally. Commit.
-2. Build one session for both screens on fold 0, with reduced cost settings that are identical for the baseline comparison:
+2. Build one session for both screens on fold 0, with reduced cost settings that are identical for the
+   baseline comparison. If no control screen of the baseline exists at these settings yet, make it one of
+   the two jobs:
    `gpu build --name <a> --folds 0 --cmd "... --folds {fold}" --extra-job <b> "... --folds {fold}"
-   --prune-against best --hours <~1.3x estimate>` (attach preprocessed data with `--dataset`).
+   --prune-against baseline --hours <~1.3x estimate>` (attach preprocessed data with `--dataset`).
 3. Confirm with the user (quota is spent), then `gpu push`. Run `gpu wait <kernel> --collect` in the background.
-4. Read the `collect` summary: Δ vs the baseline's same fold, compared with the fold std. Then decide
-   PROMOTE / DISCARD / RE-TEST (second fold or seed), and note the result in CLAUDE.md and the backlog.
+4. Decide with a paired test against the control on that fold:
+   `python -m kgkit ledger compare artifacts/<a> artifacts/<control> --truth data/train.csv:<target>
+   --folds data/folds.csv:fold --fold 0`. PROMOTE (z ≥ 2) / DISCARD / RE-TEST (positive but within noise:
+   second fold or seed). Record it on the backlog item (`kgkit backlog set <n> --screen-gain <gain>`) and in
+   CLAUDE.md.
 
 ## run <experiment>
 Full-fold run of a promoted idea: `gpu build` with all folds, `--hours` from the measured
-cost per fold × folds ÷ 2 + overhead. Confirm, push, wait, collect. Then report the ledger id,
-CV ± std, Δ vs the best, and the GPU-hours spent.
+cost per fold × folds ÷ 2 + overhead. Confirm, push, wait, collect. Then `kgkit ledger compare <id>`
+against the accepted baseline, `kgkit ledger decide`, record `--full-gain` on the backlog item, and report
+the ledger id, CV ± std, the paired gain and verdict, and the GPU-hours spent.
 
 ## resume <kernel>
 Rebuild the same command with `--resume-from <kernel> --slug <name>-train-r<N>`. Finished folds are

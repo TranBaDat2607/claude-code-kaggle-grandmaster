@@ -15,7 +15,7 @@ kaggle competitions list -s "<keywords>"           # find the slug
 kaggle competitions files <slug>                   # file list + sizes
 kaggle competitions download <slug> -p data/ && unzip -q -o data/<slug>.zip -d data/
 kaggle competitions leaderboard <slug> --show | head -30
-kaggle kernels list --competition <slug> --sort-by voteCount --page-size 20
+python -m kgkit kernels top -n 20 --competition <slug>   # top-voted notebooks (wraps kaggle kernels list)
 ```
 
 Use WebFetch on `https://www.kaggle.com/competitions/<slug>/overview`, `/data`, `/rules`,
@@ -44,10 +44,27 @@ the Overview/Evaluation/Data text if fetching fails). Record:
 
 ## 3. Mine prior art (highest ROI hour of the competition)
 
-- **Top-voted public notebooks**: note their CV scheme, CV and LB scores, key features, model
-  choices. The best public notebook is your baseline-to-beat, not your solution.
+- **Top-voted public notebooks**: `python -m kgkit kernels top -n 20`, then
+  `python -m kgkit kernels pull <owner>/<slug>` for the best 3–5. Each pull writes
+  `ref/<slug>/REVIEW.md` (CV scheme, model families, scores printed in its outputs, non-competition
+  inputs: external datasets/notebooks/models to check against the rules and for access) and
+  `ref/<slug>/<slug>_local.py` (code cells with Kaggle paths mapped to `data/`, `data/ext/`,
+  `artifacts/ref/`). The best public notebook is your baseline-to-beat, not your solution: re-run it on
+  your folds before believing its numbers, and import its OOF (`kgkit ledger import ... --source
+  notebook`) as an ensemble candidate.
 - **Discussion sorted by votes and by recent**: data issues, leaks, metric quirks, "CV vs LB"
-  threads, host clarifications. Re-check every few days.
+  threads, host clarifications. Re-check every few days. The Kaggle CLI has no discussion commands, so
+  `kgkit discussions` reads Meta Kaggle, Kaggle's official daily export of its forums:
+  `python -m kgkit discussions sync` indexes every topic into `reports/discussions.csv` and prints
+  rule facts (merger deadline, team size, daily submissions, metric); then
+  `discussions top --sort votes|recent|replies`, `discussions search "leak|shake|cv.*lb|duplicate"`, and
+  `discussions read <id>` for a full thread (after a one-time `sync --messages`, ~1.8 GB; otherwise
+  it prints the thread URL to WebFetch). The export lags up to a day, and very new competitions may not have
+  their forum in it yet. For those, and for the last hours, use the website (WebFetch) or a Kaggle MCP
+  server if one is connected.
+- **Write-ups of finished competitions** (the best prior art there is):
+  `python -m kgkit discussions solutions --competition <past-slug>` lists "Nth place solution"
+  threads by votes, for any past competition.
 - **Similar past competitions**: search "kaggle <domain> competition winning solution",
   Kaggle discussion write-ups ("1st place solution"), and `farid.one/kaggle-solutions`-style
   indexes. Extract the techniques that repeatedly won in this domain. Delegate to the
@@ -84,7 +101,8 @@ choose one "CV-best" and one "LB-best/hedge" final.
 ## Prior art (best public notebooks + scores, key discussion insights, similar past comps & winning ideas)
 ## Leaks / quirks
 ## Shake-up risk (low/med/high + reasoning)
-## Initial backlog (ranked ideas)
+## Initial backlog (ranked ideas; also stored with `kgkit backlog add`)
+## Fit for the user's goals (medals awarded? solo-gold candidate? teaming plan; see `competition-strategy`)
 ```
 
 Then: `python -m kgkit init <slug> --metric <m> --task <t> --target <col> --id-col <id> [--code-competition --runtime-hours 9 --no-internet] --deadline YYYY-MM-DD`.

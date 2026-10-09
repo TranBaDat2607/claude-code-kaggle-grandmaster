@@ -37,8 +37,11 @@ Follow the `grandmaster-playbook` and `competition-recon` skills. Steps:
 9. **Baseline**: adapt the matching template from `${CLAUDE_PLUGIN_ROOT}/templates/`
    (`train_gbdt.py`, `train_image.py`, `train_transformer.py`) into `src/`, run it quickly
    (reduced settings if large), log to the ledger, write `subs/<exp_id>.csv`, and validate it with
-   `python -m kgkit validate`.
-10. **Commit** code, folds definition (or seed), CLAUDE.md, `.kaggle-gm/`.
+   `python -m kgkit validate`. Tabular: also run `--model linear` and `--model mlp` on the same folds
+   (diverse baselines, see `/kg-baseline`). Mark the main one `python -m kgkit ledger decide <id> baseline`.
+10. **Backlog**: add the recon's initial ideas with `python -m kgkit backlog add ...` (gain, prob,
+   cost, evidence, source) and `python -m kgkit backlog render`.
+11. **Commit** code, folds definition (or seed), CLAUDE.md, `.kaggle-gm/`.
 
 Finish with: recon TL;DR, CV scheme, baseline CV, the submission file ready (ask before
 submitting, or run `/kg-submit`), and the top 5 backlog experiments.

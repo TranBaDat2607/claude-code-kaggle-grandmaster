@@ -12,6 +12,14 @@ and the OOF / test predictions needed for ensembling are never lost::
                        notes="added OOF target encoding of city x month")
     # after submitting:  python -m kgkit ledger lb <exp_id> 0.8150
 
+The ledger also remembers *decisions*: each experiment can name its ``parent`` (the baseline it
+was compared against) and carry a ``decision`` (baseline / keep / discard / inconclusive). The
+*accepted baseline* is the latest kept experiment, not simply the highest CV, so a lucky seed
+or a leaky run never silently becomes the thing every new idea is measured against::
+
+    python -m kgkit ledger compare 0012 0009 --truth data/train.csv:target
+    python -m kgkit ledger decide 0012 keep "focal loss, +0.0021, 5/5 folds"
+
 Only the ledger (not the artefacts) should be committed to git.
 """
 
@@ -57,6 +65,17 @@ def _git_info(cwd: Path) -> dict[str, Any]:
         return {"git_commit": commit or None, "git_dirty": dirty if commit else None}
     except (OSError, subprocess.SubprocessError):
         return {"git_commit": None, "git_dirty": None}
+
+
+DECISIONS = ("baseline", "keep", "discard", "inconclusive")
+ACCEPTED = ("baseline", "keep")
+
+
+def _check_decision(d: str) -> str:
+    d = d.lower()
+    if d not in DECISIONS:
+        raise ValueError(f"decision must be one of {DECISIONS}, got {d!r}")
+    return d
 
 
 def _slug(s: str) -> str:
@@ -128,6 +147,8 @@ class Ledger:
         tags: Sequence[str] = (),
         metric: str | None = None,
         folds: Sequence[int] | None = None,
+        parent: str | None = None,
+        decision: str | None = None,
         **extra,
     ) -> dict:
         """Append an experiment. ``folds_hash`` fingerprints the CV split (from ``folds`` if given,
@@ -154,6 +175,9 @@ class Ledger:
             "lb_private": None,
             "submission": None,
             "folds_hash": self._folds_hash(folds),
+            "recheck": os.environ.get("KG_RECHECK") or None,  # set by `kgkit recheck`: not on the frozen folds
+            "parent": self._resolve_id(parent) if parent else None,
+            "decision": _check_decision(decision) if decision else None,
             **_git_info(self.root),
             **_jsonable(extra),
         }
@@ -171,10 +195,19 @@ class Ledger:
             f.write(json.dumps(rec) + "\n")
         return rec
 
+    def _resolve_id(self, ref: str) -> str:
+        """Canonical id for a ref; unknown refs are kept verbatim (e.g. a local id named inside a remote
+        Kaggle run, whose own ledger starts empty)."""
+        try:
+            return self.get(ref)["id"]
+        except KeyError:
+            return str(ref)
+
     def _folds_hash(self, folds: Sequence[int] | None) -> str | None:
         if folds is not None:
             return hashlib.sha1(np.asarray(folds, dtype=np.int64).tobytes()).hexdigest()[:12]
-        f = self.root / "data" / "folds.csv"
+        f = Path(os.environ.get("KG_FOLDS_FILE") or "data/folds.csv")  # recheck runs use a re-drawn split
+        f = f if f.is_absolute() else self.root / f
         if f.is_file():
             return hashlib.sha1(f.read_bytes()).hexdigest()[:12]
         return None
@@ -200,7 +233,76 @@ class Ledger:
             fields["submission"] = submission
         return self.update(exp_id, **fields)
 
+    def decide(self, exp_id: str, decision: str, note: str = "", parent: str | None = None) -> dict:
+        """Record the keep/discard decision (and optionally the baseline it was compared against)."""
+        fields: dict[str, Any] = {"decision": _check_decision(decision), "decided_at": time.strftime("%Y-%m-%dT%H:%M:%S")}
+        if note:
+            fields["decision_note"] = note
+        if parent:
+            fields["parent"] = self.get(parent)["id"]  # locally the baseline must exist
+        return self.update(exp_id, **fields)
+
+    def import_preds(self, name: str, oof: np.ndarray, test_pred: np.ndarray | None, y_true=None,
+                     folds: Sequence[int] | None = None, metric: str | None = None, cv: float | None = None,
+                     notes: str = "", source: str = "external") -> dict:
+        """Log predictions produced elsewhere (a teammate, a reproduced public notebook) so they can be
+        compared and blended like any other experiment. With ``y_true`` and ``folds`` the CV and fold
+        scores are recomputed here, on *our* folds, instead of trusting a reported number."""
+        st = S.load(self.root)
+        metric = metric or (st.metric if st else None)
+        fold_scores = None
+        oof = np.asarray(oof)
+        if y_true is not None and metric:
+            from . import metrics as M
+
+            m = M.get(metric)
+            y = np.asarray(y_true)
+            if len(y) != len(oof):
+                raise ValueError(f"OOF has {len(oof)} rows but the target has {len(y)}")
+            if folds is not None:
+                f = np.asarray(folds)
+                fold_scores = [m(y[f == k], oof[f == k]) for k in sorted(set(f[f >= 0].tolist()))]
+                cv = m(y[f >= 0], oof[f >= 0])
+            else:
+                cv = m(y, oof)
+        if cv is None:
+            raise ValueError("pass cv, or y_true (+ folds) so it can be computed")
+        return self.log(name, cv, fold_scores=fold_scores, oof=oof, test_pred=test_pred, notes=notes,
+                        tags=[source], metric=metric, model=source)
+
     # ------------------------------------------------------------------ read
+    def baseline(self, fallback: bool = True) -> dict | None:
+        """The accepted baseline: the most recent experiment decided ``keep`` or ``baseline``.
+        Falls back to the highest CV only when nothing has been accepted yet."""
+        recs = self.records()
+        for r in reversed(recs):
+            if r.get("decision") in ACCEPTED and not r.get("recheck"):
+                return r
+        if fallback:
+            best = self.best(1)
+            return best[0] if best else None
+        return None
+
+    def lineage(self, exp_id: str) -> list[dict]:
+        """Chain of parents back to the root, oldest first — the list of changes a reverse ablation
+        should re-test (each kept step that was only marginally significant is a suspect)."""
+        chain, seen = [], set()
+        rec: dict | None = self.get(exp_id)
+        while rec is not None and rec["id"] not in seen:
+            chain.append(rec)
+            seen.add(rec["id"])
+            try:
+                rec = self.get(rec["parent"]) if rec.get("parent") else None
+            except KeyError:
+                rec = None
+        return chain[::-1]
+
+    def decisions_on_folds(self, folds_hash: str | None) -> int:
+        """How many keep/discard decisions were taken on one fold split — every decision spends a
+        little of the split's ability to give unbiased estimates."""
+        return sum(1 for r in self.records() if r.get("decision") in ("keep", "discard", "inconclusive")
+                   and r.get("folds_hash") == folds_hash)
+
     def load_oof(self, exp_id: str) -> np.ndarray:
         return np.load(self.root / self.get(exp_id)["oof_path"])
 
@@ -214,7 +316,7 @@ class Ledger:
         return True
 
     def best(self, n: int = 5, key: str = "cv") -> list[dict]:
-        recs = [r for r in self.records() if r.get(key) is not None]
+        recs = [r for r in self.records() if r.get(key) is not None and not r.get("recheck")]
         return sorted(recs, key=lambda r: r[key], reverse=self._gib())[:n]
 
     def cv_lb_correlation(self) -> dict | None:
@@ -234,10 +336,11 @@ class Ledger:
             recs = recs[-n:]
         if not recs:
             return "(ledger is empty)"
-        lines = ["| id | cv | ±std | LB | model | notes |", "|---|---|---|---|---|---|"]
+        lines = ["| id | cv | ±std | LB | decision | model | notes |", "|---|---|---|---|---|---|---|"]
         for r in recs:
             std = f"{r['cv_std']:.4f}" if r.get("cv_std") is not None else ""
             lb = f"{r['lb_public']:.5f}" if r.get("lb_public") is not None else ""
             note = (r.get("notes") or "").replace("|", "/").replace("\n", " ")[:70]
-            lines.append(f"| {r['id']} | {r['cv']:.5f} | {std} | {lb} | {r.get('model') or ''} | {note} |")
+            lines.append(f"| {r['id']} | {r['cv']:.5f} | {std} | {lb} | {r.get('decision') or ''} | "
+                         f"{r.get('model') or ''} | {note} |")
         return "\n".join(lines)

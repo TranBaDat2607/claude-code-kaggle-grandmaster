@@ -1,4 +1,5 @@
-"""GBDT training template (LightGBM / XGBoost / CatBoost / sklearn HistGradientBoosting).
+"""Tabular training template: GBDTs (LightGBM / XGBoost / CatBoost / sklearn HistGradientBoosting)
+plus the diverse families a blend needs from day one (linear, kNN, SVM, MLP via sklearn pipelines).
 
 Copy to src/, edit CONFIG and add_features(), then:
 
@@ -6,6 +7,8 @@ Copy to src/, edit CONFIG and add_features(), then:
     python src/train_gbdt.py --model cat --name cat_v1 --notes "catboost on base features"
     python src/train_gbdt.py --smoke                  # 1 fold, few rounds — crash test
     python src/train_gbdt.py --seeds 42 43 44         # seed averaging
+    python src/train_gbdt.py --model linear --name lin_v1   # diverse baselines on the same folds:
+    python src/train_gbdt.py --model mlp --name mlp_v1      #   linear | knn | svm | mlp
 
 What it guarantees:
   * uses the frozen folds in data/folds.csv (joined on id, or by row order when no id column)
@@ -42,11 +45,11 @@ CONFIG = dict(
     train="data/train.csv",
     test="data/test.csv",
     sample="data/sample_submission.csv",
-    folds="data/folds.csv",
+    folds=os.environ.get("KG_FOLDS_FILE", "data/folds.csv"),  # kgkit recheck points this at a re-drawn split
     id_col=None,          # default: from .kaggle-gm/competition.json
     target=None,          # default: from .kaggle-gm/competition.json
     metric=None,          # default: from .kaggle-gm/competition.json
-    model="lgbm",         # lgbm | xgb | cat | hgb
+    model="lgbm",         # lgbm | xgb | cat | hgb | linear | knn | svm | mlp
     task="auto",          # auto | binary | multiclass | regression
     drop=[],              # columns never used as features
     log_target=False,     # train on log1p(y) (RMSLE-style targets)
@@ -65,7 +68,16 @@ DEFAULTS = {
     "cat": dict(learning_rate=0.05, iterations=20000, depth=6, l2_leaf_reg=3, verbose=0, allow_writing_files=False),
     "hgb": dict(learning_rate=0.05, max_iter=2000, max_leaf_nodes=63, l2_regularization=1.0,
                 early_stopping=True, validation_fraction=0.1),
+    # Diverse families: weaker alone, but their errors differ from the GBDTs' (a GBDT+NN+SVR blend with
+    # no feature engineering has placed 2nd in a Playground). Numerics are imputed + scaled, categoricals
+    # one-hot encoded. svm and knn are O(n^2): subsample, or use cuML on a GPU for > ~50k rows.
+    "linear": dict(alpha=1.0),  # Ridge / LogisticRegression(C=1/alpha)
+    "knn": dict(n_neighbors=50, weights="distance"),
+    "svm": dict(C=1.0),
+    "mlp": dict(hidden_layer_sizes=[256, 128], alpha=1e-4, learning_rate_init=1e-3, max_iter=200,
+                early_stopping=True),
 }
+SKLEARN_KINDS = ("linear", "knn", "svm", "mlp")
 
 
 def add_features(train: pd.DataFrame, test: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
@@ -83,8 +95,45 @@ def infer_task(y: pd.Series) -> str:
     return "regression"
 
 
+def sklearn_pipeline(kind: str, task: str, p: dict, seed: int):
+    """Impute + scale numerics (quantile-normal for the MLP), one-hot categoricals, then the estimator."""
+    from sklearn.compose import make_column_selector, make_column_transformer
+    from sklearn.impute import SimpleImputer
+    from sklearn.pipeline import make_pipeline
+    from sklearn.preprocessing import OneHotEncoder, QuantileTransformer, StandardScaler
+
+    scale = (QuantileTransformer(output_distribution="normal", n_quantiles=200, random_state=seed)
+             if kind == "mlp" else StandardScaler())
+    pre = make_column_transformer(
+        (make_pipeline(SimpleImputer(strategy="median", add_indicator=True), scale),
+         make_column_selector(dtype_exclude="category")),
+        (OneHotEncoder(handle_unknown="ignore", max_categories=50), make_column_selector(dtype_include="category")),
+    )
+    reg = task == "regression"
+    if kind == "linear":
+        from sklearn.linear_model import LogisticRegression, Ridge
+
+        est = Ridge(alpha=p["alpha"]) if reg else LogisticRegression(C=1.0 / p["alpha"], max_iter=3000)
+    elif kind == "knn":
+        from sklearn.neighbors import KNeighborsClassifier, KNeighborsRegressor
+
+        est = (KNeighborsRegressor if reg else KNeighborsClassifier)(**p)
+    elif kind == "svm":
+        from sklearn.svm import SVC, SVR
+
+        est = SVR(**p) if reg else SVC(probability=True, random_state=seed, **p)
+    else:
+        from sklearn.neural_network import MLPClassifier, MLPRegressor
+
+        p = {**p, "hidden_layer_sizes": tuple(p["hidden_layer_sizes"])}
+        est = (MLPRegressor if reg else MLPClassifier)(random_state=seed, **p)
+    return make_pipeline(pre, est)
+
+
 def make_model(kind: str, task: str, params: dict, seed: int, n_classes: int):
     p = {**DEFAULTS[kind], **params}
+    if kind in SKLEARN_KINDS:
+        return sklearn_pipeline(kind, task, p, seed)
     if kind == "lgbm":
         import lightgbm as lgb
 
@@ -196,8 +245,10 @@ def main():
 
     params = dict(cfg["params"])
     if args.smoke:
-        n_key = {"lgbm": "n_estimators", "xgb": "n_estimators", "cat": "iterations", "hgb": "max_iter"}[cfg["model"]]
-        params[n_key] = 50
+        n_key = {"lgbm": "n_estimators", "xgb": "n_estimators", "cat": "iterations", "hgb": "max_iter",
+                 "mlp": "max_iter"}.get(cfg["model"])
+        if n_key:
+            params[n_key] = 50
     oof = np.zeros((len(train), n_classes)) if task == "multiclass" else np.zeros(len(train))
     test_pred = np.zeros((len(test), n_classes)) if task == "multiclass" else np.zeros(len(test))
     fold_scores, best_iters = [], []

@@ -76,6 +76,23 @@ def test_gbdt_template_hgb(tmp_path, plugin_root, kind):
         assert (sub["y"] > 0).all() and rec["cv"] < 0.6
 
 
+@pytest.mark.parametrize("model,kind", [("linear", "binary"), ("knn", "multiclass"), ("svm", "regression"),
+                                        ("mlp", "binary")])
+def test_tabular_template_diverse_families(tmp_path, plugin_root, model, kind):
+    ws = _make_ws(tmp_path, plugin_root, kind)
+    extra = ["--params", '{"max_iter": 300}'] if model == "mlp" else []
+    out = _run(["src/train_gbdt.py", "--model", model, "--name", f"{model}_{kind}", *extra], ws, plugin_root)
+    assert "CV" in out
+    rec = Ledger(ws).records()[-1]
+    assert rec["model"] == model and rec["oof_path"] and rec["test_path"]
+    res = validate_submission(ws / rec["submission"], ws / "data" / "sample_submission.csv")
+    assert res["ok"], res
+    if kind == "binary":
+        assert rec["cv"] > 0.8
+    if kind == "multiclass":
+        assert rec["cv"] > 0.5
+
+
 @pytest.mark.skipif(importlib.util.find_spec("lightgbm") is None, reason="lightgbm not installed")
 def test_gbdt_template_lgbm_smoke_and_full(tmp_path, plugin_root):
     ws = _make_ws(tmp_path, plugin_root, "binary")
