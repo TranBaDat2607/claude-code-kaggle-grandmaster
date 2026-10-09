@@ -1,10 +1,12 @@
 """PostToolUse: after `kaggle competitions submit`, log the submission locally and remind Claude to
-fetch the public score and attach it to the experiment ledger."""
+fetch the public score and attach it to the experiment ledger. After a GPU `kaggle kernels push`,
+record the run in the GPU-hour log."""
 
 from __future__ import annotations
 
 import datetime as dt
 import json
+import re
 import sys
 
 try:
@@ -20,8 +22,37 @@ def _response_text(payload: dict) -> str:
     return str(r or "")
 
 
+def log_gpu_push(payload: dict, push: dict) -> None:
+    """A raw GPU `kaggle kernels push` spends quota too: record it so budgets account for it."""
+    root = C.workspace(payload)
+    target = C.push_target(payload, push)
+    if root is None or target is None or not C.push_uses_gpu(push, target[1]):
+        return
+    text = _response_text(payload)
+    m = re.search(r"version\s+(\d+)\s+successfully pushed", text, re.IGNORECASE)
+    if not m:
+        return
+    kernel = target[1].get("id") or "?"
+    try:
+        hours = round(float(push["timeout"]) / 3600, 3) if push.get("timeout") else C.G.SESSION_LIMIT_H
+    except ValueError:
+        hours = C.G.SESSION_LIMIT_H
+    C.G.log_run(root, {"kernel": kernel, "version": int(m.group(1)), "name": target[0].name,
+                       "accelerator": push.get("accelerator") or target[1].get("machine_shape") or "gpu",
+                       "hours": hours, "pushed_at": dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                       "status": "pushed", "via": "kaggle-cli"})
+    C.emit("PostToolUse", additionalContext=(
+        f"kaggle-grandmaster: GPU kernel {kernel} v{m.group(1)} logged (cap {hours}h of weekly quota). Poll with "
+        f"`python -m kgkit gpu wait {kernel}` in the background (not a tight loop); for kgkit-built training "
+        f"kernels then run `python -m kgkit gpu collect {kernel}`."))
+
+
 def main() -> None:
     payload = C.read_input()
+    push = C.parse_push(C.command_of(payload))
+    if push is not None:
+        log_gpu_push(payload, push)
+        return
     sub = C.parse_submit(C.command_of(payload))
     if sub is None:
         return

@@ -56,13 +56,13 @@ when no other plugin uses the same name.
 
 | Layer | Count | What it does |
 |---|---|---|
-| **Knowledge skills** | 19 | Playbooks Claude loads when relevant: master playbook, recon, validation, tabular, CV, NLP/LLM, time series, audio, simulation/optimisation, recsys, ensembling, metric optimisation, HPO, DL training, leaderboard boosters, code competitions, Kaggle CLI, CV↔LB debugging, final-submission selection |
-| **Slash commands** | 15 | `kg-start`, `kg-recon`, `kg-eda`, `kg-cv`, `kg-baseline`, `kg-experiment`, `kg-grind`, `kg-ensemble`, `kg-submit`, `kg-status`, `kg-kernel`, `kg-final`, `kg-debug`, `kg-ideas`, `kg-postmortem` |
+| **Knowledge skills** | 20 | Playbooks Claude loads when relevant: master playbook, recon, validation, tabular, CV, NLP/LLM, time series, audio, simulation/optimisation, recsys, ensembling, metric optimisation, HPO, DL training, Kaggle GPU training, leaderboard boosters, code competitions, Kaggle CLI, CV↔LB debugging, final-submission selection |
+| **Slash commands** | 16 | `kg-start`, `kg-recon`, `kg-eda`, `kg-cv`, `kg-baseline`, `kg-experiment`, `kg-grind`, `kg-gpu`, `kg-ensemble`, `kg-submit`, `kg-status`, `kg-kernel`, `kg-final`, `kg-debug`, `kg-ideas`, `kg-postmortem` |
 | **Specialist agents** | 9 | competition-analyst, solution-researcher, data-detective, validation-auditor, feature-engineer, experiment-runner, error-analyst, ensemble-architect, kernel-packager |
-| **Hooks** | 4 | session brief, Kaggle-prompt → skill router, submission guard (validation + daily budget + credential protection), submission logger |
-| **`kgkit` toolkit** | 11 modules | Tested Python: leak-free folds, 35+ metrics, threshold/rounding optimisers, hill climbing / stacking, adversarial validation, leak-safe features, EDA red flags, experiment ledger, submission validator, CLI |
-| **Templates** | 4 + metadata | GBDT (LightGBM/XGBoost/CatBoost/HGB), timm image models, HF transformers, offline inference kernel |
-| **Evals** | 7 cases | `claude plugin eval` suite with a no-plugin baseline arm |
+| **Hooks** | 4 | session brief (incl. GPU quota), Kaggle-prompt → skill router, submission + GPU-push guard (validation, daily budget, weekly GPU quota, credential protection), submission / GPU-run logger |
+| **`kgkit` toolkit** | 13 modules | Tested Python: leak-free folds, 35+ metrics, threshold/rounding optimisers, hill climbing / stacking, adversarial validation, leak-safe features, EDA red flags, experiment ledger, submission validator, Kaggle GPU pipeline + training budget guard, CLI |
+| **Templates** | 5 + metadata | GBDT (LightGBM/XGBoost/CatBoost/HGB), timm image models, HF transformers (both resumable), offline inference kernel, remote GPU training runner |
+| **Evals** | 8 cases | `claude plugin eval` suite with a no-plugin baseline arm |
 
 ## How a competition flows
 
@@ -74,6 +74,7 @@ kg-start ─► recon (competition-analyst ∥ solution-researcher) ─► data 
              ▼
    kg-experiment / kg-grind  ◄── kg-ideas (error-analyst, prior art, untried levers)
    (one change · frozen folds · ledger · Δ vs fold std · keep/discard)
+   kg-gpu: no local GPU? 1-fold screens on Kaggle (2 per T4x2 session, pruned) ─► full-fold runs
              │
              ├─► kg-submit (validated, budgeted, LB attached to ledger) ─► CV↔LB correlation
              ├─► kg-debug when CV and LB disagree (validation-auditor)
@@ -91,6 +92,8 @@ submitting) and a `.kaggle-gm/` state folder:
 .kaggle-gm/competition.json   metric, direction, task, target, code-comp limits, deadline, budget
 .kaggle-gm/ledger.jsonl       one line per experiment: CV, fold scores, params, git hash, folds hash, LB
 .kaggle-gm/submissions.jsonl  every submission the hooks saw
+.kaggle-gm/gpu_runs.jsonl     every remote GPU run: cap, GPU-hours used, fold scores, ledger ids
+.kaggle-gm/gpu_quota.json     last `kaggle quota` snapshot (read by the hooks, no network)
 artifacts/<exp_id>/           oof.npy + test.npy, the inputs for ensembling
 ```
 
@@ -101,7 +104,8 @@ artifacts/<exp_id>/           oof.npy + test.npy, the inputs for ensembling
 | SessionStart | Exports `KGKIT_HOME`; inside a workspace it injects a brief: competition facts, deadline countdown and phase, best CV/LB, CV↔LB correlation, recent experiments, submissions today, lessons from past competitions (`~/.kaggle-gm/lessons.md`) |
 | UserPromptSubmit | Detects competition work and tells Claude which 1–3 plugin skills to load before it answers. In evals this took skill use on Kaggle questions from 0 % to 100 % |
 | PreToolUse (Bash/PowerShell) | **Denies** commands that would print Kaggle credentials. **Denies** `kaggle competitions submit` when the file fails validation against `sample_submission` (header, rows, ids, NaNs, index column written by mistake). **Asks** when today's submission budget is used up |
-| PostToolUse | Logs submissions and reminds Claude to fetch the public score and attach it to the ledger |
+| PreToolUse (GPU push) | **Asks** before a GPU `kaggle kernels push` when the cached weekly GPU quota, minus kernels still running, is exhausted or smaller than the push's `-t` cap |
+| PostToolUse | Logs submissions and reminds Claude to fetch the public score and attach it to the ledger; logs GPU kernel pushes so quota accounting includes them |
 
 Hooks never block for any other reason. They exit 0 on internal errors, and Python only starts
 for commands that mention Kaggle, which keeps overhead around 70 ms.
@@ -123,6 +127,7 @@ PYTHONPATH="$KGKIT_HOME" python -m kgkit <command>     # KGKIT_HOME is set by th
 | `blend --exp 3 7 9 --truth train.csv:y --folds folds.csv:fold --method hill --sample sample_submission.csv` | hill climbing / weights / rank blending with an honest nested score; warns if members used different folds |
 | `validate sub.csv sample_submission.csv` | metric-aware submission validation |
 | `metrics` / `score` / `vendor` | metric registry / scoring / copy kgkit into a project or Kaggle dataset |
+| `gpu quota\|plan\|build\|push\|status\|wait\|collect\|log` | train on Kaggle GPUs: live quota, budget to the deadline, remote training kernels, ledger import, GPU-hour accounting ([below](#training-on-kaggle-gpus)) |
 
 Python API highlights: `kgkit.cv.assign_folds` (stratified / group / stratified-group /
 multilabel), `time_series_splits(gap=h)`, `purged_kfold_splits`; `kgkit.metrics.get(name)`;
@@ -135,22 +140,55 @@ multilabel), `time_series_splits(gap=h)`, `purged_kfold_splits`; `kgkit.metrics.
 | File | Highlights |
 |---|---|
 | `train_gbdt.py` | LightGBM / XGBoost / CatBoost / sklearn HGB; frozen folds, seed averaging, label-metric decoding fitted on OOF (threshold / argmax / optimised rounding), log-target, id-aligned submission, `--smoke` |
-| `train_image.py` | timm; AMP (bf16/fp16), EMA, cosine warmup, head LR multiplier, hflip TTA; `--folds` lets you split folds across GPUs, and the run that completes the set logs the experiment |
-| `train_transformer.py` | HF AutoModel with mean/attention/CLS pooling, layer-wise LR decay, gradient accumulation, several evaluations per epoch, length-sorted inference, offline-model friendly |
+| `train_image.py` | timm; AMP (bf16/fp16), EMA, cosine warmup, head LR multiplier, hflip TTA; `--folds` lets you split folds across GPUs, and the run that completes the set logs the experiment; checkpoints before a session deadline and resumes, learning-curve pruning, `--assemble` |
+| `train_transformer.py` | HF AutoModel with mean/attention/CLS pooling, layer-wise LR decay, gradient accumulation, several evaluations per epoch, length-sorted inference, offline-model friendly; same deadline/resume/pruning/`--assemble` support |
+| `kaggle_gpu_runner.py` | generated by `kgkit gpu build`: the kernel that runs your training command on Kaggle (code bundle embedded, inputs linked into `data/`, one (job, fold) per GPU, deadline, resume, assembly, `kg_run.json` report) |
 | `inference_kernel.py` + `kernel/*.json` | offline Kaggle kernel: runtime test discovery, offline wheels, time-budgeted ensemble members with fallback, output validation; metadata with internet off |
+
+## Training on Kaggle GPUs
+
+No local GPU? `kgkit gpu` (and `/kg-gpu`, skill `kaggle-gpu`) runs your local training command on
+Kaggle's free GPUs. It treats the weekly quota as the budget: the aim is the most leaderboard per
+GPU-hour, not the fastest wall clock.
+
+```bash
+python -m kgkit gpu quota                    # live quota, reset countdown, "use it or lose it" warning
+python -m kgkit gpu plan                     # hours until the deadline, final-week reserve, measured costs
+# screen two ideas on fold 0 in ONE session (one per T4), stopping losers early
+python -m kgkit gpu build --name lr3e4 --folds 0 --hours 2 --prune-against best --dataset me/knee-png-512 \
+    --cmd "python src/train_image.py --name lr3e4 --lr 3e-4 --folds {fold}" \
+    --extra-job res448 "python src/train_image.py --name res448 --img-size 448 --folds {fold}"
+python -m kgkit gpu push kernels/lr3e4-train  # quota check + -t cap + run log (confirm first: spends quota)
+python -m kgkit gpu wait <user>/lr3e4-train --collect    # background; collect = ledger + GPU-hours + diagnosis
+```
+
+What it does for you:
+- **Both T4s busy.** One process per (job, fold), one per GPU. Two folds or two screens share a quota hour.
+- **Same code, same folds.** Your `src/`, `kgkit`, `competition.json` and `data/folds.csv` are embedded
+  in the kernel. Inputs are linked into `./data`, so the command runs unchanged and the imported ledger
+  records carry the same `folds_hash`.
+- **Never loses work.** `KG_DEADLINE` makes the templates checkpoint before the session limit.
+  `--resume-from <kernel>` skips finished folds and continues timed-out ones.
+- **Stops losers early.** `--prune-against best` compares the best-so-far score with the baseline's learning
+  curve at the same fraction of the schedule, using the baseline's fold std as the margin.
+- **Measures itself.** `collect` imports ledger records with fresh ids, records GPU-hours, and flags an idle
+  second GPU, input-bound runs (< 60 % utilisation), deadline hits and pruned folds.
+- **Guards the quota.** `push` refuses runs whose cap exceeds the plannable hours. The hook asks
+  before a raw GPU `kaggle kernels push` when the quota is exhausted.
 
 ## Verification
 
-- **63 pytest tests** (one runs only when LightGBM is installed) cover kgkit, all four templates end to end (tiny synthetic data, plus an
-  offline tiny BERT), and the hooks driven through `run.sh` exactly as Claude Code calls them.
+- **84 pytest tests** (one runs only when LightGBM is installed) cover kgkit, all templates end to end (tiny synthetic data, plus an
+  offline tiny BERT), the remote GPU runner executed in a simulated `/kaggle` layout (build, run on two
+  fake GPUs, resume, prune, collect), and the hooks driven through `run.sh` exactly as Claude Code calls them.
 - **Live Claude Code sessions** confirmed the SessionStart brief and the credential guard
   (tested against a dummy `kaggle.json`).
 - **Real-data dry run** on `playground-series-s6e2` (630k rows, no submission made): EDA 6 s,
   adversarial AUC 0.501, LightGBM CV AUC 0.95521, HGB 0.95490, hill-climb blend 0.95537
   (honest nested). The run surfaced 5 bugs, all fixed (see git history).
 - **Plugin evals** (`claude plugin eval`, Haiku, 3 runs per arm): the with-plugin arm scored
-  100 % on all 7 cases. `ensemble-hygiene` scored 1.00 with the plugin vs 0.00 without. The
-  other cases pass with or without the plugin on Haiku, so they work as regression tests.
+  100 % on all 8 cases. `ensemble-hygiene` and `gpu-quota-budget` scored 1.00 with the plugin vs
+  0.00 without. The other cases pass with or without the plugin on Haiku, so they work as regression tests.
 
 ## Development
 
@@ -167,7 +205,7 @@ Repository layout:
 .claude-plugin/marketplace.json        marketplace manifest (this repo is installable)
 plugins/kaggle-grandmaster/
   .claude-plugin/plugin.json
-  skills/<name>/SKILL.md               19 knowledge skills + 15 kg-* commands
+  skills/<name>/SKILL.md               20 knowledge skills + 16 kg-* commands
   agents/*.md                          9 subagents
   hooks/                               hooks.json, run.sh launcher, stdlib-only Python hooks
   kgkit/                               the toolkit (python -m kgkit)
@@ -182,6 +220,9 @@ tests/                                 pytest suite
   the website. The plugin reminds you at the right moments.
 - Submitting uses your quota and goes out to Kaggle. Claude confirms before submitting unless
   you have explicitly authorised autonomous submissions. `kg-grind` never submits on its own.
+- Pushing a GPU kernel spends your weekly Kaggle quota. Claude confirms before `kgkit gpu push` unless
+  you have authorised remote runs for the task. Quota and session limits are read live (`kaggle quota`,
+  Kaggle CLI >= 2.2) and may change on Kaggle's side.
 - The domain playbooks reflect competition practice up to 2026. Recon and the
   solution-researcher agent exist so that current competition-specific findings take priority.
 

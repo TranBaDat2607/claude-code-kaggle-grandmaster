@@ -37,6 +37,7 @@ kernels/     Kaggle notebooks / datasets for code-competition inference
 - `/kaggle-grandmaster:kg-status` — where we stand
 - `/kaggle-grandmaster:kg-experiment <idea>` — run one disciplined experiment
 - `/kaggle-grandmaster:kg-grind` — autonomous improvement loop
+- `/kaggle-grandmaster:kg-gpu` — train on Kaggle GPUs within the weekly quota (screen, promote, resume)
 - `/kaggle-grandmaster:kg-ensemble` — blend the best diverse models
 - `/kaggle-grandmaster:kg-submit <file>` — validate, submit, log
 - `/kaggle-grandmaster:kg-final` — choose the final submissions

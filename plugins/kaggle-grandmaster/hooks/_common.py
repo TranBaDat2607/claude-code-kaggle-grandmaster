@@ -14,9 +14,11 @@ from pathlib import Path
 PLUGIN_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PLUGIN_ROOT))
 
+from kgkit import gpu as G  # noqa: E402  (stdlib-only module)
 from kgkit import state as S  # noqa: E402  (stdlib-only module)
 
 SUBMIT_RE = re.compile(r"kaggle(?:\.exe)?\s+(?:competitions|c)\s+submit\b(.*)", re.IGNORECASE | re.DOTALL)
+PUSH_RE = re.compile(r"kaggle(?:\.exe)?\s+kernels\s+(?:push|update)\b(.*)", re.IGNORECASE | re.DOTALL)
 
 
 def read_input() -> dict:
@@ -44,12 +46,8 @@ def workspace(payload: dict) -> Path | None:
         return None
 
 
-def parse_submit(command: str) -> dict | None:
-    """Extract competition / file / message / kernel from a `kaggle competitions submit` command."""
-    m = SUBMIT_RE.search(command)
-    if not m:
-        return None
-    rest = m.group(1).replace("\\", "/")  # Windows paths: POSIX lexing would treat \ as an escape
+def _tokens(rest: str) -> list[str]:
+    rest = rest.replace("\\", "/")  # Windows paths: POSIX lexing would treat \ as an escape
     try:
         lex = shlex.shlex(rest, posix=True, punctuation_chars=True)
         lex.whitespace_split = True
@@ -59,8 +57,58 @@ def parse_submit(command: str) -> dict | None:
     # stop at the next shell separator (quote-aware: separators inside quotes stay in their token)
     for i, t in enumerate(toks):
         if t in {"&&", "||", ";", "|", "&", ";;"}:
-            toks = toks[:i]
-            break
+            return toks[:i]
+    return toks
+
+
+def parse_push(command: str) -> dict | None:
+    """Extract folder / timeout / accelerator from a `kaggle kernels push` command."""
+    m = PUSH_RE.search(command)
+    if not m:
+        return None
+    toks = _tokens(m.group(1))
+    out = {"path": None, "timeout": None, "accelerator": None}
+    flags = {"-p": "path", "--path": "path", "-t": "timeout", "--timeout": "timeout", "--accelerator": "accelerator"}
+    i = 0
+    while i < len(toks):
+        t = toks[i]
+        if t in flags and i + 1 < len(toks):
+            out[flags[t]] = toks[i + 1]
+            i += 2
+            continue
+        if "=" in t and t.split("=", 1)[0] in flags:
+            k, v = t.split("=", 1)
+            out[flags[k]] = v
+        i += 1
+    return out
+
+
+def push_target(payload: dict, push: dict) -> tuple[Path, dict] | None:
+    """(kernel folder, kernel-metadata.json) of a parsed push, or None when unreadable."""
+    folder = Path(push.get("path") or ".")
+    if not folder.is_absolute():
+        folder = Path(payload.get("cwd") or ".") / folder
+    try:
+        meta = json.loads((folder / "kernel-metadata.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return folder, meta
+
+
+def push_uses_gpu(push: dict, meta: dict) -> bool:
+    acc = (push.get("accelerator") or "").strip().lower()
+    if acc:
+        return acc not in {"none", "cpu", "no"} and "tpu" not in acc
+    gpu = meta.get("enable_gpu")
+    return gpu is True or str(gpu).lower() == "true" or str(meta.get("machine_shape", "")).startswith("Nvidia")
+
+
+def parse_submit(command: str) -> dict | None:
+    """Extract competition / file / message / kernel from a `kaggle competitions submit` command."""
+    m = SUBMIT_RE.search(command)
+    if not m:
+        return None
+    toks = _tokens(m.group(1))
     out = {"competition": None, "file": None, "message": None, "kernel": None, "version": None}
     flags = {"-f": "file", "--file": "file", "-m": "message", "--message": "message",
              "-k": "kernel", "--kernel": "kernel", "-v": "version", "--version": "version"}

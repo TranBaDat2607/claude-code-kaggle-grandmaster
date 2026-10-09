@@ -7,6 +7,8 @@ Copy to src/, edit CONFIG, then:
     # two GPUs: run disjoint folds in parallel; the run that completes the set logs the experiment
     CUDA_VISIBLE_DEVICES=0 python src/train_image.py --name cnx --folds 0 2 4 &
     CUDA_VISIBLE_DEVICES=1 python src/train_image.py --name cnx --folds 1 3
+    # on Kaggle GPUs (quota-aware, resumable, both T4s busy): see the kaggle-gpu skill
+    python -m kgkit gpu build --name cnx --hours 6 --cmd "python src/train_image.py --name cnx --folds {fold}"
 
 The train CSV needs an image path column (relative to image_dir) and the target column(s).
 task: "multiclass" (single label), "multilabel" (several 0/1 columns), "regression"/"binary"
@@ -37,6 +39,7 @@ except ImportError:
     sys.path.insert(0, os.environ.get("KGKIT_HOME", ""))
 from kgkit import metrics as M
 from kgkit import state as S
+from kgkit.budget import TrainBudget
 from kgkit.experiment import Ledger, seed_everything
 
 CONFIG = dict(
@@ -201,6 +204,7 @@ def main():
     ap.add_argument("--no-pretrained", action="store_true")
     ap.add_argument("--notes")
     ap.add_argument("--smoke", action="store_true", help="1 fold, 2 batches per epoch, 1 epoch, nothing logged")
+    ap.add_argument("--assemble", action="store_true", help="no training: assemble finished folds and log")
     a = ap.parse_args()
     cfg = dict(CONFIG)
     for k in ("name", "backbone", "img_size", "epochs", "batch_size", "lr", "notes"):
@@ -253,8 +257,9 @@ def main():
     loader_kw = dict(num_workers=cfg["num_workers"], pin_memory=amp, persistent_workers=cfg["num_workers"] > 0)
     crit = loss_fn(task, cfg["label_smoothing"])
     t0 = time.time()
+    stopped = None  # "timeout" | "pruned": the session deadline or the baseline curve ended this run early
 
-    for fold in run_folds:
+    for fold in ([] if a.assemble else run_folds):
         tr = np.flatnonzero(train["fold"].to_numpy() != fold)
         va = np.flatnonzero(train["fold"].to_numpy() == fold)
         if a.smoke:
@@ -271,8 +276,20 @@ def main():
         sched = cosine_with_warmup(opt, total, int(cfg["warmup_frac"] * total))
         scaler = torch.amp.GradScaler(enabled=amp and not torch.cuda.is_bf16_supported())
         ema = EMA(model, cfg["ema_decay"])
-        best, best_pred = metric.worst(), None
-        for epoch in range(cfg["epochs"]):
+        best, best_pred, start_epoch = metric.worst(), None, 0
+        budget = TrainBudget(out_dir, fold, cfg["epochs"], metric.greater_is_better)
+        resume = out_dir / f"fold{fold}_resume.pt"
+        if resume.exists() and not a.smoke:  # continue a fold the previous session checkpointed
+            ck = torch.load(resume, map_location=device, weights_only=False)
+            model.load_state_dict(ck["model"])
+            ema.module.load_state_dict(ck["ema"])
+            opt.load_state_dict(ck["opt"])
+            sched.load_state_dict(ck["sched"])
+            scaler.load_state_dict(ck["scaler"])
+            best, best_pred, start_epoch = ck["best"], ck["best_pred"], ck["epoch"]
+            print(f"fold {fold}: resumed at epoch {start_epoch} (best {best:.5f})", flush=True)
+        for epoch in range(start_epoch, cfg["epochs"]):
+            budget.start_epoch()
             model.train()
             for x, yb in dl_tr:
                 x, yb = x.to(device, non_blocking=True), yb.to(device, non_blocking=True)
@@ -293,6 +310,21 @@ def main():
             if metric.is_better(score, best) or best_pred is None:
                 best, best_pred = score, pred
                 torch.save(ema.module.state_dict(), out_dir / f"fold{fold}.pt")
+            action = "continue" if a.smoke else budget.end_epoch(epoch, score)
+            if action == "timeout":
+                torch.save({"model": model.state_dict(), "ema": ema.module.state_dict(), "opt": opt.state_dict(),
+                            "sched": sched.state_dict(), "scaler": scaler.state_dict(), "epoch": epoch + 1,
+                            "best": best, "best_pred": best_pred}, resume)
+                budget.write_status("timeout", next_epoch=epoch + 1)
+                print(f"fold {fold}: session deadline near - checkpointed after epoch {epoch}; resume later", flush=True)
+            elif action == "prune":
+                budget.write_status("pruned", epoch=epoch)
+                print(f"fold {fold}: PRUNED at epoch {epoch} - best {best:.5f} trails the baseline curve", flush=True)
+            if action != "continue":
+                stopped = "timeout" if action == "timeout" else "pruned"
+                break
+        if stopped:
+            break
         if cfg["tta_hflip"]:
             ema.module.load_state_dict(torch.load(out_dir / f"fold{fold}.pt", map_location=device))
             best_pred = predict(ema.module, dl_va, device, task, amp, hflip=True)
@@ -303,10 +335,20 @@ def main():
             dl_te = DataLoader(ImageDataset(test_paths, None, tf_eval), batch_size=cfg["batch_size"] * 2, **loader_kw)
             ema.module.load_state_dict(torch.load(out_dir / f"fold{fold}.pt", map_location=device))
             np.save(out_dir / f"fold{fold}_test.npy", predict(ema.module, dl_te, device, task, amp, cfg["tta_hflip"]))
+        if not a.smoke:
+            budget.best = best
+            budget.write_status("done")
+            resume.unlink(missing_ok=True)
         print(f"fold {fold} best {metric.name} {best:.5f}", flush=True)
 
     if a.smoke:
         print("smoke run OK (not logged)")
+        return
+    if stopped:
+        print(f"run stopped early ({stopped}); not logged")
+        return
+    if os.environ.get("KG_DEFER_ASSEMBLE") and not a.assemble:
+        print("fold(s) finished; assembly deferred to the remote runner")
         return
     done = [f for f in all_folds if (out_dir / f"fold{f}_oof.npy").exists()]
     if done != all_folds:

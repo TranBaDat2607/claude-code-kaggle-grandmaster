@@ -14,8 +14,10 @@ parts of a competition that are easy to get subtly wrong:
 - ``kgkit.experiment``  the experiment ledger (CV, LB, artefacts, git commit) + seeding
 - ``kgkit.submission``  submission validation against sample_submission
 - ``kgkit.state``       competition state (``.kaggle-gm/competition.json``)
+- ``kgkit.gpu``         training on Kaggle GPUs: quota, remote kernels, GPU-hour accounting
+- ``kgkit.budget``      training-loop guard: session deadline, resume checkpoints, learning-curve pruning
 
 Run ``python -m kgkit --help`` for the command line interface.
 """
 
-__version__ = "1.0.0"
+__version__ = "1.1.0"

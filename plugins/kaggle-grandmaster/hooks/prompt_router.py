@@ -48,6 +48,9 @@ ROUTES: list[tuple[str, str]] = [
     ("hyperparameter-tuning", r"optuna|hyper-?parameter|(?<!fine-)(?<!fine )\btuning\b|search space"),
     ("deep-learning-training", r"learning rate|scheduler|mixed precision|\bamp\b|\bema\b|loss (curve|spike)|"
                                r"nan loss|batch size|gradient"),
+    ("kaggle-gpu", r"\bgpu (quota|hours?|budget|time)|\bquota\b|\bp100\b|\bt4s?\b|accelerator|"
+                   r"\b(train|run)\w*\b.{0,40}\bon kaggle\b|kaggle(?:'s)? (gpus?|notebooks?|kernels?)\b.{0,40}\btrain|"
+                   r"remote(ly)? train|session (limit|timeout)"),
     ("kaggle-cli", r"kaggle (api|cli)|kaggle competitions|kaggle kernels|kaggle datasets|download (the )?data"),
 ]
 COMPILED = [(name, re.compile(rx, re.IGNORECASE)) for name, rx in ROUTES]

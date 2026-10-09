@@ -24,7 +24,8 @@ description: Competition-grade deep learning training practice in PyTorch — sc
 - `torch.compile`, `channels_last` for CNNs, fused AdamW, SDPA/flash attention.
 - Gradient accumulation for large effective batch; gradient checkpointing to fit bigger models.
 - Kaggle 2×T4: use DDP (`torchrun --nproc_per_node 2` via `accelerate`) or run two folds in
-  parallel, one per GPU — the latter is simpler and nearly 2× throughput.
+  parallel, one per GPU — the latter is simpler and nearly 2× throughput. No bf16 on T4/P100, and no
+  `torch.compile` on P100. Remote runs, quota and resume: skill `kaggle-gpu`.
 - Lower resolution / shorter max_len / subset of data for exploration; scale for finals.
 
 ## Debugging checklist (when the score is bad)

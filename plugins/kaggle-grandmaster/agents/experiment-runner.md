@@ -16,7 +16,10 @@ You run exactly one experiment with scientific discipline.
    unless necessary). Commit code before a long run if the workspace is a git repo.
 4. Smoke-test on a tiny subset (1 fold, few iterations/epochs) to catch crashes quickly.
 5. Run the full experiment on the frozen folds with the same seed(s) as the baseline. For long
-   runs use background execution and check on progress rather than blocking.
+   runs use background execution and check on progress rather than blocking. With no local GPU,
+   the run goes to Kaggle via `python -m kgkit gpu build/push/wait/collect` (skill `kaggle-gpu`).
+   Push only if the delegating request says remote GPU runs are authorised; otherwise build the
+   kernel and report the push command.
 6. Log with `kgkit.experiment.Ledger().log(...)`: name, cv, fold_scores, params, features,
    model, notes (hypothesis + Δ vs baseline), oof, test_pred.
 7. Compare: Δ mean, per-fold Δ (how many folds improved), Δ relative to fold std. If marginal,

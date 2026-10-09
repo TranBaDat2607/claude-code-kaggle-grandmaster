@@ -55,6 +55,28 @@ def _deadline(st) -> str:
     return f"deadline {d.isoformat()} ({days} days left; phase: {phase})"
 
 
+def gpu_line(root: Path) -> str:
+    """Cached Kaggle GPU quota (no network at session start) and remote runs still in flight."""
+    q = C.G.cached_quota(root)
+    active = [r for r in C.G.runs(root) if r.get("status") in C.G.ACTIVE]
+    if q is None and not active:
+        return ""
+    s = ""
+    if q is not None:
+        avail = C.G.available_hours(root, q)
+        s = f"Kaggle GPU quota (cached {q.get('fetched_at', '?')}): {avail:.1f}h plannable of {q.get('total_h', 0):.0f}h"
+        refresh = C.G._parse_time(q.get("refresh_at"))
+        if refresh is not None:
+            h = (refresh - dt.datetime.now(dt.timezone.utc)).total_seconds() / 3600
+            s += f", resets in {h:.0f}h"
+            if 0 < h <= 36 and avail >= 1:
+                s += " - USE IT OR LOSE IT: queue long useful runs before the reset"
+        s += "."
+    if active:
+        s += f" Remote GPU runs in flight: {', '.join(r['kernel'] for r in active)} (`python -m kgkit gpu status`)."
+    return s.strip()
+
+
 def brief(root: Path) -> str:
     st = C.S.load(root)
     lines = []
@@ -89,6 +111,9 @@ def brief(root: Path) -> str:
         lines.append("Ledger is empty — next step is usually /kg-cv then /kg-baseline.")
     used = C.submissions_today(root)
     lines.append(f"Submissions logged today (UTC): {used}/{st.daily_submissions}.")
+    gq = gpu_line(root)
+    if gq:
+        lines.append(gq)
     if not (root / "data" / "folds.csv").exists():
         lines.append("No data/folds.csv yet — freeze the CV scheme before comparing experiments (/kg-cv).")
     return "\n".join(lines)

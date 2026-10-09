@@ -25,7 +25,9 @@ Budget / focus: `$ARGUMENTS` (default: 6 experiments, no specific focus).
    the domain skill for untried levers, (c) `solution-researcher` for prior art.
 3. **Pick** the top idea by (gain × probability) / cost, favouring cheap high-information tests early
    and scaling runs late. Batch independent cheap experiments in parallel when hardware allows
-   (e.g. two GPUs → two `experiment-runner` agents).
+   (e.g. two GPUs → two `experiment-runner` agents). Without a local GPU, run GPU experiments
+   through `/kg-gpu` (1-fold screens, two per Kaggle session, with pruning). Pushing spends the
+   user's weekly quota, so it needs their authorisation for this loop.
 4. **Run** it via the `/kg-experiment` protocol (or delegate to `experiment-runner`).
 5. **Update**: backlog status, CLAUDE.md notes (one line per experiment), commit.
 6. Every ~3 kept improvements: refresh the ensemble (`ensemble-architect`) and prepare a candidate

@@ -128,3 +128,52 @@ def test_prompt_router(plugin_root, tmp_path_factory, ws):
     assert "kaggle-grandmaster:grandmaster-playbook" in out["additionalContext"]
     # slash commands are left alone
     assert ask("/kaggle-grandmaster:kg-status", ws) is None
+
+
+def _gpu_kernel(ws, quota_h, gpu=True):
+    kdir = ws / "kernels" / "x-train"
+    kdir.mkdir(parents=True)
+    meta = {"id": "me/x-train", "code_file": "x.py", "enable_gpu": gpu}
+    if gpu:
+        meta["machine_shape"] = "NvidiaTeslaT4"
+    (kdir / "kernel-metadata.json").write_text(json.dumps(meta))
+    (ws / ".kaggle-gm" / "gpu_quota.json").write_text(json.dumps(
+        {"used_h": 30 - quota_h, "remaining_h": quota_h, "total_h": 30, "refresh_at": "2099-01-03T00:00:00Z",
+         "fetched_at": "2026-01-01T00:00:00Z"}))
+
+
+def test_gpu_push_guard(plugin_root, ws):
+    _gpu_kernel(ws, quota_h=2.0)
+    out = hook(plugin_root, "pre_tool.py", bash("kaggle kernels push -p kernels/x-train -t 21600", ws))
+    assert out["permissionDecision"] == "ask" and "6.00h" in out["permissionDecisionReason"]
+    assert hook(plugin_root, "pre_tool.py", bash("kaggle kernels push -p kernels/x-train -t 3600", ws)) is None
+    # CPU push (e.g. a preprocessing kernel) never needs GPU quota
+    out = hook(plugin_root, "pre_tool.py", bash("kaggle kernels push -p kernels/x-train -t 21600 --accelerator none", ws))
+    assert out is None
+
+
+def test_gpu_push_guard_exhausted(plugin_root, ws):
+    _gpu_kernel(ws, quota_h=0.0)
+    out = hook(plugin_root, "pre_tool.py", bash("kaggle kernels push -p kernels\\x-train", ws))
+    assert out["permissionDecision"] == "ask" and "exhausted" in out["permissionDecisionReason"]
+
+
+def test_gpu_push_logged_and_briefed(plugin_root, ws):
+    _gpu_kernel(ws, quota_h=10.0)
+    post = {"hook_event_name": "PostToolUse", "tool_name": "Bash",
+            "tool_input": {"command": "kaggle kernels push -p kernels/x-train -t 7200"},
+            "tool_response": {"stdout": "Kernel version 4 successfully pushed.  Please check progress at https://x"},
+            "cwd": str(ws)}
+    out = hook(plugin_root, "post_tool.py", post)
+    assert "kgkit gpu wait me/x-train" in out["additionalContext"]
+    run = json.loads((ws / ".kaggle-gm" / "gpu_runs.jsonl").read_text().splitlines()[-1])
+    assert run["version"] == 4 and run["hours"] == 2.0 and run["status"] == "pushed"
+    ctx = hook(plugin_root, "session_start.py", {"hook_event_name": "SessionStart", "cwd": str(ws)})["additionalContext"]
+    assert "Kaggle GPU quota" in ctx and "me/x-train" in ctx
+
+
+def test_prompt_router_gpu(plugin_root, tmp_path_factory):
+    plain = tmp_path_factory.mktemp("plain2")
+    out = hook(plugin_root, "prompt_router.py", {"hook_event_name": "UserPromptSubmit", "cwd": str(plain),
+               "prompt": "How do I train my model on Kaggle GPUs without wasting my weekly quota?"})
+    assert "kaggle-grandmaster:kaggle-gpu" in out["additionalContext"]
