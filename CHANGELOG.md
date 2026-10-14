@@ -8,6 +8,8 @@ Preparing for the official Claude plugin directory.
   `Edit`, `WebFetch` or `WebSearch` in `allowed-tools`, so Claude asks according to the user's own
   permission settings. The README shows how to allow `python -m kgkit` for hands-off grinding.
 - **Plugin icon** at `.claude-plugin/icon.png`, plus a `LICENSE` in the plugin folder.
+- **Data and network access** section in both READMEs: everything exchanged with Kaggle, web reads,
+  how credentials are handled and what stays on the machine.
 - **Install docs**: install from the official directory or from this repository. Fixed the
   nonexistent `--marketplace` install flag in the plugin README.
 
