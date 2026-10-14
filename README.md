@@ -16,14 +16,32 @@ LLMs** (DeBERTa, LoRA fine-tuning, vLLM inference), **time series and forecastin
 biosignals**, **recommender systems and ranking**, **simulation agents** and **combinatorial
 optimisation**.
 
-## Quick start
+## Install
+
+Pick one of the two options.
+
+**Option A: from the official Claude plugin directory**
 
 ```bash
-# 1. add this repo as a plugin marketplace and install the plugin
-claude plugin marketplace add TranBaDat2607/claude-code-kaggle-grandmaster
-claude plugin install kaggle-grandmaster@claude-code-kaggle-grandmaster
+/plugin install kaggle-grandmaster@claude-plugins-official
+```
 
-# 2. inside Claude Code, start a competition
+You can also browse to it with `/plugin` → **Discover**, or add it from the plugin directory on claude.ai.
+
+**Option B: from this repository**
+
+```bash
+/plugin marketplace add TranBaDat2607/claude-code-kaggle-grandmaster
+/plugin install kaggle-grandmaster@claude-code-kaggle-grandmaster
+```
+
+From a shell, `claude plugin marketplace add ...` and `claude plugin install ...` do the same thing.
+
+## Quick start
+
+Inside Claude Code, start a competition:
+
+```bash
 /kaggle-grandmaster:kg-start playground-series-s6e2
 ```
 

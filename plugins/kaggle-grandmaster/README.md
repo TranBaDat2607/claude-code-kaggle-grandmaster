@@ -3,7 +3,23 @@
 Claude Code plugin for competing at Kaggle Grandmaster level. See the repository README for
 full documentation.
 
-Install: `/plugin install kaggle-grandmaster --marketplace TranBaDat2607/claude-code-kaggle-grandmaster`
+## Install
+
+From the official Claude plugin directory:
+
+```
+/plugin install kaggle-grandmaster@claude-plugins-official
+```
+
+Or from the GitHub repository:
+
+```
+/plugin marketplace add TranBaDat2607/claude-code-kaggle-grandmaster
+/plugin install kaggle-grandmaster@claude-code-kaggle-grandmaster
+```
+
+## Use
+
 
 Start a competition: `/kaggle-grandmaster:kg-start <competition-slug>`
 
