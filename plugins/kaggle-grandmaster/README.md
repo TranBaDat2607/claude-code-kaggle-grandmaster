@@ -39,3 +39,38 @@ Start a competition: `/kaggle-grandmaster:kg-start <competition-slug>`
 - `templates/`: tabular (GBDTs + linear / kNN / SVM / MLP), image and transformer training, remote GPU
   training runner, offline inference kernel, workspace CLAUDE.md
 - `evals/`: `claude plugin eval` suite (10 cases)
+
+## Data and network access
+
+The plugin has no server of its own and collects nothing. All network traffic goes to Kaggle under
+your own account, through the official `kaggle` CLI and the API token you set up yourself. The hooks
+make no network calls.
+
+**Exchanged with Kaggle (kaggle.com)**
+- Competition data: `kaggle competitions files / download / leaderboard / submissions`.
+- Submissions: `kaggle competitions submit` uploads your submission file. Claude confirms before it
+  submits, and the hooks block files that fail validation.
+- GPU training (`/kg-gpu`, `kgkit gpu`): `kaggle kernels push` uploads a private kernel containing
+  your workspace's `src/`, `kgkit`, `competition.json` and `data/folds.csv`. `kaggle kernels status /
+  logs / output` fetch its results, and `kaggle quota` reads your weekly GPU quota.
+- Code-competition notebooks and model weights (`/kg-kernel`): `kaggle kernels push` and
+  `kaggle datasets create / version`, private unless you make them public.
+- Public notebooks: `kaggle kernels list / pull` (`kgkit kernels top / pull`).
+- Forum history: `kaggle datasets download kaggle/meta-kaggle`, Kaggle's public forum export
+  (`kgkit discussions`).
+
+**Web reads.** `/kg-start`, `/kg-recon`, `/kg-ideas`, `/kg-grind`, `/kg-postmortem` and the
+`competition-analyst` and `solution-researcher` agents use Claude's WebSearch and WebFetch to read
+public competition pages, past solution write-ups and papers. They don't upload your files, and Claude
+asks before each call unless you have allowed these tools.
+
+**Credentials.** The plugin never uses or sends your Kaggle API key. `kgkit gpu` takes only your
+Kaggle username, from `KAGGLE_USERNAME` or the `username` field of `kaggle.json`, to name your
+kernels. The PreToolUse hook blocks commands that would print `kaggle.json` or `KAGGLE_KEY`.
+
+**Stored on your machine only**
+- `.kaggle-gm/` in the workspace: experiment ledger, idea backlog, submission log, GPU-run log and
+  the last quota snapshot.
+- `artifacts/` in the workspace: out-of-fold and test predictions.
+- `~/.kaggle-gm/meta-kaggle/`: the cached forum export.
+- `~/.kaggle-gm/lessons.md`: optional lessons from past competitions, read by the session brief.
