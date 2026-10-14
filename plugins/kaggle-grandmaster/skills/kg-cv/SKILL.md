@@ -2,7 +2,7 @@
 name: kg-cv
 description: Design, build, verify and freeze the cross-validation scheme (data/folds.csv) so it mirrors how the test set was split.
 argument-hint: "[strategy] [group-column]"
-allowed-tools: [Bash, PowerShell, Read, Write, Edit, Glob, Grep]
+allowed-tools: [Read, Glob, Grep]
 ---
 
 # /kg-cv

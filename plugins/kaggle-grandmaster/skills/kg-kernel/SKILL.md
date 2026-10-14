@@ -2,7 +2,7 @@
 name: kg-kernel
 description: Package the current best solution for a Kaggle code competition — offline inference script, weight/code/wheel datasets, kernel metadata with internet off, runtime estimate on hidden-test size, push and poll.
 argument-hint: "[experiment-id or blend id]"
-allowed-tools: [Bash, PowerShell, Read, Write, Edit, Glob, Grep, Agent]
+allowed-tools: [Read, Glob, Grep, Agent]
 disable-model-invocation: true
 ---
 

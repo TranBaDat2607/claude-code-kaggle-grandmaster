@@ -2,7 +2,7 @@
 name: kg-grind
 description: Autonomous improvement loop — repeatedly pick the highest-value idea from the backlog, run it as a disciplined experiment against the accepted baseline, decide with a paired comparison, update the backlog, and re-check the CV for overfitting, within a time or experiment budget.
 argument-hint: "[budget, e.g. 4h or 10 experiments] [focus area]"
-allowed-tools: [Bash, PowerShell, Read, Write, Edit, Glob, Grep, Agent, WebSearch, WebFetch]
+allowed-tools: [Read, Glob, Grep, Agent]
 disable-model-invocation: true
 ---
 

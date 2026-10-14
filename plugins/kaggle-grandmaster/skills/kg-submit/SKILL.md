@@ -2,7 +2,7 @@
 name: kg-submit
 description: Validate a submission file, check the daily budget, submit it to Kaggle with a ledger-linked message, poll for the public score and record it in the ledger.
 argument-hint: <submission-file> [experiment-id]
-allowed-tools: [Bash, PowerShell, Read, Glob, Grep]
+allowed-tools: [Read, Glob, Grep]
 disable-model-invocation: true
 ---
 

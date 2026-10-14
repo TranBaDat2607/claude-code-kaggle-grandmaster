@@ -2,7 +2,7 @@
 name: kg-ensemble
 description: Build the best honest ensemble from ledger experiments (diversity analysis, hill climbing / weights / rank / stacking with nested CV, post-processing re-tune) and write a validated blended submission.
 argument-hint: "[experiment ids...] [--method hill|weights|rank|stack|residual] [--prune N]"
-allowed-tools: [Bash, PowerShell, Read, Write, Edit, Glob, Grep, Agent]
+allowed-tools: [Read, Glob, Grep, Agent]
 ---
 
 # /kg-ensemble

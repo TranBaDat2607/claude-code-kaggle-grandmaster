@@ -2,7 +2,7 @@
 name: kg-gpu
 description: Run training on Kaggle's GPUs within the weekly quota — plan the GPU budget, screen ideas on one fold (two per 2xT4 session, with pruning), promote winners to full-fold remote runs, resume timed-out runs, collect results into the ledger with GPU-hour accounting.
 argument-hint: "[plan | screen <idea> [<idea2>] | run <experiment> | resume <kernel> | status | collect <kernel>]"
-allowed-tools: [Bash, PowerShell, Read, Write, Edit, Glob, Grep, Agent]
+allowed-tools: [Read, Glob, Grep, Agent]
 disable-model-invocation: true
 ---
 

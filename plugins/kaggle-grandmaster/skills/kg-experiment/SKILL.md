@@ -2,7 +2,7 @@
 name: kg-experiment
 description: Run one disciplined experiment for a hypothesis — single change, frozen folds, same seeds, ledger logging with its parent baseline, paired comparison (per-fold deltas + OOF bootstrap) against the accepted baseline, recorded keep/discard decision.
 argument-hint: <hypothesis or change to test>
-allowed-tools: [Bash, PowerShell, Read, Write, Edit, Glob, Grep, Agent]
+allowed-tools: [Read, Glob, Grep, Agent]
 ---
 
 # /kg-experiment
