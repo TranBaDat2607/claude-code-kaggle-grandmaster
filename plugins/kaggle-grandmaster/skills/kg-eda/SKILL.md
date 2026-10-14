@@ -2,7 +2,7 @@
 name: kg-eda
 description: Competition-focused EDA — red flags, leaks, drift, hidden groups, adversarial validation — written to reports/eda.md.
 argument-hint: "[train-file] [test-file]"
-allowed-tools: [Bash, PowerShell, Read, Write, Edit, Glob, Grep, Agent]
+allowed-tools: [Read, Glob, Grep, Agent]
 ---
 
 # /kg-eda

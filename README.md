@@ -37,6 +37,16 @@ You can also browse to it with `/plugin` → **Discover**, or add it from the pl
 
 From a shell, `claude plugin marketplace add ...` and `claude plugin install ...` do the same thing.
 
+**Permissions.** The `kg-*` commands don't pre-approve any shell, file-write or web tools, so
+Claude asks before each one according to your own permission settings. If you want `/kg-grind` to
+run hands-off, allow the toolkit in your workspace's `.claude/settings.json`:
+
+```json
+{ "permissions": { "allow": ["Bash(python -m kgkit:*)", "Edit(./src/**)", "Write(./src/**)"] } }
+```
+
+Kaggle submissions and GPU pushes still go through the plugin's hooks, which check them either way.
+
 ## Quick start
 
 Inside Claude Code, start a competition:

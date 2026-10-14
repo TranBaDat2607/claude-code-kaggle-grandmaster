@@ -2,7 +2,7 @@
 name: kg-postmortem
 description: After a competition ends — record private scores, measure which signals predicted the private leaderboard, study the top solutions, and distil reusable lessons into a post-mortem and a cross-competition lessons file.
 argument-hint: "[competition-slug]"
-allowed-tools: [Bash, PowerShell, Read, Write, Edit, Glob, Grep, Agent, WebSearch, WebFetch]
+allowed-tools: [Read, Glob, Grep, Agent]
 ---
 
 # /kg-postmortem

@@ -2,7 +2,7 @@
 name: kg-recon
 description: Research a Kaggle competition (metric, data, rules, timeline, top notebooks, discussions, similar past competitions, leak and shake-up risk) and write reports/recon.md.
 argument-hint: <competition-slug>
-allowed-tools: [Bash, Read, Write, Edit, Glob, Grep, WebFetch, WebSearch, Agent]
+allowed-tools: [Read, Glob, Grep, Agent]
 ---
 
 # /kg-recon

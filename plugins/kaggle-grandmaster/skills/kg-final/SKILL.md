@@ -1,7 +1,7 @@
 ---
 name: kg-final
 description: Choose the final Kaggle submissions to maximise expected private leaderboard score — evidence table, LB noise estimate, CV-vs-LB weighting, hedge selection and robustness checks.
-allowed-tools: [Bash, PowerShell, Read, Write, Glob, Grep, Agent]
+allowed-tools: [Read, Glob, Grep, Agent]
 ---
 
 # /kg-final

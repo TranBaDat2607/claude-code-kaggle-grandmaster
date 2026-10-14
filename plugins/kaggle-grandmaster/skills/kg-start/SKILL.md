@@ -2,7 +2,7 @@
 name: kg-start
 description: Bootstrap a Kaggle competition workspace end to end — recon, data download, workspace init, EDA, adversarial validation, frozen folds, metric implementation, baseline model and a first validated submission file.
 argument-hint: <competition-slug> [workspace-dir]
-allowed-tools: [Bash, PowerShell, Read, Write, Edit, Glob, Grep, WebFetch, WebSearch, Agent]
+allowed-tools: [Read, Glob, Grep, Agent]
 ---
 
 # /kg-start — bootstrap a competition

@@ -1,7 +1,7 @@
 ---
 name: kg-status
 description: Show where the competition stands — metric, deadline, accepted baseline, best CV, best LB, CV-LB correlation, recent experiments and decisions, top of the backlog, submissions left today — and recommend the next actions.
-allowed-tools: [Bash, PowerShell, Read, Glob, Grep]
+allowed-tools: [Read, Glob, Grep]
 ---
 
 # /kg-status
