@@ -2,7 +2,7 @@
 name: kg-ideas
 description: Generate a ranked, evidence-backed backlog of next experiments from error analysis, the domain playbook's untried levers, public notebooks, discussion/prior-art research and the ledger history, stored with kgkit backlog.
 argument-hint: "[focus area]"
-allowed-tools: [Bash, PowerShell, Read, Write, Edit, Glob, Grep, Agent, WebSearch, WebFetch]
+allowed-tools: [Read, Glob, Grep, Agent]
 ---
 
 # /kg-ideas

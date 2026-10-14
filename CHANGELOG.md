@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+Preparing for the official Claude plugin directory.
+
+- **No broad pre-approved tools**: the `kg-*` commands no longer list `Bash`, `PowerShell`, `Write`,
+  `Edit`, `WebFetch` or `WebSearch` in `allowed-tools`, so Claude asks according to the user's own
+  permission settings. The README shows how to allow `python -m kgkit` for hands-off grinding.
+- **Plugin icon** at `.claude-plugin/icon.png`, plus a `LICENSE` in the plugin folder.
+- **Install docs**: install from the official directory or from this repository. Fixed the
+  nonexistent `--marketplace` install flag in the plugin README.
+
 ## 1.2.0 — 2026-10-09
 
 Closing the gaps between the plugin and how Grandmasters actually run competitions: honest

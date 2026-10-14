@@ -2,7 +2,7 @@
 name: kg-debug
 description: Diagnose a CV-LB disagreement, a suspicious score jump, or a failed/odd submission using the systematic CV-LB debugging procedure and the validation auditor.
 argument-hint: "[symptom description or experiment id]"
-allowed-tools: [Bash, PowerShell, Read, Write, Edit, Glob, Grep, Agent]
+allowed-tools: [Read, Glob, Grep, Agent]
 ---
 
 # /kg-debug
