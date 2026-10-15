@@ -4,6 +4,7 @@ import json
 import shutil
 import subprocess
 import sys
+import uuid
 from pathlib import Path
 
 import pytest
@@ -200,3 +201,42 @@ def test_prompt_router_strategy_and_noise(plugin_root, tmp_path_factory):
         "Kaggle: my new model is +0.002 AUC but the fold std is 0.006, is the gain real or noise?")
     assert "kaggle-grandmaster:tabular-mastery" in ask("Run a groupby feature search for this Kaggle playground")
     assert "kaggle-grandmaster:competition-recon" in ask("Reproduce the top public notebook of this Kaggle comp")
+
+
+def test_prompt_router_harness_and_dedupe(plugin_root, tmp_path_factory, ws):
+    plain = tmp_path_factory.mktemp("plain4")
+    sid = uuid.uuid4().hex
+
+    def ask(prompt, cwd=plain, session=sid):
+        return hook(plugin_root, "prompt_router.py", {"hook_event_name": "UserPromptSubmit", "prompt": prompt,
+                                                      "cwd": str(cwd), "session_id": session})
+
+    # harness-injected text is never routed, even inside a workspace
+    checkin = ("Goal check-in: «finish the kaggle grandmaster plugin run» is still active. Check "
+               "`kaggle competitions submissions rsna` - Claude Code won't wake this session on its own.")
+    assert ask(checkin) is None and ask(checkin, ws) is None
+    assert ask("<task-notification>Kaggle kernel finished, OOF saved</task-notification>", ws) is None
+
+    # each skill is suggested once per session
+    blend = "How should I blend OOF predictions from 9 models for this Kaggle competition?"
+    assert "kaggle-grandmaster:ensembling" in ask(blend)["additionalContext"]
+    assert ask(blend) is None
+    ctx = ask("Kaggle: how do I optimise the F1 threshold on my OOF predictions?")["additionalContext"]
+    assert "kaggle-grandmaster:metric-optimization" in ctx and "kaggle-grandmaster:ensembling" not in ctx
+    assert "kaggle-grandmaster:ensembling" in ask(blend, session=uuid.uuid4().hex)["additionalContext"]
+
+    # plain "session" is Claude Code wording, not recsys
+    fresh = uuid.uuid4().hex
+    ctx = ask("Kaggle: keep training in this session and log the LB score", session=fresh)["additionalContext"]
+    assert "recsys-and-ranking" not in ctx
+    assert "kaggle-grandmaster:recsys-and-ranking" in ask(
+        "Session-based recommendation for this Kaggle comp: how to build candidates?", session=fresh)["additionalContext"]
+
+
+def test_prompt_router_task_domain(plugin_root, tmp_path):
+    S.CompetitionState(slug="knee", task="cv").save(tmp_path)
+    out = hook(plugin_root, "prompt_router.py", {
+        "hook_event_name": "UserPromptSubmit", "cwd": str(tmp_path), "session_id": uuid.uuid4().hex,
+        "prompt": "Ranking the MRI series by abnormality score: which ranking of slices should feed the CNN?"})
+    ctx = out["additionalContext"]
+    assert "kaggle-grandmaster:computer-vision" in ctx and "recsys-and-ranking" not in ctx

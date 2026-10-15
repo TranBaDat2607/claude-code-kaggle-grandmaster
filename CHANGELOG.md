@@ -12,6 +12,9 @@ Preparing for the official Claude plugin directory.
   how credentials are handled and what stays on the machine.
 - **Install docs**: install from the official directory or from this repository. Fixed the
   nonexistent `--marketplace` install flag in the plugin README.
+- **Prompt router** ignores harness messages (goal check-ins, task notifications), suggests each
+  skill at most once per session, no longer routes a plain "session" to recsys, and inside a
+  workspace with a known `task` does not suggest other domains' skills (#6).
 
 ## 1.2.0 — 2026-10-09
 
