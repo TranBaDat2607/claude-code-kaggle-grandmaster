@@ -30,7 +30,24 @@ kaggle competitions leaderboard <slug> --show         # top of public LB; --down
 Submission messages should always contain the ledger experiment id and CV so the LB score can be
 attached back (`python -m kgkit ledger lb <id> <score>`). Code competitions: submit via the
 notebook: `kaggle competitions submit <slug> -k <user>/<kernel> -v <version> -f submission.csv -m "..."`
-(verified against Kaggle CLI 2.2), or through the website.
+(verified against Kaggle CLI 2.2), or through the website. Success prints only `N submissions remaining
+today.`; the score appears after Kaggle reruns the notebook on the hidden test (hours, not minutes).
+
+A refused submit shows only `400 Client Error: Bad Request for url: ...`. The reason (for example
+`FAILED_PRECONDITION ... Your Notebook uses non-versioned datasets`) is in the response body:
+```python
+from kaggle.api.kaggle_api_extended import KaggleApi
+from requests.exceptions import HTTPError
+
+api = KaggleApi()
+api.authenticate()
+try:
+    api.competition_submit_code(file_name="submission.csv", message="0007_x | CV 0.81", competition="<slug>",
+                                kernel="<user>/<kernel>", kernel_version=3)
+except HTTPError as e:
+    print(e.response.text)
+```
+For a file submit, wrap `api.competition_submit(file_name, message, competition)` the same way.
 
 ## Notebooks (kernels)
 

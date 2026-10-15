@@ -71,5 +71,12 @@ apply; the local gateway can be run on the provided mock data — test with it.
 | Notebook Timeout | hidden test bigger than expected; TTA/folds too heavy; CPU-bound preprocessing |
 | Out of Memory | loading all test at once, several models resident, pandas copies |
 | Submission Scoring Error | wrong columns/ids/row count, NaN, wrong dtype, file name/location wrong |
+| Submit refused: `400 Bad Request` (`FAILED_PRECONDITION`) | a dataset attached to the notebook is non-versioned ("Your Notebook uses non-versioned datasets"), or another precondition fails (rules not accepted, internet on, wrong output file name). Attach a versioned copy or pin a dataset version, push a new kernel version, submit that version |
+
+The CLI prints only the status line of a refused submit. The reason is in the response body: print it with
+the Python API snippet in skill `kaggle-cli`. A successful notebook submit prints only `N submissions remaining
+today.`, and scoring waits for Kaggle to rerun the notebook on the hidden test, which takes hours. Poll the
+submissions list every ~30 minutes in the background.
+
 Reproduce locally with a scaled-up synthetic test; add defensive logging; validate the output
 with `python -m kgkit validate` logic inside the kernel (assert row counts/ids/no NaNs).
