@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.3.1 — 2026-10-15
 
 - **Directory submission**: removed `.gitattributes`. Its `* text=auto eol=lf` rewrote files at checkout,
   which the plugin directory scanner rejects. Every file is already committed with LF endings, so installed
