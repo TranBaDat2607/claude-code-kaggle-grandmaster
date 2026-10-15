@@ -2,6 +2,7 @@
 
 Commands
   init        create a competition workspace (.kaggle-gm/, folders, CLAUDE.md)
+  adopt       adopt an existing project mid-competition: .kaggle-gm/ only, past submissions imported
   status      one-screen summary: competition, best CV, CV-LB correlation, recent experiments
   folds       write folds.csv with a leak-free strategy and print the fold report
   eda         markdown EDA report with red flags
@@ -84,10 +85,9 @@ def _load_pred(led, ref: str, n: int | None):
 
 
 # ---------------------------------------------------------------------------- commands
-def cmd_init(a):
+def _state_from_args(a):
     from . import state as S
 
-    root = Path(a.dir).resolve()
     st = S.CompetitionState(
         slug=a.slug, metric=a.metric or "", task=a.task or "", target=a.target or "", id_col=a.id_col or "",
         code_competition=a.code_competition, runtime_limit_hours=a.runtime_hours, internet_allowed=not a.no_internet,
@@ -104,6 +104,14 @@ def cmd_init(a):
                   f"direction set to {'higher' if st.greater_is_better else 'lower'} is better")
     if a.lower_is_better:
         st.greater_is_better = False
+    return st
+
+
+def cmd_init(a):
+    from . import state as S
+
+    root = Path(a.dir).resolve()
+    st = _state_from_args(a)
     if (root / S.STATE_DIR / S.STATE_FILE).exists() and not a.force:
         raise SystemExit(f"{root / S.STATE_DIR / S.STATE_FILE} exists (use --force to overwrite)")
     st.save(root)
@@ -125,6 +133,74 @@ def cmd_init(a):
             text = text.replace(k, str(v))
         cm.write_text(text, encoding="utf-8")
     print(f"initialised competition workspace for '{a.slug}' at {root}")
+
+
+def cmd_adopt(a):
+    """Workspace state for an existing project: only .kaggle-gm/ is written, the repo layout is left alone."""
+    import datetime as dt
+    import subprocess
+
+    from . import adopt as A
+    from . import state as S
+
+    root = Path(a.dir).resolve()
+    found = A.detect(root, max_depth=4, max_dirs=20000, max_seconds=10) or {"slugs": [], "kernels": [],
+                                                                          "internet_off": False, "evidence": []}
+    if found["evidence"]:
+        print(f"found: {', '.join(found['evidence'])}" + (f" ({', '.join(found['kernels'][:8])})" if found["kernels"] else ""))
+    slug = a.slug
+    if not slug:
+        if len(found["slugs"]) != 1:
+            raise SystemExit("pass the competition slug: " + (f"candidates {', '.join(found['slugs'])}"
+                                                              if found["slugs"] else "none detected"))
+        slug = found["slugs"][0]
+        print(f"competition: {slug} (detected)")
+    a.slug = slug
+    state_file = root / S.STATE_DIR / S.STATE_FILE
+    if state_file.exists() and not a.force:
+        print(f"{state_file} exists: keeping it (use --force to rewrite it)")
+        slug = S.load(root).slug
+    else:
+        st = _state_from_args(a)
+        if found["internet_off"] and not a.no_internet:
+            st.internet_allowed = False
+            print("note: the competition kernels run with internet off; recorded internet_allowed=false")
+        if found["internet_off"] and not a.code_competition:
+            print("note: offline kernels with competition sources usually mean a code competition - "
+                  "re-run with --force --code-competition --runtime-hours H if so")
+        st.save(root)
+        print(f"wrote {state_file.relative_to(root).as_posix()} for '{slug}' (no folders, .gitignore or CLAUDE.md created)")
+
+    if a.no_submissions:
+        text = None
+    elif a.submissions_file:
+        text = Path(a.submissions_file).read_text(encoding="utf-8")
+    else:
+        cmd = [shutil.which("kaggle") or "kaggle", "competitions", "submissions", slug, "--format", "json"]
+        try:
+            r = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+            text = r.stdout if r.returncode == 0 else None
+            err = (r.stderr or r.stdout).strip().splitlines()[-1:] if r.returncode else []
+        except (OSError, subprocess.TimeoutExpired) as e:
+            text, err = None, [str(e)]
+        if text is None:
+            print(f"could not fetch the submission history ({' '.join(err) or 'kaggle CLI failed'}); "
+                  f"retry with `kaggle competitions submissions {slug} --format json > subs.json` and "
+                  f"`python -m kgkit adopt {slug} --submissions-file subs.json`")
+    if text is not None:
+        try:
+            recs = A.parse_submissions(text, slug)
+        except ValueError as e:
+            raise SystemExit(f"could not parse the submission history: {e}")
+        added, skipped = A.import_submissions(root, recs)
+        today = dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%d")
+        n_today = sum(r["time_utc"].startswith(today) and r["status"] != "failed" for r in recs)
+        scored = [r for r in recs if r["public_score"] is not None]
+        print(f"submission history: {len(recs)} on Kaggle, {added} imported, {skipped} already logged; "
+              f"{n_today} today (UTC), {len(scored)} with a public score")
+    print("next: record past experiments in the ledger (`kgkit ledger import <name> <oof> --truth ... --folds ...` "
+          "or `kgkit ledger add <name> <cv> <notes>`), mark the accepted one with `kgkit ledger decide <id> baseline`, "
+          "then `kgkit status`")
 
 
 def cmd_status(a):
@@ -759,6 +835,25 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--deadline")
     s.add_argument("--force", action="store_true")
     s.set_defaults(fn=cmd_init)
+
+    s = sub.add_parser("adopt", help="adopt an existing project: write .kaggle-gm/ only, import past submissions")
+    s.add_argument("slug", nargs="?", help="default: detected from kernel-metadata.json / README competition URLs")
+    s.add_argument("--dir", default=".")
+    s.add_argument("--metric")
+    s.add_argument("--lower-is-better", action="store_true")
+    s.add_argument("--task", choices=["tabular", "cv", "nlp", "llm", "timeseries", "audio", "rl", "optimization",
+                                      "recsys", "other"])
+    s.add_argument("--target")
+    s.add_argument("--id-col")
+    s.add_argument("--code-competition", action="store_true")
+    s.add_argument("--runtime-hours", type=float)
+    s.add_argument("--no-internet", action="store_true")
+    s.add_argument("--daily-subs", type=int, default=5)
+    s.add_argument("--deadline")
+    s.add_argument("--force", action="store_true", help="rewrite an existing competition.json")
+    s.add_argument("--submissions-file", help="saved `kaggle competitions submissions <slug> --format json` output")
+    s.add_argument("--no-submissions", action="store_true", help="do not import the submission history")
+    s.set_defaults(fn=cmd_adopt)
 
     s = sub.add_parser("status", help="workspace summary")
     s.add_argument("--dir", default=".")

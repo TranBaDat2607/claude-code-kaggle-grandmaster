@@ -24,10 +24,12 @@ this marketplace (`/plugin` → **Marketplaces**) or run `claude plugin update k
 ## Use
 
 
-Start a competition: `/kaggle-grandmaster:kg-start <competition-slug>`
+Start a competition: `/kaggle-grandmaster:kg-start <competition-slug>`. Already mid-competition in your own
+repo: `/kaggle-grandmaster:kg-adopt <competition-slug>` writes only `.kaggle-gm/` and imports past
+submissions and experiments, leaving your layout alone.
 
 - `skills/`: 21 knowledge playbooks (including `competition-strategy`: choosing competitions, the solo
-  gold, teaming and merging) + 16 `kg-*` slash commands
+  gold, teaming and merging) + 17 `kg-*` slash commands
 - `agents/`: 9 specialist subagents
 - `hooks/`: session brief (accepted baseline, backlog top, GPU quota), prompt→skill router, submission +
   GPU-quota guard, submission / GPU-run logger

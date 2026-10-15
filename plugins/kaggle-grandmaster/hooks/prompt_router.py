@@ -36,6 +36,9 @@ GATE = re.compile(
 )
 
 ROUTES: list[tuple[str, str]] = [
+    ("kg-adopt", r"\badopt\b|existing (repo|repository|project|code ?base|workspace|pipeline)|mid[- ]competition|"
+                 r"(already|been) (working|competing) on|weeks? into (the|this|a) competition|"
+                 r"set ?up (the )?(plugin|kgkit|workspace|kaggle-gm) (for|in|on) (my|this|an?)\b"),
     ("cv-lb-debugging", r"(cv|validation|local)\b.{0,60}\b(lb|leaderboard)|(lb|leaderboard)\b.{0,60}\bcv\b|"
                         r"\bgap\b|doesn'?t (match|transfer|track)|disagree|too good|suspicious"),
     ("grandmaster-playbook", r"\bnoise\b|significan|fold[- ]std|(gain|improvement)s? (is|are|was|were) real|"

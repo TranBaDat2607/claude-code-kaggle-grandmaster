@@ -1,6 +1,8 @@
 """SessionStart: expose kgkit to the session and, inside a competition workspace, inject a compact
 status brief (facts, deadline countdown, best CV/LB, accepted baseline, CV-LB agreement, recent
-experiments, top of the idea backlog, submissions today, lessons from past competitions)."""
+experiments, top of the idea backlog, submissions today, lessons from past competitions). Outside a
+workspace, a repo with signs of Kaggle work (kernel-metadata.json, competition URLs) is pointed at
+/kg-adopt rather than the full /kg-start bootstrap."""
 
 from __future__ import annotations
 
@@ -138,6 +140,26 @@ def lessons() -> str:
     return "Lessons from your past competitions (~/.kaggle-gm/lessons.md, latest):\n" + "\n".join(text[-12:])
 
 
+def no_workspace(cwd: str) -> str:
+    """Point a mid-competition repo at adoption; /kg-start is the full bootstrap for a new competition."""
+    try:
+        found = C.A.detect(cwd)
+    except (OSError, ValueError):
+        found = None
+    if not found:
+        return "Not in a competition workspace. Start one with /kaggle-grandmaster:kg-start <competition-slug>."
+    slug = found["slugs"][0] if len(found["slugs"]) == 1 else "<competition-slug>"
+    seen = ", ".join(found["evidence"])
+    if found["slugs"]:
+        seen += f"; competition {' / '.join(found['slugs'][:3])}"
+    flags = " --code-competition --runtime-hours <H> --no-internet" if found["internet_off"] else ""
+    return (f"This repo looks like existing Kaggle work ({seen}) but has no .kaggle-gm/ workspace, so submission "
+            f"logging, the daily-budget checks, this status brief and `kgkit status`/`ledger` are off. Adopt it in "
+            f"place with /kaggle-grandmaster:kg-adopt {slug} (writes only .kaggle-gm/, imports past submissions; "
+            f"or `python -m kgkit adopt {slug}{flags} --deadline <date>`). Use /kg-start only for a new competition: "
+            f"it bootstraps data, folds and a baseline from scratch.")
+
+
 def main() -> None:
     payload = C.read_input()
     _export_env()
@@ -153,7 +175,7 @@ def main() -> None:
         if les:
             parts.append(les)
     else:
-        parts.append("Not in a competition workspace. Start one with /kaggle-grandmaster:kg-start <competition-slug>.")
+        parts.append(no_workspace(payload.get("cwd") or os.getcwd()))
     C.emit("SessionStart", additionalContext="\n".join(parts))
 
 

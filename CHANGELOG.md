@@ -1,5 +1,20 @@
 # Changelog
 
+## Unreleased
+
+- **Adopt an existing repo** (#8): new `/kg-adopt` and `python -m kgkit adopt [slug]` for a project that is
+  already mid-competition. It writes only `.kaggle-gm/competition.json` (no folders, `.gitignore` or
+  `CLAUDE.md`) and imports the Kaggle submission history (`kaggle competitions submissions <slug>`, or
+  `--submissions-file`) into `.kaggle-gm/submissions.jsonl`, so today's submissions count against the daily
+  budget. The slug and internet setting are detected from `kernel-metadata.json` and competition URLs.
+  Re-running is safe. The skill also records the repo's existing experiments in the ledger and marks the
+  accepted baseline. Previously a repo without `.kaggle-gm/` was only told to run `/kg-start`, the full
+  bootstrap, so submission logging and the budget hooks stayed off for the whole session.
+- **Session start** outside a workspace now recognises Kaggle work (`kernel-metadata.json` files, competition
+  URLs in the README or git config) and suggests `/kg-adopt <slug>` with the detected flags, keeping `/kg-start`
+  for new competitions. The prompt router routes "existing repo / mid-competition" prompts to `kg-adopt`.
+  New eval `existing-repo-adopt`.
+
 ## 1.2.2 — 2026-10-15
 
 - **Code-competition submits** (#7): a refused `submit -k` (`400 Bad Request`) now explains that the reason
