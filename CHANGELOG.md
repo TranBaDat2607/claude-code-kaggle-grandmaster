@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased
+
+- **Code-competition submits** (#7): a refused `submit -k` (`400 Bad Request`) now explains that the reason
+  is in the response body, shows how to print it, and names the usual cause (a non-versioned dataset
+  attached to the notebook, `FAILED_PRECONDITION`). `code-competitions` §6 and `kaggle-cli` cover this.
+  A successful notebook submit (`N submissions remaining today.`) is logged as `submitted`, not `unknown`.
+  After a code submission the hook says that grading reruns the notebook and takes hours, estimated
+  from the kernel's measured runtime. Previously it said to poll in 1-2 minutes. New eval `code-comp-submit-400`.
+- **Automatic releases**: every push to `main` bumps the version (patch by default; labels
+  `release:minor` / `release:major` / `no-release`) in `plugin.json`, `marketplace.json` and `kgkit`.
+  It also turns this section into the release notes, then tags and creates a GitHub release, so
+  installed copies see each merge as an update. `scripts/bump_version.py`, `tests/test_version.py`.
+
 ## 1.2.1 — 2026-10-15
 
 Preparing for the official Claude plugin directory.

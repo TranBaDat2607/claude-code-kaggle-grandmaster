@@ -1,0 +1,99 @@
+name: release
+
+# Every push to main (normally a merged PR) releases a new plugin version: Claude Code only updates an
+# installed plugin when its version changes. Patch by default; PR labels `release:minor` / `release:major`
+# pick a bigger bump and `no-release` skips it. A push that already changed the version is only tagged.
+# Pushes made with GITHUB_TOKEN do not trigger workflows, so the release commit cannot loop.
+
+on:
+  push:
+    branches: [main]
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  pull-requests: read
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Decide
+        id: decide
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.sha }}
+          BEFORE: ${{ github.event.before }}
+        run: |
+          version_at() {
+            git show "$1:plugins/kaggle-grandmaster/.claude-plugin/plugin.json" 2>/dev/null \
+              | python -c 'import json, sys; print(json.load(sys.stdin).get("version", ""))' 2>/dev/null || true
+          }
+          pr=$(gh api "repos/$REPO/commits/$SHA/pulls" --jq '[.[] | select(.merged_at != null)][0] // empty' || true)
+          if [ -n "$pr" ]; then
+            labels=$(jq -r '[.labels[].name] | join(",")' <<<"$pr")
+            note="$(jq -r .title <<<"$pr") (#$(jq -r .number <<<"$pr"))"
+          else
+            labels=""
+            note=$(git log -1 --format=%s "$SHA")
+          fi
+          part=patch
+          case ",$labels," in *",release:minor,"*) part=minor ;; esac
+          case ",$labels," in *",release:major,"*) part=major ;; esac
+          if [ "$(version_at "$SHA")" != "$(version_at "$BEFORE")" ]; then
+            action=tag
+          elif case ",$labels," in *",no-release,"*) true ;; *) false ;; esac; then
+            action=skip
+          else
+            action=bump
+          fi
+          echo "labels=$labels part=$part action=$action note=$note"
+          {
+            echo "action=$action"
+            echo "part=$part"
+            echo "note=$note"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Bump version and changelog
+        if: steps.decide.outputs.action == 'bump'
+        env:
+          PART: ${{ steps.decide.outputs.part }}
+          NOTE: ${{ steps.decide.outputs.note }}
+        run: |
+          version=$(python scripts/bump_version.py --part "$PART" --note "$NOTE")
+          python scripts/bump_version.py --check
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -am "Release $version" -m "$NOTE"
+          for attempt in 1 2 3; do
+            git push origin HEAD:main && break
+            git pull --rebase origin main
+          done
+
+      - name: Tag and publish the GitHub release
+        if: steps.decide.outputs.action != 'skip'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version=$(python scripts/bump_version.py --current)
+          tag="kaggle-grandmaster--v$version"
+          if git ls-remote --exit-code --tags origin "refs/tags/$tag" >/dev/null; then
+            echo "$tag already exists"
+            exit 0
+          fi
+          git tag "$tag"
+          git push origin "$tag"
+          python scripts/bump_version.py --notes "$version" > notes.md
+          gh release create "$tag" --title "kaggle-grandmaster $version" --notes-file notes.md --verify-tag

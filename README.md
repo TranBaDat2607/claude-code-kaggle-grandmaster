@@ -37,6 +37,11 @@ You can also browse to it with `/plugin` → **Discover**, or add it from the pl
 
 From a shell, `claude plugin marketplace add ...` and `claude plugin install ...` do the same thing.
 
+**Updates.** Every merge to `main` releases a new version. Marketplaces other than the official one don't
+auto-update by default, so run `/plugin` → **Marketplaces** → **Enable auto-update** once, or update by
+hand with `claude plugin marketplace update claude-code-kaggle-grandmaster` and
+`claude plugin update kaggle-grandmaster@claude-code-kaggle-grandmaster`.
+
 **Permissions.** The `kg-*` commands don't pre-approve any shell, file-write or web tools, so
 Claude asks before each one according to your own permission settings. If you want `/kg-grind` to
 run hands-off, allow the toolkit in your workspace's `.claude/settings.json`:
@@ -243,6 +248,13 @@ claude plugin validate plugins/kaggle-grandmaster
 cd plugins/kaggle-grandmaster && claude plugin eval . --runs 3 --model haiku
 ```
 
+Releases are automatic. On every push to `main`, `.github/workflows/release.yml` runs
+`scripts/bump_version.py`. That bumps the version in `plugin.json`, `marketplace.json` and
+`kgkit/__init__.py`, turns the `## Unreleased` section of `CHANGELOG.md` into the release notes, commits
+`Release X.Y.Z`, then tags `kaggle-grandmaster--vX.Y.Z` and creates a GitHub release. The bump is a patch
+by default. The PR labels `release:minor` and `release:major` select a bigger bump, and `no-release` skips
+the release. Don't edit the versions by hand.
+
 Repository layout:
 
 ```
@@ -255,6 +267,7 @@ plugins/kaggle-grandmaster/
   kgkit/                               the toolkit (python -m kgkit)
   templates/                           training / inference templates, CLAUDE.md template
   evals/                               plugin eval suite
+scripts/bump_version.py                version check / release bump (used by CI)
 tests/                                 pytest suite
 ```
 
