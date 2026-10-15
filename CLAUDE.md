@@ -19,4 +19,8 @@ This repo is a Claude Code marketplace (`.claude-plugin/marketplace.json`) conta
   (`kg-submit`, `kg-grind`, `kg-kernel`, `kg-gpu`) set `disable-model-invocation: true`.
 - When a new skill is added, add a route for it in `hooks/prompt_router.py` and, if it encodes non-obvious
   judgement, an eval case under `evals/`.
-- Keep versions in `plugin.json`, `marketplace.json` and `kgkit/__init__.py` in sync.
+- Don't bump versions by hand. Every push to `main` runs `.github/workflows/release.yml`, which runs
+  `scripts/bump_version.py` to bump `plugin.json`, `marketplace.json` and `kgkit/__init__.py` (patch by default;
+  PR labels `release:minor` / `release:major` / `no-release`), tags and makes a GitHub release.
+  `tests/test_version.py` checks the three stay in sync.
+- Write each change under `## Unreleased` at the top of `CHANGELOG.md`; the release turns it into `## X.Y.Z — date`.

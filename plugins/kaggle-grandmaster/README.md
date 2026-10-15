@@ -18,6 +18,9 @@ Or from the GitHub repository:
 /plugin install kaggle-grandmaster@claude-code-kaggle-grandmaster
 ```
 
+Each merge to the repository's `main` publishes a new version. To receive them, turn on auto-update for
+this marketplace (`/plugin` → **Marketplaces**) or run `claude plugin update kaggle-grandmaster@claude-code-kaggle-grandmaster`.
+
 ## Use
 
 

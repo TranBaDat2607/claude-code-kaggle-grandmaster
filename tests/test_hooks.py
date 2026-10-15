@@ -105,6 +105,36 @@ def test_post_logs_and_budget_ask(plugin_root, ws):
     assert out["permissionDecision"] == "ask"
 
 
+def _post(cmd, stdout, cwd):
+    return {"hook_event_name": "PostToolUse", "tool_name": "Bash", "tool_input": {"command": cmd},
+            "tool_response": {"stdout": stdout}, "cwd": str(cwd)}
+
+
+def _sub_log(ws):
+    return [json.loads(x) for x in (ws / ".kaggle-gm" / "submissions.jsonl").read_text().splitlines()]
+
+
+def test_post_code_submit_success_and_slow_poll(plugin_root, ws):
+    cmd = 'kaggle competitions submit demo -k me/infer -v 3 -f submission.csv -m "0002_cnn | CV 0.8"'
+    ctx = hook(plugin_root, "post_tool.py", _post(cmd, "4 submissions remaining today.", ws))["additionalContext"]
+    assert _sub_log(ws)[-1]["status"] == "submitted"
+    assert "reruns the notebook" in ctx and "1-9h" in ctx and "1-2 minutes" not in ctx
+    runs = ws / ".kaggle-gm" / "gpu_runs.jsonl"
+    runs.write_text(json.dumps({"kernel": "me/infer", "version": 3, "pushed_at": "2026-01-01T00:00:00Z",
+                                "finished_at": "2026-01-01T02:30:00Z", "status": "complete"}) + "\n")
+    ctx = hook(plugin_root, "post_tool.py", _post(cmd, "3 submissions remaining today.", ws))["additionalContext"]
+    assert "last run took 2.5h" in ctx
+
+
+def test_post_code_submit_400_explained(plugin_root, ws):
+    cmd = "kaggle competitions submit demo -k me/infer -v 1 -f submission.csv -m 0003_x"
+    out = ("400 Client Error: Bad Request for url: "
+           "https://api.kaggle.com/v1/competitions.CompetitionApiService/CreateCodeSubmission")
+    ctx = hook(plugin_root, "post_tool.py", _post(cmd, out, ws))["additionalContext"]
+    assert _sub_log(ws)[-1]["status"] == "failed"
+    assert "e.response.text" in ctx and "non-versioned" in ctx
+
+
 def test_parse_submit_variants(plugin_root):
     sys.path.insert(0, str(plugin_root / "hooks"))
     import _common as C
