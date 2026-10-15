@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.2.2 — 2026-10-15
 
 - **Code-competition submits** (#7): a refused `submit -k` (`400 Bad Request`) now explains that the reason
   is in the response body, shows how to print it, and names the usual cause (a non-versioned dataset
