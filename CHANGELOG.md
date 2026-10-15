@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.3.0 — 2026-10-15
 
 - **Adopt an existing repo** (#8): new `/kg-adopt` and `python -m kgkit adopt [slug]` for a project that is
   already mid-competition. It writes only `.kaggle-gm/competition.json` (no folders, `.gitignore` or
