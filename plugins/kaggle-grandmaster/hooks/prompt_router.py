@@ -4,17 +4,30 @@ Skill descriptions alone often don't make the model load a skill before answerin
 checklists inside never reach the context. This hook detects competition work (Kaggle vocabulary
 in the prompt, or a prompt typed inside a competition workspace), picks up to three relevant
 skills by keyword and tells Claude to load them first. Unrelated prompts produce no output.
+
+Only user-typed prompts are routed: harness-injected text (goal check-ins, task notifications) is
+ignored. Each skill is suggested at most once per session (state kept in the temp dir, keyed by
+session_id), and inside a workspace whose task is known, other domains' skills are not suggested.
 """
 
 from __future__ import annotations
 
+import json
 import re
 import sys
+import tempfile
+from pathlib import Path
 
 try:
     import _common as C
 except Exception:  # pragma: no cover - fail open
     sys.exit(0)
+
+HARNESS = re.compile(
+    r"^\s*goal check-in\b|<task-notification>|\[SYSTEM NOTIFICATION|<system-reminder>|"
+    r"^\s*<(command-name|command-message|local-command-stdout)>",
+    re.IGNORECASE,
+)
 
 GATE = re.compile(
     r"\bkaggle\b|\bleaderboard\b|\b(public|private)\s+(lb|score|leaderboard)\b|\blb\b|\boof\b|out[- ]of[- ]fold|"
@@ -46,7 +59,8 @@ ROUTES: list[tuple[str, str]] = [
     ("audio-and-signal", r"\baudio\b|spectrogram|\beeg\b|\becg\b|birdclef|\bsound\b|waveform"),
     ("simulation-and-optimization", r"simulation|\bagents?\b.{0,30}\b(game|environment)|\bsanta\b|\btsp\b|"
                                     r"combinatorial"),
-    ("recsys-and-ranking", r"recommend|\branking\b|candidate generation|co-?visitation|\bsession\b"),
+    ("recsys-and-ranking", r"recommend|\branking\b|candidate generation|co-?visitation|"
+                           r"session[- ]based|user sessions?|sessions? (ids?|features|length)"),
     ("hyperparameter-tuning", r"optuna|hyper-?parameter|(?<!fine-)(?<!fine )\btuning\b|search space"),
     ("deep-learning-training", r"learning rate|scheduler|mixed precision|\bamp\b|\bema\b|loss (curve|spike)|"
                                r"nan loss|batch size|gradient"),
@@ -62,12 +76,21 @@ ROUTES: list[tuple[str, str]] = [
 ]
 COMPILED = [(name, re.compile(rx, re.IGNORECASE)) for name, rx in ROUTES]
 
+# competition.json `task` -> its domain skill; inside a workspace the other domains are not suggested
+TASK_DOMAIN = {"tabular": "tabular-mastery", "cv": "computer-vision", "nlp": "nlp-and-llm", "llm": "nlp-and-llm",
+               "timeseries": "time-series", "audio": "audio-and-signal", "rl": "simulation-and-optimization",
+               "optimization": "simulation-and-optimization"}
+DOMAIN_SKILLS = set(TASK_DOMAIN.values()) | {"recsys-and-ranking"}
 
-def route(prompt: str, in_workspace: bool) -> list[str]:
+
+def route(prompt: str, in_workspace: bool, task: str = "") -> list[str]:
     if not (GATE.search(prompt) or in_workspace):
         return []
+    own = TASK_DOMAIN.get(task.strip().lower())
     hits = []
     for name, rx in COMPILED:
+        if own and name in DOMAIN_SKILLS and name != own:
+            continue
         n = len(rx.findall(prompt))
         if n:
             hits.append((n, name))
@@ -78,14 +101,54 @@ def route(prompt: str, in_workspace: bool) -> list[str]:
     return chosen or ["grandmaster-playbook"]
 
 
+def _seen_file(payload: dict) -> Path | None:
+    sid = re.sub(r"[^A-Za-z0-9_-]", "", str(payload.get("session_id") or ""))[:64]
+    return Path(tempfile.gettempdir()) / "kaggle-gm-router" / f"{sid}.json" if sid else None
+
+
+def _seen(path: Path | None) -> set[str]:
+    if path is None:
+        return set()
+    try:
+        return set(json.loads(path.read_text(encoding="utf-8")))
+    except (OSError, ValueError, TypeError):
+        return set()
+
+
+def _remember(path: Path | None, skills: set[str]) -> None:
+    if path is None:
+        return
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(sorted(skills)), encoding="utf-8")
+    except OSError:
+        pass
+
+
+def _task(root: Path | None) -> str:
+    if root is None:
+        return ""
+    try:
+        state = C.S.load(root)
+    except (OSError, ValueError, TypeError):
+        return ""
+    return state.task if state else ""
+
+
 def main() -> None:
     payload = C.read_input()
     prompt = payload.get("prompt") or ""
     if not prompt.strip() or prompt.lstrip().startswith("/"):
         return  # slash commands already carry their own instructions
-    skills = route(prompt, C.workspace(payload) is not None)
+    if HARNESS.search(prompt):
+        return  # goal check-ins and task notifications are not the user asking
+    root = C.workspace(payload)
+    seen_file = _seen_file(payload)
+    seen = _seen(seen_file)
+    skills = [s for s in route(prompt, root is not None, _task(root)) if s not in seen]
     if not skills:
         return
+    _remember(seen_file, seen | set(skills))
     names = ", ".join(f"kaggle-grandmaster:{s}" for s in skills)
     C.emit("UserPromptSubmit", additionalContext=(
         f"[kaggle-grandmaster] This is competition work. Before answering, load these skills with the Skill tool "
