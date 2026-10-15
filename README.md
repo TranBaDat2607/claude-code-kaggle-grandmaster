@@ -148,11 +148,11 @@ artifacts/<exp_id>/           oof.npy + test.npy, the inputs for ensembling
 
 | Event | Behaviour |
 |---|---|
-| SessionStart | Exports `KGKIT_HOME`; inside a workspace it injects a brief: competition facts, deadline countdown and phase, best CV/LB, accepted baseline, backlog top, CV↔LB correlation, recent experiments, submissions today, lessons from past competitions (`~/.kaggle-gm/lessons.md`) |
+| SessionStart | Exports `KGKIT_HOME`; inside a workspace it injects a brief: competition facts, deadline countdown and phase, best CV/LB, accepted baseline, backlog top, CV↔LB correlation, recent experiments, submissions today, lessons from past competitions (`~/.kaggle-gm/lessons.md`). Outside a workspace it recognises existing Kaggle work (`kernel-metadata.json`, competition URLs) and suggests `/kg-adopt <slug>` |
 | UserPromptSubmit | Detects competition work and tells Claude which 1–3 plugin skills to load before it answers. In evals this took skill use on Kaggle questions from 0 % to 100 % |
 | PreToolUse (Bash/PowerShell) | **Denies** commands that would print Kaggle credentials. **Denies** `kaggle competitions submit` when the file fails validation against `sample_submission` (header, rows, ids, NaNs, index column written by mistake). **Asks** when today's submission budget is used up |
 | PreToolUse (GPU push) | **Asks** before a GPU `kaggle kernels push` when the cached weekly GPU quota, minus kernels still running, is exhausted or smaller than the push's `-t` cap |
-| PostToolUse | Logs submissions and reminds Claude to fetch the public score and attach it to the ledger; logs GPU kernel pushes so quota accounting includes them |
+| PostToolUse | Logs submissions and reminds Claude to fetch the public score and attach it to the ledger (for code competitions: grading reruns the notebook and takes hours, estimated from its measured runtime). Explains a refused submit (`400 Bad Request`, usually `FAILED_PRECONDITION` from a non-versioned dataset). Logs GPU kernel pushes so quota accounting includes them |
 
 Hooks never block for any other reason. They exit 0 on internal errors, and Python only starts
 for commands that mention Kaggle, which keeps overhead around 70 ms.
@@ -166,6 +166,7 @@ PYTHONPATH="$KGKIT_HOME" python -m kgkit <command>     # KGKIT_HOME is set by th
 | Command | Purpose |
 |---|---|
 | `init <slug> --metric auc --target y --id-col id [--code-competition --runtime-hours 9 --no-internet] --deadline YYYY-MM-DD` | create a workspace |
+| `adopt [slug] [--metric ... --code-competition --no-internet] [--submissions-file subs.json]` | adopt an existing repo mid-competition: writes only `.kaggle-gm/competition.json` and imports your Kaggle submission history so today's submissions count against the budget; slug and internet setting detected from `kernel-metadata.json` / competition URLs; safe to re-run |
 | `status` | dashboard: accepted baseline, best CV/LB, CV↔LB correlation, recent experiments, backlog top, CV-overfitting warning |
 | `folds train.csv --target y [--group g] [--strategy ...]` | leak-free folds + fold report (group leakage check) |
 | `eda train.csv --test test.csv --target y --id-col id` | markdown EDA with red flags (leaks, ID-like columns, drift, unseen categories, duplicates, row-order correlation) |
@@ -237,7 +238,7 @@ What it does for you:
 
 ## Verification
 
-- **112 pytest tests** (one runs only when LightGBM is installed) cover kgkit (including paired comparisons, the backlog, feature search, multi-level/residual stacking and notebook review), all templates end to end (tiny synthetic data, plus an
+- **130 pytest tests** (one runs only when LightGBM is installed) cover kgkit (including paired comparisons, the backlog, feature search, multi-level/residual stacking, notebook review and repo adoption), all templates end to end (tiny synthetic data, plus an
   offline tiny BERT), the remote GPU runner executed in a simulated `/kaggle` layout (build, run on two
   fake GPUs, resume, prune, collect), and the hooks driven through `run.sh` exactly as Claude Code calls them.
 - **Live Claude Code sessions** confirmed the SessionStart brief and the credential guard
