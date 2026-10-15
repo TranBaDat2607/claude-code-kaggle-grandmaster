@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- **Directory submission**: removed `.gitattributes`. Its `* text=auto eol=lf` rewrote files at checkout,
+  which the plugin directory scanner rejects. Every file is already committed with LF endings, so installed
+  content is unchanged; `tests/test_repo_files.py` now fails if a CRLF file or a `.gitattributes` is committed.
 - **README**: `kgkit adopt` in the toolkit command table; the hooks table describes the `/kg-adopt` suggestion
   outside a workspace and the code-competition submit messages; test count updated to 130.
 
