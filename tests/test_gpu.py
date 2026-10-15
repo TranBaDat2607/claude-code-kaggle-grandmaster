@@ -361,7 +361,8 @@ def test_image_template_timeout_resume_and_assemble(tmp_path, plugin_root):
     assert len(json.loads((art / "curve_fold0.json").read_text())["points"]) == 3
 
 
-@pytest.mark.parametrize("rel", ["kgkit/gpu.py", "kgkit/budget.py", "kgkit/state.py", "templates/kaggle_gpu_runner.py"])
+@pytest.mark.parametrize("rel", ["kgkit/gpu.py", "kgkit/budget.py", "kgkit/state.py", "kgkit/backlog.py", "kgkit/adopt.py",
+                                 "templates/kaggle_gpu_runner.py"])
 def test_stdlib_only(plugin_root, rel):
     """Hooks import gpu/budget/state, and the runner executes inside Kaggle: standard library only."""
     import ast

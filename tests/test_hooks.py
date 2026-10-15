@@ -270,3 +270,28 @@ def test_prompt_router_task_domain(plugin_root, tmp_path):
         "prompt": "Ranking the MRI series by abnormality score: which ranking of slices should feed the CNN?"})
     ctx = out["additionalContext"]
     assert "kaggle-grandmaster:computer-vision" in ctx and "recsys-and-ranking" not in ctx
+
+
+def _mid_competition_repo(root):
+    k = root / "kernels" / "knee-infer"
+    k.mkdir(parents=True)
+    (k / "kernel-metadata.json").write_text(json.dumps(
+        {"id": "me/knee-infer", "competition_sources": ["rsna-knee"], "enable_internet": False}))
+    (root / "README.md").write_text("Solution for https://www.kaggle.com/competitions/rsna-knee/discussion\n")
+    return root
+
+
+def test_session_start_suggests_adopting_existing_repo(plugin_root, tmp_path):
+    _mid_competition_repo(tmp_path)
+    ctx = hook(plugin_root, "session_start.py", {"hook_event_name": "SessionStart", "cwd": str(tmp_path)})[
+        "additionalContext"]
+    assert "kg-adopt rsna-knee" in ctx and "kgkit adopt rsna-knee --code-competition" in ctx
+    assert "1 kernel-metadata.json" in ctx and "/kg-start only for a new competition" in ctx
+    assert not (tmp_path / ".kaggle-gm").exists()
+
+
+def test_prompt_router_adopt(plugin_root, tmp_path):
+    out = hook(plugin_root, "prompt_router.py", {
+        "hook_event_name": "UserPromptSubmit", "cwd": str(tmp_path), "session_id": uuid.uuid4().hex,
+        "prompt": "I'm two months into this Kaggle competition with an existing repo, how do I set up the plugin?"})
+    assert "kaggle-grandmaster:kg-adopt" in out["additionalContext"]

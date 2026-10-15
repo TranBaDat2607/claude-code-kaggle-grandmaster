@@ -64,6 +64,17 @@ Inside Claude Code, start a competition:
 adversarial validation, freezes the CV folds, trains a baseline and writes a validated
 submission file.
 
+Already weeks into a competition with your own repo? Adopt it in place instead:
+
+```bash
+/kaggle-grandmaster:kg-adopt <competition-slug>
+```
+
+`kg-adopt` writes only `.kaggle-gm/` (the competition facts), imports your past Kaggle submissions
+and the experiments your repo already tracks into the ledger, and marks the accepted baseline. Your
+layout, folds and scripts stay as they are. The session brief suggests it when a repo has
+`kernel-metadata.json` files or a competition URL but no workspace.
+
 **Requirements:** [Claude Code](https://claude.com/claude-code); Python ≥ 3.9 with
 `numpy pandas scikit-learn scipy` (LightGBM, PyTorch and similar libraries are only needed for the
 matching templates); `pip install kaggle` and a Kaggle API token; a POSIX `sh` for the hooks (Git
@@ -90,12 +101,12 @@ when no other plugin uses the same name.
 | Layer | Count | What it does |
 |---|---|---|
 | **Knowledge skills** | 21 | Playbooks Claude loads when relevant: master playbook, recon, validation, tabular, CV, NLP/LLM, time series, audio, simulation/optimisation, recsys, ensembling, metrics, tuning, DL training, boosters, code competitions, Kaggle CLI, Kaggle GPUs, CV-LB debugging, final selection, and competition strategy (choosing competitions, solo gold, teaming and merging) |
-| **Slash commands** | 16 | `kg-start`, `kg-recon`, `kg-eda`, `kg-cv`, `kg-baseline`, `kg-experiment`, `kg-grind`, `kg-gpu`, `kg-ensemble`, `kg-submit`, `kg-status`, `kg-kernel`, `kg-final`, `kg-debug`, `kg-ideas`, `kg-postmortem` |
+| **Slash commands** | 17 | `kg-start`, `kg-adopt`, `kg-recon`, `kg-eda`, `kg-cv`, `kg-baseline`, `kg-experiment`, `kg-grind`, `kg-gpu`, `kg-ensemble`, `kg-submit`, `kg-status`, `kg-kernel`, `kg-final`, `kg-debug`, `kg-ideas`, `kg-postmortem` |
 | **Specialist agents** | 9 | competition-analyst, solution-researcher, data-detective, validation-auditor, feature-engineer, experiment-runner, error-analyst, ensemble-architect, kernel-packager |
 | **Hooks** | 4 | session brief (incl. GPU quota), Kaggle-prompt → skill router, submission + GPU-push guard (validation, daily budget, weekly GPU quota, credential protection), submission / GPU-run logger |
-| **`kgkit` toolkit** | 19 modules | Tested Python: leak-free folds, 35+ metrics, threshold/rounding optimisers, hill climbing / multi-level and residual stacking / library pruning, adversarial validation, leak-safe features, brute-force feature search, EDA red flags, experiment ledger with decisions + lineage, paired experiment comparison, fresh-split recheck, idea backlog, public-notebook review, competition discussions, submission validation, Kaggle GPU pipeline |
+| **`kgkit` toolkit** | 20 modules | Tested Python: leak-free folds, 35+ metrics, threshold/rounding optimisers, hill climbing / multi-level and residual stacking / library pruning, adversarial validation, leak-safe features, brute-force feature search, EDA red flags, experiment ledger with decisions + lineage, paired experiment comparison, fresh-split recheck, idea backlog, public-notebook review, competition discussions, submission validation, Kaggle GPU pipeline |
 | **Templates** | 5 + metadata | Tabular (LightGBM/XGBoost/CatBoost/HGB + linear/kNN/SVM/MLP), timm image models, HF transformers (both resumable), offline inference kernel, remote GPU training runner |
-| **Evals** | 10 cases | `claude plugin eval` suite with a no-plugin baseline arm |
+| **Evals** | 12 cases | `claude plugin eval` suite with a no-plugin baseline arm |
 
 ## How a competition flows
 
@@ -261,7 +272,7 @@ Repository layout:
 .claude-plugin/marketplace.json        marketplace manifest (this repo is installable)
 plugins/kaggle-grandmaster/
   .claude-plugin/plugin.json
-  skills/<name>/SKILL.md               20 knowledge skills + 16 kg-* commands
+  skills/<name>/SKILL.md               21 knowledge skills + 17 kg-* commands
   agents/*.md                          9 subagents
   hooks/                               hooks.json, run.sh launcher, stdlib-only Python hooks
   kgkit/                               the toolkit (python -m kgkit)
