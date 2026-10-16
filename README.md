@@ -262,8 +262,8 @@ cd plugins/kaggle-grandmaster && claude plugin eval . --runs 3 --model haiku
 
 Releases are automatic. On every push to `main`, `.github/workflows/release.yml` runs
 `scripts/bump_version.py`. That bumps the version in `plugin.json`, `marketplace.json` and
-`kgkit/__init__.py`, turns the `## Unreleased` section of `CHANGELOG.md` into the release notes, commits
-`Release X.Y.Z`, then tags `kaggle-grandmaster--vX.Y.Z` and creates a GitHub release. The bump is a patch
+`kgkit/__init__.py`, commits `Release X.Y.Z`, then tags `kaggle-grandmaster--vX.Y.Z` and creates a GitHub
+release whose notes GitHub generates from the merged PRs. The bump is a patch
 by default. The PR labels `release:minor` and `release:major` select a bigger bump, and `no-release` skips
 the release. Don't edit the versions by hand.
 

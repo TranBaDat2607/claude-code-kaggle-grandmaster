@@ -23,4 +23,5 @@ This repo is a Claude Code marketplace (`.claude-plugin/marketplace.json`) conta
   `scripts/bump_version.py` to bump `plugin.json`, `marketplace.json` and `kgkit/__init__.py` (patch by default;
   PR labels `release:minor` / `release:major` / `no-release`), tags and makes a GitHub release.
   `tests/test_version.py` checks the three stay in sync.
-- Write each change under `## Unreleased` at the top of `CHANGELOG.md`; the release turns it into `## X.Y.Z — date`.
+- `CHANGELOG.md` is local-only (gitignored); keep notes there under `## Unreleased` if useful. GitHub release
+  notes are generated from the merged PRs, so give each PR a title and description that say what changed.

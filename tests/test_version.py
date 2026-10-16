@@ -12,6 +12,8 @@ _spec.loader.exec_module(bv)
 
 def _copy_repo(tmp_path: Path) -> Path:
     for f in bv.files(REPO).values():
+        if not f.is_file():  # CHANGELOG.md is local-only, absent in CI
+            continue
         dst = tmp_path / f.relative_to(REPO)
         dst.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy(f, dst)
@@ -54,3 +56,13 @@ def test_bump_without_unreleased_inserts_note(tmp_path):
     a = (REPO / ".claude-plugin" / "marketplace.json").read_text(encoding="utf-8").splitlines()
     b = bv.files(root)["marketplace.json"].read_text(encoding="utf-8").splitlines()
     assert len(a) == len(b) and sum(x != y for x, y in zip(a, b)) == 1
+
+
+def test_bump_and_notes_without_changelog(tmp_path):
+    root = _copy_repo(tmp_path)
+    log = bv.files(root)["changelog"]
+    if log.exists():
+        log.unlink()
+    new = bv.bump(root, "patch", note="Fix X (#12)")
+    assert set(bv.versions(root).values()) == {new} and not log.exists()
+    assert bv.release_notes(root, new) == ""

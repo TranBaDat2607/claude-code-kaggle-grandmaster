@@ -95,5 +95,10 @@ jobs:
           fi
           git tag "$tag"
           git push origin "$tag"
+          # CHANGELOG.md is local-only, so the notes normally come from the merged PRs since the last tag.
           python scripts/bump_version.py --notes "$version" > notes.md
-          gh release create "$tag" --title "kaggle-grandmaster $version" --notes-file notes.md --verify-tag
+          if grep -q '[^[:space:]]' notes.md; then
+            gh release create "$tag" --title "kaggle-grandmaster $version" --notes-file notes.md --verify-tag
+          else
+            gh release create "$tag" --title "kaggle-grandmaster $version" --generate-notes --verify-tag
+          fi
