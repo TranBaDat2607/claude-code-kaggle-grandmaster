@@ -27,7 +27,10 @@ noisy and keeps moving until well after the deadline.
    debugging, a replay viewer, unit tests for game-rule edge cases, crash-free submissions (a
    crash = loss).
 7. Submit improved versions early: ratings need many games to converge. Keep multiple
-   diverse agents active if allowed.
+   diverse agents active if allowed. Check the rules for how many agents stay active: in some
+   simulation competitions a new upload retires the oldest active agent, so a test upload can
+   displace your strongest one. Each new agent first plays a validation episode against itself
+   and is marked Error if it fails; ratings start at μ=600 and settle over many episodes.
 
 ## B. Combinatorial optimisation (Santa-style)
 

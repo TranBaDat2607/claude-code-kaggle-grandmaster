@@ -32,18 +32,20 @@ submissions and experiments, leaving your layout alone.
   gold, teaming and merging) + 17 `kg-*` slash commands
 - `agents/`: 9 specialist subagents
 - `hooks/`: session brief (accepted baseline, backlog top, GPU quota), prompt→skill router, submission +
-  GPU-quota guard, submission / GPU-run logger
+  GPU-quota + upload guard (credentials never printed or uploaded, repeated files caught), submission /
+  GPU-run logger
 - `kgkit/`: Python toolkit (`python -m kgkit --help`):
   - experiment loop: `ledger compare` (paired per-fold test + OOF bootstrap), `ledger decide / baseline /
     lineage / import`, `backlog`, `recheck` (does the gain survive a re-drawn fold split?)
   - modelling: `features search` (thousands of generated features, batch-screened), `blend` with hill
     climbing, multi-level and residual stacking, `--prune`
-  - prior art: `kernels top / pull` (notebook review + local script), `discussions sync / top / search /
-    solutions / read` (forum via Meta Kaggle)
+  - prior art: `pages` (the competition's pages as text), `kernels top / pull` (notebook review with the
+    lines to read before running it + local script), `discussions sync / top / search / solutions / read`
+    (forum via Meta Kaggle)
   - `gpu` for quota-aware training on Kaggle GPUs
 - `templates/`: tabular (GBDTs + linear / kNN / SVM / MLP), image and transformer training, remote GPU
   training runner, offline inference kernel, workspace CLAUDE.md
-- `evals/`: `claude plugin eval` suite (10 cases)
+- `evals/`: `claude plugin eval` suite (13 cases)
 
 ## Data and network access
 
@@ -52,7 +54,8 @@ your own account, through the official `kaggle` CLI and the API token you set up
 make no network calls.
 
 **Exchanged with Kaggle (kaggle.com)**
-- Competition data: `kaggle competitions files / download / leaderboard / submissions`.
+- Competition data: `kaggle competitions files / download / leaderboard / submissions /
+  submission-limits / pages` (`kgkit pages`).
 - Submissions: `kaggle competitions submit` uploads your submission file. Claude confirms before it
   submits, and the hooks block files that fail validation.
 - GPU training (`/kg-gpu`, `kgkit gpu`): `kaggle kernels push` uploads a private kernel containing
@@ -71,7 +74,15 @@ asks before each call unless you have allowed these tools.
 
 **Credentials.** The plugin never uses or sends your Kaggle API key. `kgkit gpu` takes only your
 Kaggle username, from `KAGGLE_USERNAME` or the `username` field of `kaggle.json`, to name your
-kernels. The PreToolUse hook blocks commands that would print `kaggle.json` or `KAGGLE_KEY`.
+kernels. The PreToolUse hook blocks commands that would print a credential (`kaggle.json`,
+`~/.kaggle/access_token`, `credentials.json`, `KAGGLE_KEY`, `kaggle auth print-access-token`, `VERBOSE`
+Kaggle CLI calls) and dataset or model uploads whose folder holds credential-like files. `kgkit gpu build`
+leaves credential-like files and links outside the project out of the kernel it uploads.
+
+**Text from Kaggle.** Competition pages, forum posts and public notebooks are written by other people.
+The skills and agents treat them as data, never as instructions; `kgkit pages` and `kgkit discussions`
+print them inside `<untrusted-content-…>` blocks, and `kgkit kernels pull` lists a notebook's shell,
+network, credential-path and `exec`/`eval` lines before you run it locally.
 
 **Stored on your machine only**
 - `.kaggle-gm/` in the workspace: experiment ledger, idea backlog, submission log, GPU-run log and

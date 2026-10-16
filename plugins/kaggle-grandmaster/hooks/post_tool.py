@@ -1,6 +1,7 @@
-"""PostToolUse: after `kaggle competitions submit`, log the submission locally and remind Claude to
-fetch the public score and attach it to the experiment ledger. After a GPU `kaggle kernels push`,
-record the run in the GPU-hour log."""
+"""PostToolUse: after `kaggle competitions submit`, log the submission locally (with the file's SHA-256 and
+what Kaggle says is left today) and remind Claude to fetch the public score and attach it to the
+experiment ledger. After a GPU `kaggle kernels push`, record the run in the GPU-hour log. The Kaggle CLI
+exits 0 after several failed writes; say so when one shows up in the output."""
 
 from __future__ import annotations
 
@@ -8,6 +9,7 @@ import datetime as dt
 import json
 import re
 import sys
+from pathlib import Path
 
 try:
     import _common as C
@@ -24,6 +26,12 @@ def _response_text(payload: dict) -> str:
 
 # A successful `submit -k` (code competition) prints only "N submissions remaining today."
 SUBMIT_OK_RE = re.compile(r"successfully submitted|\d+\s+submissions?\s+remaining\s+today", re.IGNORECASE)
+REMAINING_RE = re.compile(r"(\d+)\s+submissions?\s+remaining\s+today", re.IGNORECASE)
+# Printed by kaggle 2.2.4 with exit status 0: a refused upload, a 404 competition, failed writes.
+SUBMIT_FAILED = ("error", "exception", "forbidden", "401", "403", "404", "400 client", "could not submit",
+                 "could not find competition")
+SILENT_FAILURE_RE = re.compile(r"(?:Dataset(?: version)? creation|Kernel push|Model(?: instance)?(?: version)? "
+                               r"creation) error\b[^\n]*", re.IGNORECASE)
 
 
 def _kernel_runtime_h(root, kernel: str | None) -> float | None:
@@ -89,8 +97,29 @@ def log_gpu_push(payload: dict, push: dict) -> None:
         f"kernels then run `python -m kgkit gpu collect {kernel}`."))
 
 
+def silent_failure_note(payload: dict) -> bool:
+    """An upload or push that printed one of the CLI's exit-0 errors: say nothing was created."""
+    cmd = C.command_of(payload)
+    if C.parse_upload(cmd) is None and C.parse_push(cmd) is None:
+        return False
+    m = SILENT_FAILURE_RE.search(_response_text(payload))
+    if not m:
+        return False
+    hint = ""
+    if "session count" in m.group(0).lower():
+        hint = (" Kaggle allows only so many batch sessions at once (2 GPU, 1 TPU): wait for a running kernel to "
+                "finish (`python -m kgkit gpu status`) and push again.")
+    C.emit("PostToolUse", additionalContext=(
+        f"kaggle-grandmaster: the Kaggle CLI printed `{C.SF.clean(m.group(0))[:300]}` but exited 0, so nothing was "
+        "created or started and commands chained after it with && still ran. Do not wait for, attach or submit "
+        f"this version.{hint}"))
+    return True
+
+
 def main() -> None:
     payload = C.read_input()
+    if silent_failure_note(payload):
+        return
     push = C.parse_push(C.command_of(payload))
     if push is not None:
         log_gpu_push(payload, push)
@@ -103,9 +132,14 @@ def main() -> None:
         return
     text = _response_text(payload)
     low = text.lower()
-    failed = any(w in low for w in ("error", "exception", "forbidden", "401", "403", "404", "400 client"))
-    ok = SUBMIT_OK_RE.search(text) is not None
+    failed = any(w in low for w in SUBMIT_FAILED)
+    ok = SUBMIT_OK_RE.search(text) is not None and "could not submit" not in low
     status = "submitted" if ok else ("failed" if failed else "unknown")
+    left = REMAINING_RE.search(text)
+    sha = None
+    if sub.get("file") and not sub.get("kernel"):
+        f = Path(sub["file"])
+        sha = C.file_sha256(f if f.is_absolute() else Path(payload.get("cwd") or ".") / f)
     m = C.EXP_ID_RE.search(sub.get("message") or "") or C.EXP_ID_RE.search(sub.get("file") or "")
     exp_id = m.group(1) if m else None
     rec = {
@@ -116,6 +150,8 @@ def main() -> None:
         "message": sub.get("message"),
         "exp_id": exp_id,
         "status": status,
+        "sha256": sha,
+        "remaining_today": int(left.group(1)) if left else None,
     }
     log = C.submissions_log(root)
     log.parent.mkdir(parents=True, exist_ok=True)
@@ -128,7 +164,9 @@ def main() -> None:
     slug = sub.get("competition") or (st.slug if st else "<slug>")
     used = C.submissions_today(root)
     limit = st.daily_submissions if st else 5
-    ctx = (f"kaggle-grandmaster: submission logged ({used}/{limit} today, UTC). {_poll_hint(root, sub, st, slug)}; "
+    count = (f"Kaggle reports {left.group(1)} left today for the team" if left
+             else f"{used}/{limit} today in the local log, UTC")
+    ctx = (f"kaggle-grandmaster: submission logged ({count}). {_poll_hint(root, sub, st, slug)}; "
            f"when the public score appears, run `python -m kgkit ledger lb {exp_id or '<exp_id>'} <score>` and "
            f"compare with CV.")
     if not exp_id:

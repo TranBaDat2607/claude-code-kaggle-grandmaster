@@ -71,7 +71,8 @@ ROUTES: list[tuple[str, str]] = [
                    r"\b(train|run)\w*\b.{0,40}\bon kaggle\b|kaggle(?:'s)? (gpus?|notebooks?|kernels?)\b.{0,40}\btrain|"
                    r"remote(ly)? train|session (limit|timeout)"),
     ("competition-recon", r"public (notebooks?|kernels?)|top(-voted)? notebooks?|\bdiscussions?\b|write-?ups?|"
-                          r"prior art|\brecon\b|reproduce (a|the|this) (notebook|kernel)"),
+                          r"prior art|\brecon\b|reproduce (a|the|this) (notebook|kernel)|"
+                          r"(competition|the) rules\b|rules page|evaluation page|data description"),
     ("competition-strategy", r"\bteam(ing|mates?| up)\b|\bmerg(e|er|ing)\b.{0,40}\bteams?\b|\bteams?\b.{0,40}\bmerg|"
                              r"which competitions?|grandmaster (title|tier|rank)|solo gold|\bgold medals?\b|"
                              r"join(ing|ed)? (late|the competition late)|several competitions"),

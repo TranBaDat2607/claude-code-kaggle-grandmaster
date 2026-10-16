@@ -18,6 +18,8 @@ parts of a competition that are easy to get subtly wrong:
 - ``kgkit.backlog``     the ranked idea backlog and screen-vs-full fidelity
 - ``kgkit.kernels``     study and reproduce public notebooks
 - ``kgkit.discussions`` competition forums (topics, search, write-ups, threads) from Meta Kaggle
+- ``kgkit.pages``       a competition's own pages (evaluation, rules, data description) as text
+- ``kgkit.safety``      credential checks for uploads; a boundary around text written by other Kaggle users
 - ``kgkit.recheck``     re-draw the folds with a new seed and re-run old vs current: does the gain survive?
 - ``kgkit.submission``  submission validation against sample_submission
 - ``kgkit.state``       competition state (``.kaggle-gm/competition.json``)
