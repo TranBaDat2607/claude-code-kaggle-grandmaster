@@ -4,9 +4,10 @@
     python scripts/bump_version.py --current               # print the version
     python scripts/bump_version.py --part patch --note "Fix X (#12)"
 
-A bump rewrites plugin.json, the marketplace entry and kgkit.__version__, and turns the
-``## Unreleased`` section of CHANGELOG.md into ``## X.Y.Z — YYYY-MM-DD`` (or adds that heading
-with ``--note`` as its only entry). Run by .github/workflows/release.yml on every merge to main.
+A bump rewrites plugin.json, the marketplace entry and kgkit.__version__. If a local CHANGELOG.md
+exists (it is gitignored, so CI never has one), it also turns its ``## Unreleased`` section into
+``## X.Y.Z — YYYY-MM-DD`` (or adds that heading with ``--note`` as its only entry). Run by
+.github/workflows/release.yml on every merge to main.
 Standard library only.
 """
 
@@ -104,8 +105,11 @@ def bump(root: Path, part: str, note: str | None = None, today: str | None = Non
 
 
 def release_notes(root: Path, version: str) -> str:
-    """The CHANGELOG section of ``version`` (without its heading)."""
-    text = files(root)["changelog"].read_text(encoding="utf-8")
+    """The CHANGELOG section of ``version`` (without its heading); empty when there is no CHANGELOG.md."""
+    log = files(root)["changelog"]
+    if not log.is_file():
+        return ""
+    text = log.read_text(encoding="utf-8")
     m = re.search(rf"^## {re.escape(version)}\b[^\n]*\n(.*?)(?=^## |\Z)", text, re.MULTILINE | re.DOTALL)
     return m.group(1).strip() if m else ""
 

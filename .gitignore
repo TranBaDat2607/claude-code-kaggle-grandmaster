@@ -30,3 +30,6 @@ Thumbs.db
 
 # plugin eval run outputs
 plugins/kaggle-grandmaster/evals/results/
+
+# Local-only release notes (GitHub releases use generated notes)
+CHANGELOG.md
