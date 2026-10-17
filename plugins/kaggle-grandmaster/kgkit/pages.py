@@ -80,7 +80,7 @@ def fetch(slug: str) -> list[dict]:
     except subprocess.TimeoutExpired:
         raise SystemExit("kaggle competitions pages timed out after 120s; retry, or check `kaggle competitions list`")
     out = r.stdout or ""
-    rows = _json_list(out) if r.returncode == 0 else None
+    rows = json_list(out) if r.returncode == 0 else None
     if rows is None:
         msg = (r.stderr or out).strip() or "no JSON list in its output"
         if "invalid choice" in msg or "unrecognized arguments" in msg:
@@ -90,7 +90,7 @@ def fetch(slug: str) -> list[dict]:
             for x in rows if isinstance(x, dict)]
 
 
-def _json_list(out: str) -> list | None:
+def json_list(out: str) -> list | None:
     """The first JSON list in ``out``: the CLI can print warnings (which may contain '[') before it and
     other lines after it."""
     dec = json.JSONDecoder()

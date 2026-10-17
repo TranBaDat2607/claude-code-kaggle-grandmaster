@@ -85,10 +85,14 @@ notebooks.
 
 ## Discussions
 
-The CLI has no discussion commands. `python -m kgkit discussions sync|top|search|solutions|read` reads
-the forum from Meta Kaggle (`kaggle datasets download kaggle/meta-kaggle -f ForumTopics.csv`, Kaggle's
-official daily export; cached in `~/.kaggle-gm/meta-kaggle`). It works for any competition slug,
-including finished ones (`discussions solutions --competition <slug>` for write-ups). The title must slugify
+CLI 2.2.4+ reads competition forums: `kaggle competitions topics list <slug> --format json -s top -p <n>`
+(20 topics a page; `--page-size` is ignored) and `kaggle competitions topic-messages <slug> <id> --format json
+-n -1` (the whole thread, replies flattened). `python -m kgkit discussions sync|top|search|solutions|read`
+wraps both, for active and finished competitions (`discussions solutions --competition <slug>` for
+write-ups). `--source meta` reads Meta Kaggle instead (`kaggle/meta-kaggle`, Kaggle's daily export, ~245 MB,
+cached in `~/.kaggle-gm/meta-kaggle`): it leaves `ForumId` empty for every competition that has not ended,
+so it only serves finished competitions. Windows: piped CLI output is cp1252 and the CLI dies at the first
+emoji in a title, so set `PYTHONIOENCODING=utf-8` when parsing its output yourself (kgkit does). The title must slugify
 to the id's slug. `kaggle kernels output` pages through all output files (`--page-size 200` means fewer
 requests), and `--file-pattern <regex>` filters them, e.g. to skip weights.
 

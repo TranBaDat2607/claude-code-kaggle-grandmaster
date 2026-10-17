@@ -15,10 +15,9 @@ description (domain, data type, metric, constraints), find what actually won in 
    solution`, `site:kaggle.com/competitions "<task>" "solution"`, `"<metric>" kaggle winning
    solution`, GitHub `<competition-name> 1st place`, and arXiv papers by winning teams. Aim for
    5–10 relevant competitions across recent years (newer techniques dominate in DL domains).
-   Once you know a past competition's slug, list its write-ups directly from Kaggle's forum export:
+   Once you know a past competition's slug, list its write-ups directly from its forum:
    `PYTHONPATH="$KGKIT_HOME" python -m kgkit discussions solutions --competition <past-slug>` (thread ids,
-   votes, URLs; `discussions read <id>` prints a thread when the message export is cached, otherwise
-   WebFetch the URL).
+   votes, URLs; `discussions read <id> --competition <past-slug>` prints a whole thread).
 3. For each, extract from the top 1–5 write-ups: validation scheme, models/backbones, key
    features or data processing, training tricks, post-processing, ensembling, what *didn't* work,
    compute used.

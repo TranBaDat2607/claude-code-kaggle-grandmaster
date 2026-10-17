@@ -1,19 +1,21 @@
-"""Competition discussions from Meta Kaggle, Kaggle's official daily export of its forums.
+"""Competition discussions: live from the Kaggle CLI, or from Meta Kaggle, Kaggle's daily forum export.
 
-The Kaggle CLI has no discussion commands, and discussion pages are hard to fetch. Meta Kaggle
-(dataset ``kaggle/meta-kaggle``, refreshed daily) has every topic (``ForumTopics.csv``, ~70 MB), the
-competition -> forum mapping plus rule facts (``Competitions.csv``) and, optionally, every message
-(``ForumMessages.csv``, ~1.8 GB). Files are cached once per machine in ``~/.kaggle-gm/meta-kaggle``
-(override with ``KGKIT_META_DIR``) and refreshed when older than ``--max-age`` days.
+Live (default): Kaggle CLI 2.2.4+ has ``kaggle competitions topics list <slug>`` (20 topics a page) and
+``kaggle competitions topic-messages <slug> <id>`` (a whole thread). That works for active and ended
+competitions alike, with no lag and no bulk download.
+
+Meta Kaggle (``--source meta``, or when the CLI cannot serve the forum): dataset ``kaggle/meta-kaggle`` has
+every topic (``ForumTopics.csv``, ~70 MB), the competition -> forum mapping plus rule facts
+(``Competitions.csv``, ~175 MB) and, optionally, every message (``ForumMessages.csv``, ~1.8 GB). Files
+are cached once per machine in ``~/.kaggle-gm/meta-kaggle`` (override with ``KGKIT_META_DIR``) and
+refreshed when older than ``--max-age`` days. The export leaves ``ForumId`` empty for every competition
+that has not ended, so this path only serves finished competitions (post-mortems, prior art).
 
     python -m kgkit discussions sync                    # index this competition's topics -> reports/discussions.csv
-    python -m kgkit discussions top -n 20 --sort votes  # votes | recent | replies | views
+    python -m kgkit discussions top -n 20 --sort votes  # votes | recent | replies | views (views: Meta Kaggle only)
     python -m kgkit discussions search "leak|shake|cv.*lb"
     python -m kgkit discussions solutions --competition <finished-slug>   # "1st place solution" write-ups
-    python -m kgkit discussions read <topic_id>         # full thread (needs `sync --messages`), else its URL
-
-Meta Kaggle lags by up to a day; for the last hours' threads, fetch the URL. A competition that is too
-new may have no forum id in the export yet: then use the website (WebFetch) or a Kaggle MCP server.
+    python -m kgkit discussions read <topic_id>         # full thread
 """
 
 from __future__ import annotations
@@ -30,6 +32,7 @@ from pathlib import Path
 import pandas as pd
 
 from . import safety
+from .pages import json_list
 
 TOPIC_COLS = ["Id", "ForumId", "KernelId", "CreationDate", "LastCommentDate", "Title", "IsSticky", "TotalViews",
               "Score", "TotalMessages", "TotalReplies"]
@@ -39,11 +42,82 @@ DATE_FMT = "%m/%d/%Y %H:%M:%S"
 SOLUTION_RX = re.compile(r"(?i)\b(?:\d+(?:st|nd|rd|th)|first|second|third|top[- ]?\d+|gold)\b.{0,30}\b(?:place|"
                          r"solution|write-?up|approach)\b|\bsolution\b|\bwrite-?up\b")
 SORTS = {"votes": "Score", "replies": "TotalReplies", "views": "TotalViews", "recent": "Created"}
+LIVE_PAGE = 20  # topics per page of `kaggle competitions topics list` (fixed server-side)
+SOURCES = {"live": "kaggle-cli", "meta": "meta-kaggle"}  # Source column -> safety.wrap source label
+
+
+class LiveUnavailable(Exception):
+    """The Kaggle CLI cannot serve the forum (not installed, too old, not authenticated, network)."""
 
 
 def meta_dir() -> Path:
     return Path(os.environ.get("KGKIT_META_DIR") or Path.home() / ".kaggle-gm" / "meta-kaggle")
 
+
+# ----------------------------------------------------------------------------- live (Kaggle CLI)
+
+def _kaggle_json(args: list[str], timeout: float = 120) -> list:
+    """Rows of a Kaggle CLI ``--format json`` listing; [] when it reports nothing found."""
+    exe = shutil.which("kaggle")
+    if exe is None:
+        raise LiveUnavailable("kaggle CLI not found (pip install -U kaggle)")
+    try:
+        r = subprocess.run([exe, *args], capture_output=True, encoding="utf-8", errors="replace", timeout=timeout,
+                           env=safety.kaggle_env())
+    except (OSError, subprocess.TimeoutExpired) as e:
+        raise LiveUnavailable(f"kaggle {' '.join(args[:2])} failed: {e}")
+    out = r.stdout or ""
+    rows = json_list(out) if r.returncode == 0 else None
+    if rows is not None:
+        return rows
+    if r.returncode == 0 and re.search(r"(?m)^No (topics|messages) found", out):
+        return []
+    msg = (r.stderr or out).strip() or "no JSON list in its output"
+    if "invalid choice" in msg or "unrecognized arguments" in msg:
+        msg = "this Kaggle CLI has no forum commands (needs 2.2.4 or later: pip install -U kaggle)"
+    raise LiveUnavailable(f"kaggle {' '.join(args[:2])} failed: {msg[-500:]}")
+
+
+def live_index(slug: str, max_pages: int = 50) -> pd.DataFrame:
+    """Topics of a competition's forum via ``kaggle competitions topics list``, most voted first.
+    ``df.attrs["truncated"]`` is True when ``max_pages`` stopped it before the end."""
+    rows: list[dict] = []
+    seen: set = set()
+    truncated = False
+    for p in range(1, max_pages + 1):
+        page = _kaggle_json(["competitions", "topics", "list", slug, "--format", "json", "-s", "top", "-p", str(p)])
+        new = [x for x in page if isinstance(x, dict) and x.get("id") not in seen]
+        seen.update(x.get("id") for x in new)
+        rows += new
+        if not new or len(page) < LIVE_PAGE:
+            break
+    else:
+        truncated = True
+    t = pd.DataFrame({
+        "Id": [int(x["id"]) for x in rows],
+        "Title": [str(x.get("title") or "") for x in rows],
+        "CreationDate": [x.get("postDate") for x in rows],
+        "Score": [x.get("votes") for x in rows],
+        "TotalReplies": [x.get("commentCount") for x in rows],
+        "TotalViews": float("nan"),
+    }, columns=["Id", "Title", "CreationDate", "Score", "TotalReplies", "TotalViews"])
+    t["Created"] = pd.to_datetime(t["CreationDate"], errors="coerce")
+    t["Url"] = [f"https://www.kaggle.com/competitions/{slug}/discussion/{i}" for i in t["Id"]]
+    t["Source"] = "live"
+    t.attrs["truncated"] = truncated
+    return t
+
+
+def live_thread(slug: str, topic_id: int) -> list[dict]:
+    """The opening post and every reply (flattened, oldest first) via ``kaggle competitions topic-messages``."""
+    rows = _kaggle_json(["competitions", "topic-messages", slug, str(topic_id), "--format", "json", "-n", "-1",
+                         "-s", "old"])
+    return [{"Id": m.get("id"), "PostDate": m.get("postDate"), "Medal": None, "votes": m.get("votes"),
+             "text": _strip_html(m.get("content") if isinstance(m.get("content"), str) else "")}
+            for m in rows if isinstance(m, dict)]
+
+
+# ----------------------------------------------------------------------------- Meta Kaggle
 
 def _fresh(p: Path, max_age_days: float) -> bool:
     return p.is_file() and (time.time() - p.stat().st_mtime) < max_age_days * 86400
@@ -65,7 +139,8 @@ def ensure(files: list[str], max_age_days: float = 3, force: bool = False) -> Pa
             raise SystemExit("kaggle CLI not found: pip install kaggle (and authenticate; see skill kaggle-cli)")
         print(f"downloading kaggle/meta-kaggle {name} ...", flush=True)
         r = subprocess.run([exe, "datasets", "download", "kaggle/meta-kaggle", "-f", name, "-p", str(d), "--force"],
-                           capture_output=True, text=True, timeout=3600, env=safety.kaggle_env())
+                           capture_output=True, encoding="utf-8", errors="replace", timeout=3600,
+                           env=safety.kaggle_env())
         z = d / f"{name}.zip"
         if z.is_file():
             with zipfile.ZipFile(z) as zf:
@@ -89,25 +164,40 @@ def competition_row(slug: str, d: Path | None = None) -> dict:
     return row.iloc[0].to_dict()
 
 
+def forum_id(comp: dict, slug: str) -> int:
+    """The competition's forum id, or SystemExit saying why Meta Kaggle has none."""
+    fid = comp.get("ForumId")
+    if fid is not None and pd.notna(fid):
+        return int(fid)
+    deadline = pd.to_datetime(comp.get("DeadlineDate"), format=DATE_FMT, errors="coerce")
+    if pd.notna(deadline) and deadline > pd.Timestamp.now():
+        why = (f"Meta Kaggle hides the forum id of competitions that have not ended ({slug!r} ends "
+               f"{deadline:%Y-%m-%d}), so it has no forum id for it")
+    else:
+        why = f"Meta Kaggle has no forum id for {slug!r} (not in the export yet)"
+    raise SystemExit(f"{why}. Use `discussions sync --source live` (Kaggle CLI 2.2.4+) or "
+                     f"https://www.kaggle.com/competitions/{slug}/discussion via WebFetch.")
+
+
 def index(slug: str, d: Path | None = None) -> pd.DataFrame:
     """All discussion topics of one competition's forum (notebook comment threads excluded)."""
     d = d or meta_dir()
-    comp = competition_row(slug, d)
-    fid = comp.get("ForumId")
-    if fid is None or pd.isna(fid):
-        raise SystemExit(f"Meta Kaggle has no forum id for {slug!r} yet (very new competition). Use "
-                         f"https://www.kaggle.com/competitions/{slug}/discussion via WebFetch or a Kaggle MCP server.")
+    fid = forum_id(competition_row(slug, d), slug)
     topics = pd.read_csv(d / "ForumTopics.csv", usecols=lambda c: c in TOPIC_COLS)
-    t = topics[(topics["ForumId"] == int(fid)) & topics["KernelId"].isna()].copy()
+    t = topics[(topics["ForumId"] == fid) & topics["KernelId"].isna()].copy()
     t["Created"] = pd.to_datetime(t["CreationDate"], format=DATE_FMT, errors="coerce")
     t["Url"] = [f"https://www.kaggle.com/competitions/{slug}/discussion/{i}" for i in t["Id"]]
     t["Title"] = t["Title"].fillna("").astype(str)
+    t["Source"] = "meta"
     return t.drop(columns=["KernelId"]).reset_index(drop=True)
 
 
 def top(t: pd.DataFrame, n: int = 20, sort: str = "votes") -> pd.DataFrame:
     if sort not in SORTS:
         raise ValueError(f"sort must be one of {sorted(SORTS)}")
+    if t[SORTS[sort]].isna().all() and not t.empty:
+        raise SystemExit(f"--sort {sort}: this index has no {SORTS[sort]} column values (the live forum listing "
+                         f"has no view counts; use votes, recent or replies)")
     return t.sort_values(SORTS[sort], ascending=False, na_position="last").head(n)
 
 

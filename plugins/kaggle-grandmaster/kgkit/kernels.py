@@ -77,7 +77,8 @@ def _kaggle(args: list[str], timeout: int = 300) -> subprocess.CompletedProcess:
     exe = shutil.which("kaggle")
     if exe is None:
         raise SystemExit("kaggle CLI not found: pip install kaggle (and authenticate; see skill kaggle-cli)")
-    return subprocess.run([exe, *args], capture_output=True, text=True, timeout=timeout, env=safety.kaggle_env())
+    return subprocess.run([exe, *args], capture_output=True, encoding="utf-8", errors="replace", timeout=timeout,
+                          env=safety.kaggle_env())
 
 
 def top(slug: str, n: int = 20, sort_by: str = "voteCount") -> list[dict]:

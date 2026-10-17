@@ -65,8 +65,12 @@ def links_outside(path: Path, base: Path) -> bool:
 
 def kaggle_env() -> dict[str, str]:
     """The environment for a Kaggle CLI call, without VERBOSE / VERBOSE_OUTPUT: with either on, kagglesdk
-    prints every request's headers unmasked, bearer token included."""
-    return {k: v for k, v in os.environ.items() if k.upper() not in ("VERBOSE", "VERBOSE_OUTPUT")}
+    prints every request's headers unmasked, bearer token included. Output is forced to UTF-8: on a Windows
+    pipe the CLI otherwise writes cp1252 and dies at the first emoji in a title, cutting the listing short.
+    Callers decode it with ``encoding="utf-8"``."""
+    env = {k: v for k, v in os.environ.items() if k.upper() not in ("VERBOSE", "VERBOSE_OUTPUT")}
+    env["PYTHONIOENCODING"] = "utf-8"
+    return env
 
 
 def _ignore_rules(patterns: list[str]) -> tuple[re.Pattern, re.Pattern]:

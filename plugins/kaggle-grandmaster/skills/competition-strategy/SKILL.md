@@ -72,9 +72,9 @@ public signals: LB position over time, discussion posts, past write-ups.
 - **Submission-count rule at merge time**: the merged team's combined submissions usually must not exceed
   what a single team could have made by the merge date. Two teams that each used every daily slot may be
   unable to merge.
-- Team size limits and the merger deadline (`python -m kgkit discussions sync` prints both, plus
-  whether merging is banned, from Kaggle's export). External-data and pretrained-model rules apply to
-  every member's pipeline.
+- Team size limits and the merger deadline (the rules page, `python -m kgkit pages --page rules`;
+  `discussions sync` also prints both, plus whether merging is banned, when Meta Kaggle's
+  Competitions.csv is cached). External-data and pretrained-model rules apply to every member's pipeline.
 
 **Technical merge protocol (right after the merge).**
 1. **One fold split.** Agree on a single `data/folds.csv` (same grouping logic, same row order) and share

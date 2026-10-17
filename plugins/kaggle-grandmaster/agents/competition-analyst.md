@@ -22,10 +22,11 @@ A competition slug (and optionally a workspace path). Data may already be in `da
    the website's JavaScript-rendered pages is the fallback, and only when that fails. If the rules page and
    `submission-limits` disagree on the daily limit, record the smaller number. For the discussion
    forum run `PYTHONPATH="$KGKIT_HOME" python -m kgkit discussions sync --competition <slug>`. It indexes
-   every topic from Kaggle's daily forum export and prints rule facts: merger deadline, max team size,
-   daily submissions, metric. Then use `discussions top` / `discussions search "leak|cv.*lb|shake"`. If the
-   competition is too new for the export, fall back to WebFetch on the discussion page. If blocked, use
-   WebSearch for mirrors/summaries and clearly mark what could not be verified.
+   every topic live through the Kaggle CLI (and prints merger deadline, max team size, daily submissions
+   and metric when Meta Kaggle's Competitions.csv is cached). Then use `discussions top` /
+   `discussions search "leak|cv.*lb|shake"` and `discussions read <id>`. If the CLI cannot list topics
+   (older than 2.2.4), fall back to WebFetch on the discussion page. If blocked, use WebSearch for
+   mirrors/summaries and clearly mark what could not be verified.
 3. If data is present, inspect file listings, column names, a few raw rows, row counts — do not
    run heavy jobs.
 4. Pull the top 3–5 public notebooks with `PYTHONPATH="$KGKIT_HOME" python -m kgkit kernels pull
