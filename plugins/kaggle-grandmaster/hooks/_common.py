@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import csv
 import datetime as dt
+import hashlib
 import json
 import os
 import re
@@ -17,10 +18,15 @@ sys.path.insert(0, str(PLUGIN_ROOT))
 from kgkit import adopt as A  # noqa: E402  (stdlib-only module)
 from kgkit import backlog as B  # noqa: E402  (stdlib-only module)
 from kgkit import gpu as G  # noqa: E402  (stdlib-only module)
+from kgkit import safety as SF  # noqa: E402  (stdlib-only module)
 from kgkit import state as S  # noqa: E402  (stdlib-only module)
 
 SUBMIT_RE = re.compile(r"kaggle(?:\.exe)?\s+(?:competitions|c)\s+submit\b(.*)", re.IGNORECASE | re.DOTALL)
 PUSH_RE = re.compile(r"kaggle(?:\.exe)?\s+kernels\s+(?:push|update)\b(.*)", re.IGNORECASE | re.DOTALL)
+# Commands that upload a whole folder (Kaggle CLI 2.2.4; `d`, `m`, `i`/`v` and `v` are its aliases).
+UPLOAD_RE = re.compile(r"kaggle(?:\.exe)?\s+(?:(?:datasets|d)\s+(?:create|version)"
+                       r"|(?:models|m)\s+(?:instances|i|variations|v)\s+(?:(?:versions|v)\s+)?create)\b(.*)",
+                       re.IGNORECASE | re.DOTALL)
 
 
 def read_input() -> dict:
@@ -81,6 +87,31 @@ def parse_push(command: str) -> dict | None:
         if "=" in t and t.split("=", 1)[0] in flags:
             k, v = t.split("=", 1)
             out[flags[k]] = v
+        i += 1
+    return out
+
+
+def parse_upload(command: str) -> dict | None:
+    """Folder / dir-mode / ignore patterns of a dataset or model upload command."""
+    m = UPLOAD_RE.search(command)
+    if not m:
+        return None
+    toks = _tokens(m.group(1))
+    out = {"path": None, "dir_mode": "skip", "ignore": []}
+    i = 0
+    while i < len(toks):
+        t, nxt = toks[i], (toks[i + 1] if i + 1 < len(toks) else None)
+        k, _, v = t.partition("=")
+        if k in ("-p", "--path", "-r", "--dir-mode", "--ignore-patterns"):
+            if not v:
+                v, i = nxt, i + 1
+            if v is not None:
+                if k in ("-p", "--path"):
+                    out["path"] = v
+                elif k == "--ignore-patterns":
+                    out["ignore"].append(v)
+                else:
+                    out["dir_mode"] = v
         i += 1
     return out
 
@@ -187,19 +218,69 @@ def today_utc() -> str:
     return dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%d")
 
 
-def submissions_today(root: Path) -> int:
+def submission_records(root: Path) -> list[dict]:
     p = submissions_log(root)
     if not p.is_file():
-        return 0
-    n = 0
+        return []
+    out = []
     for line in p.read_text(encoding="utf-8").splitlines():
         try:
-            rec = json.loads(line)
+            out.append(json.loads(line))
         except json.JSONDecodeError:
             continue
-        if str(rec.get("time_utc", "")).startswith(today_utc()) and rec.get("status") != "failed":
-            n += 1
-    return n
+    return out
+
+
+def submissions_today(root: Path, records: list[dict] | None = None) -> int:
+    recs = submission_records(root) if records is None else records
+    return sum(1 for r in recs if str(r.get("time_utc", "")).startswith(today_utc()) and r.get("status") != "failed")
+
+
+def server_remaining_today(root: Path, records: list[dict] | None = None) -> int | None:
+    """What Kaggle said was left today (UTC) after the latest logged submit: it counts the whole team and
+    the website, which the local log cannot see. None when that submit printed no count (an older, larger
+    count would be stale) or no submit was logged today."""
+    recs = submission_records(root) if records is None else records
+    for r in reversed(recs):
+        if not str(r.get("time_utc", "")).startswith(today_utc()) or r.get("status") == "failed":
+            continue
+        left = r.get("remaining_today")
+        return left if isinstance(left, int) else None
+    return None
+
+
+def file_sha256(path: Path, max_bytes: int = 2 * 1024 ** 3) -> str | None:
+    try:
+        if path.stat().st_size > max_bytes:
+            return None
+        h = hashlib.sha256()
+        with path.open("rb") as f:
+            for chunk in iter(lambda: f.read(1 << 20), b""):
+                h.update(chunk)
+        return h.hexdigest()
+    except OSError:
+        return None
+
+
+def previous_submission(root: Path, path: Path, records: list[dict] | None = None) -> dict | None:
+    """The latest logged submission of a byte-identical file that Kaggle did not refuse. The file is hashed
+    only when a logged submission has the same size (or none recorded), so a new file costs one stat."""
+    recs = [r for r in (submission_records(root) if records is None else records)
+            if r.get("sha256") and r.get("status") != "failed"]
+    try:
+        size = path.stat().st_size
+    except OSError:
+        return None
+    recs = [r for r in recs if r.get("size") in (None, size)]
+    if not recs:
+        return None
+    sha = file_sha256(path)
+    if not sha:
+        return None
+    for r in reversed(recs):
+        if r["sha256"] == sha:
+            return r
+    return None
 
 
 def ledger_records(root: Path) -> list[dict]:

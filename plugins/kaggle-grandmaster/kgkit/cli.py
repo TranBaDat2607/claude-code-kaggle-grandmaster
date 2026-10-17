@@ -14,6 +14,7 @@ Commands
   features    search  — generate and screen thousands of candidate features on the frozen folds
   kernels     top | pull | review  — study and reproduce public notebooks
   discussions sync | top | search | solutions | read  — competition forum via Meta Kaggle
+  pages       the competition's own pages (evaluation, rules, data description) as text, via the Kaggle CLI
   recheck     re-draw the folds with a new seed, re-run old vs current pipeline: does the gain survive?
   blend       hill / weights / rank / multi-level stack / residual stack over ledger OOFs + submission
   validate    validate a submission against sample_submission
@@ -141,6 +142,7 @@ def cmd_adopt(a):
     import subprocess
 
     from . import adopt as A
+    from . import safety as SF
     from . import state as S
 
     root = Path(a.dir).resolve()
@@ -178,7 +180,7 @@ def cmd_adopt(a):
     else:
         cmd = [shutil.which("kaggle") or "kaggle", "competitions", "submissions", slug, "--format", "json"]
         try:
-            r = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+            r = subprocess.run(cmd, capture_output=True, text=True, timeout=120, env=SF.kaggle_env())
             text = r.stdout if r.returncode == 0 else None
             err = (r.stderr or r.stdout).strip().splitlines()[-1:] if r.returncode else []
         except (OSError, subprocess.TimeoutExpired) as e:
@@ -654,6 +656,7 @@ def cmd_features(a):
 
 def cmd_kernels(a):
     from . import kernels as K
+    from . import safety as SF
     from . import state as S
 
     st = S.load()
@@ -662,8 +665,10 @@ def cmd_kernels(a):
         if not slug:
             raise SystemExit("--competition required (no competition state found)")
         rows = K.top(slug, a.n, a.sort_by)
-        for r in rows:
-            print(f"{r.get('totalVotes', ''):>5}  {r.get('ref', '')}  |  {r.get('title', '')}  ({r.get('lastRunTime', '')})")
+        table = "\n".join(f"{r.get('totalVotes', ''):>5}  {r.get('ref', '')}  |  {r.get('title', '')}  "
+                          f"({r.get('lastRunTime', '')})" for r in rows)
+        print(SF.UNTRUSTED_NOTE)
+        print(SF.wrap(table, "kaggle-cli", competition=slug, view="top kernels"))
         print("\nnext: python -m kgkit kernels pull <ref>   (review + local script under ref/)")
     elif a.action in ("pull", "review"):
         if not a.ref:
@@ -680,6 +685,7 @@ def cmd_discussions(a):
     import pandas as pd
 
     from . import discussions as D
+    from . import safety as SF
     from . import state as S
 
     st = S.load()
@@ -700,7 +706,8 @@ def cmd_discussions(a):
         f = D.facts(comp)
         if f:
             print("facts: " + f)
-        print("\nmost voted:\n" + D.format_table(D.top(t, min(a.n, 10), "votes")))
+        print("\nmost voted (" + SF.UNTRUSTED_NOTE + "):\n"
+              + SF.wrap(D.format_table(D.top(t, min(a.n, 10), "votes")), "meta-kaggle", competition=slug))
         return
     if a.action == "read":
         if not a.query:
@@ -715,9 +722,10 @@ def cmd_discussions(a):
         if not msgs:
             print(f"topic {tid} not in the cached export (newer than the last daily refresh?). Read it at {url}")
             return
+        print(SF.UNTRUSTED_NOTE)
         for m in msgs[: a.n if a.n else None]:
-            medal = f" [medal {int(m['Medal'])}]" if pd.notna(m.get("Medal")) and m.get("Medal") else ""
-            print(f"--- {m.get('PostDate')}{medal}\n{m['text'][:a.max_chars]}\n")
+            medal = int(m["Medal"]) if pd.notna(m.get("Medal")) and m.get("Medal") else None
+            print(SF.wrap(m["text"][:a.max_chars], "meta-kaggle", topic=tid, posted=m.get("PostDate"), medal=medal))
         print(url)
         return
     if idx_path.is_file():
@@ -735,9 +743,41 @@ def cmd_discussions(a):
         if out.empty:
             print("no write-up threads found (competition still running, or write-ups not in the export yet)")
             return
-    print(D.format_table(out))
+    print(SF.UNTRUSTED_NOTE)
+    print(SF.wrap(D.format_table(out), "meta-kaggle", competition=slug, view=a.action))
     print("\nread one: python -m kgkit discussions read <id>   (or WebFetch its URL: "
           f"https://www.kaggle.com/competitions/{slug}/discussion/<id>)")
+
+
+def cmd_pages(a):
+    from . import pages as P
+    from . import safety as SF
+    from . import state as S
+
+    st = S.load()
+    slug = a.competition or (st.slug if st else None)
+    if not slug:
+        raise SystemExit("--competition required (no competition state found)")
+    pages = P.fetch(slug)
+    if a.save:
+        for f in P.save(pages, a.save):
+            print(f"wrote {f}")
+        return
+    if not a.page:
+        print(SF.UNTRUSTED_NOTE)
+        print(SF.wrap(", ".join(f"{p['name']} ({len(p['text'])} chars)" for p in pages), "kaggle-cli",
+                      competition=slug, view="page names"))
+        print("\nread one: python -m kgkit pages --page <name>   (all: --save reports/pages)")
+        return
+    page = P.pick(pages, a.page)
+    if page is None:
+        raise SystemExit(f"no page {a.page!r}; pages: " + ", ".join(p["name"] for p in pages))
+    text = page["text"]
+    cut = len(text) > a.max_chars
+    print(SF.UNTRUSTED_NOTE)
+    print(SF.wrap(text[: a.max_chars], "kaggle-cli", competition=slug, page=page["name"]))
+    if cut:
+        print(f"(cut at {a.max_chars} of {len(text)} characters: --max-chars {len(text)} for all of it)")
 
 
 def cmd_recheck(a):
@@ -970,6 +1010,13 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--force", action="store_true", help="re-download the cached files")
     s.add_argument("--max-chars", type=int, default=4000, help="read: characters per message")
     s.set_defaults(fn=cmd_discussions)
+
+    s = sub.add_parser("pages", help="competition pages (evaluation, rules, data description) as text")
+    s.add_argument("--competition", help="default: competition.json slug")
+    s.add_argument("--page", help="page name, e.g. evaluation, rules, data-description (a unique prefix works)")
+    s.add_argument("--save", metavar="DIR", help="write every page to DIR/<name>.md")
+    s.add_argument("--max-chars", type=int, default=20000)
+    s.set_defaults(fn=cmd_pages)
 
     s = sub.add_parser("recheck", help="does the baseline's gain survive a re-drawn fold split?")
     s.add_argument("--seed", type=int, default=7, help="seed for the re-drawn split")

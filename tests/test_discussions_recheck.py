@@ -1,6 +1,7 @@
 """Discussions from a (fake, offline) Meta Kaggle cache, and the fresh-split recheck end to end."""
 
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -88,7 +89,8 @@ def test_discussions_cli(meta, tmp_path, plugin_root):
     r = run(["discussions", "top", "--sort", "replies", "-n", "1"], ws, plugin_root, env)
     assert "1st place solution" in r.stdout
     r = run(["discussions", "read", "11"], ws, plugin_root, env)
-    assert "shuffle fixes it" in r.stdout and "[medal 2]" in r.stdout
+    assert "shuffle fixes it" in r.stdout and 'topic="11"' in r.stdout and 'medal="2"' in r.stdout
+    assert len(re.findall(r"<untrusted-content-[0-9a-f]{8} ", r.stdout)) == r.stdout.count("</untrusted-content-") >= 1
     r = run(["discussions", "top", "--competition", "comp-b"], ws, plugin_root, env)
     assert "other comp" in r.stdout
     os.utime(meta / "ForumMessages.csv", (0, 0))  # stale cache + no kaggle CLI on PATH -> falls back, no crash

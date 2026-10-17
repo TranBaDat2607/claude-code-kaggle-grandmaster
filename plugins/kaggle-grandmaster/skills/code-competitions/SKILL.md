@@ -22,7 +22,7 @@ evaluation-API loop.
 
 | Asset | How |
 |---|---|
-| Model weights | `kaggle datasets create -p kernels/<name>-weights` (dataset-metadata.json), version with `kaggle datasets version -p ... -m "msg"` |
+| Model weights | `kaggle datasets create -p kernels/<name>-weights` (dataset-metadata.json), version with `kaggle datasets version -p ... -m "msg"`. Everything in the folder is uploaded; `Dataset version creation error` exits 0, so check the output before pushing a kernel that attaches the new version |
 | Your code (`src/`, `kgkit`) | upload as a dataset, `sys.path.append("/kaggle/input/<code-ds>")` |
 | Python packages not in the image | `pip download <pkg> -d wheels/ --no-deps` (matching Python/CUDA), upload as dataset, install with `pip install --no-index --find-links /kaggle/input/<wheels-ds> <pkg>` |
 | HF models/tokenizers | `save_pretrained` to a folder → dataset; load with `local_files_only=True` |

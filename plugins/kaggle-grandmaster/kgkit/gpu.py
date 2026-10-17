@@ -32,6 +32,7 @@ import time
 import zipfile
 from pathlib import Path
 
+from . import safety
 from . import state as S
 
 PLUGIN_ROOT = Path(__file__).resolve().parents[1]
@@ -89,7 +90,7 @@ def kaggle_cmd() -> list[str]:
 
 def run_kaggle(args: list[str], timeout: float = 600) -> subprocess.CompletedProcess:
     return subprocess.run([*kaggle_cmd(), *args], capture_output=True, text=True, timeout=timeout,
-                          encoding="utf-8", errors="replace")
+                          encoding="utf-8", errors="replace", env=safety.kaggle_env())
 
 
 def kaggle_username() -> str | None:
@@ -260,19 +261,32 @@ def _git(root: Path) -> tuple[str | None, bool | None]:
         return None, None
 
 
-def _add_tree(z: zipfile.ZipFile, src: Path, arc: str) -> int:
-    n = 0
+def _add_tree(z: zipfile.ZipFile, src: Path, arc: str, base: Path | None = None) -> int:
+    """Add ``src`` under ``arc``. Credential-like files, and anything whose real path leaves ``base`` (through
+    a link at any level, ``src`` included), never go in: the bundle is embedded in the kernel's code, which
+    is uploaded to Kaggle."""
+    base = (base or (src if src.is_dir() else src.parent)).resolve()
+    if not safety.inside(src, base) or (src.is_file() and safety.looks_secret(src.name)):
+        raise SystemExit(f"--include {src}: looks like a credential file or links outside the project; "
+                         "it would be uploaded inside the kernel")
     if src.is_file():
         z.write(src, arc)
         return 1
+    n, skipped = 0, []
     for p in sorted(src.rglob("*")):
         rel = p.relative_to(src)
         if any(part in BUNDLE_EXCLUDE_DIRS for part in rel.parts) or not p.is_file():
             continue
         if p.suffix.lower() in BUNDLE_EXCLUDE_SUFFIXES:
             continue
+        if safety.looks_secret(p.name) or not safety.inside(p, base):
+            skipped.append(f"{arc}/{rel.as_posix()}")
+            continue
         z.write(p, f"{arc}/{rel.as_posix()}")
         n += 1
+    if skipped:
+        print("left out of the kernel bundle (credential-like files or links outside the project): "
+              + ", ".join(skipped[:10]) + (f" and {len(skipped) - 10} more" if len(skipped) > 10 else ""))
     return n
 
 
@@ -289,7 +303,7 @@ def build_bundle(root: Path, include: list[str], baseline_dir: Path | None = Non
             p = (root / inc)
             if not p.exists():
                 raise SystemExit(f"--include {inc}: not found under {root}")
-            _add_tree(z, p, Path(inc).as_posix().strip("/"))
+            _add_tree(z, p, Path(inc).as_posix().strip("/"), base=root)
         if baseline_dir is not None:
             for c in sorted(baseline_dir.glob("curve_fold*.json")):
                 z.write(c, f"_kg/baseline/{c.name}")

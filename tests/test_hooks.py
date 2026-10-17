@@ -295,3 +295,102 @@ def test_prompt_router_adopt(plugin_root, tmp_path):
         "hook_event_name": "UserPromptSubmit", "cwd": str(tmp_path), "session_id": uuid.uuid4().hex,
         "prompt": "I'm two months into this Kaggle competition with an existing repo, how do I set up the plugin?"})
     assert "kaggle-grandmaster:kg-adopt" in out["additionalContext"]
+
+
+def test_more_credential_leaks_denied(plugin_root, tmp_path):
+    for cmd in ["cat ~/.kaggle/access_token", "Get-Content $HOME\\.kaggle\\credentials.json",
+                "head -c 20 ~/.kaggle/access_token.txt", "kaggle auth print-access-token",
+                "VERBOSE=1 kaggle competitions submissions demo", "export VERBOSE_OUTPUT=true && kaggle kernels status a/b",
+                '$env:VERBOSE="1"; kaggle quota', "VERBOSE=1 python -c 'import kaggle; kaggle.api.competitions_list()'"]:
+        out = hook(plugin_root, "pre_tool.py", bash(cmd, tmp_path))
+        assert out and out["permissionDecision"] == "deny", cmd
+    # VERBOSE scoped to another program, or a kgkit call (kgkit drops it from its Kaggle CLI calls)
+    for cmd in ["VERBOSE=1 python train.py", "cat reports/credentials_audit.md", "kaggle auth login",
+                "ls ~/.kaggle", "VERBOSE=1 python train.py && kaggle competitions list",
+                "VERBOSE=yes python -m kgkit gpu push kernels/x"]:
+        assert hook(plugin_root, "pre_tool.py", bash(cmd, tmp_path)) is None, cmd
+
+
+def test_upload_with_credentials_denied(plugin_root, tmp_path):
+    up = tmp_path / "kernels" / "w"
+    (up / "sub").mkdir(parents=True)
+    (up / "fold0.pt").write_bytes(b"x")
+    (up / "sub" / ".env").write_text("KAGGLE_KEY=1")
+    ok = ["kaggle datasets create -p kernels/w", "kaggle datasets version -p kernels/w -m v2",
+          "kaggle datasets version -p kernels/w -m v2 --dir-mode zip --ignore-patterns '*.env'"]
+    for cmd in ok:
+        assert hook(plugin_root, "pre_tool.py", bash(cmd, tmp_path)) is None, cmd
+    for cmd in ["kaggle datasets version -p kernels/w -m v2 -r zip",
+                "kaggle d create --path=kernels/w --dir-mode=tar",
+                "kaggle models instances versions create me/m/pytorch/v1 -p kernels/w -r zip"]:
+        out = hook(plugin_root, "pre_tool.py", bash(cmd, tmp_path))
+        assert out["permissionDecision"] == "deny" and "sub/.env" in out["permissionDecisionReason"], cmd
+    (up / "kaggle.json").write_text("{}")
+    out = hook(plugin_root, "pre_tool.py", bash("kaggle datasets create", up))  # -p defaults to the cwd
+    assert out["permissionDecision"] == "deny" and "kaggle.json" in out["permissionDecisionReason"]
+
+
+def test_resubmitting_the_same_file_asks(plugin_root, ws):
+    cmd = 'kaggle competitions submit demo -f subs/good.csv -m "0001_lgbm | CV 0.8"'
+    hook(plugin_root, "post_tool.py", _post(cmd, "Successfully submitted to Demo", ws))
+    assert len(_sub_log(ws)[-1]["sha256"]) == 64
+    out = hook(plugin_root, "pre_tool.py", bash(cmd.replace("0001_lgbm", "0002_again"), ws))
+    assert out["permissionDecision"] == "ask" and "already submitted" in out["permissionDecisionReason"]
+    (ws / "subs" / "other.csv").write_text("id,target\n1,0.2\n2,0.8\n3,0.4\n")
+    assert hook(plugin_root, "pre_tool.py", bash(cmd.replace("good", "other"), ws)) is None
+
+
+def test_kaggle_reported_budget_is_used(plugin_root, ws):
+    S.CompetitionState(slug="demo", metric="auc", daily_submissions=5, deadline="2099-01-01").save(ws)
+    cmd = 'kaggle competitions submit demo -f subs/good.csv -m "0001_lgbm | CV 0.8"'
+    ctx = hook(plugin_root, "post_tool.py", _post(cmd, "100%|##| 30/30\n0 submissions remaining today.",
+                                                  ws))["additionalContext"]
+    assert "Kaggle reports 0 left today for the team" in ctx and _sub_log(ws)[-1]["remaining_today"] == 0
+    (ws / "subs" / "other.csv").write_text("id,target\n1,0.2\n2,0.8\n3,0.4\n")
+    out = hook(plugin_root, "pre_tool.py", bash(cmd.replace("good", "other"), ws))
+    assert out["permissionDecision"] == "ask" and "0 submissions left today" in out["permissionDecisionReason"]
+
+
+def test_exit_zero_failures_recognised(plugin_root, ws):
+    cmd = 'kaggle competitions submit demo -f subs/good.csv -m "0001_x"'
+    hook(plugin_root, "post_tool.py", _post(cmd, "Could not submit to competition", ws))
+    assert _sub_log(ws)[-1]["status"] == "failed"
+    ctx = hook(plugin_root, "post_tool.py", _post("kaggle datasets version -p kernels/w -m v3 && kaggle kernels push",
+                                                  "Dataset version creation error: Invalid metadata", ws))
+    assert "exited 0" in ctx["additionalContext"] and "Invalid metadata" in ctx["additionalContext"]
+    ctx = hook(plugin_root, "post_tool.py", _post("kaggle kernels push -p kernels/x",
+                                                  "Kernel push error: Maximum batch GPU session count of 2 reached.",
+                                                  ws))
+    assert "nothing was created or started" in ctx["additionalContext"] and "gpu status" in ctx["additionalContext"]
+    assert hook(plugin_root, "post_tool.py", _post("kaggle datasets version -p w -m v", "Dataset version created", ws)) is None
+
+
+def test_chained_upload_still_checks_the_submit(plugin_root, ws):
+    (ws / "kernels" / "w").mkdir(parents=True)
+    (ws / "kernels" / "w" / "fold0.pt").write_bytes(b"x")
+    out = hook(plugin_root, "pre_tool.py",
+               bash('kaggle datasets version -p kernels/w -m v3 && kaggle competitions submit demo -f subs/bad.csv -m x',
+                    ws))
+    assert out["permissionDecision"] == "deny" and "invalid submission" in out["permissionDecisionReason"]
+
+
+def test_chained_submit_logged_after_failed_upload(plugin_root, ws):
+    cmd = 'kaggle datasets version -p kernels/w -m v ; kaggle competitions submit demo -f subs/good.csv -m "0001_x"'
+    ctx = hook(plugin_root, "post_tool.py", _post(cmd, "Dataset version creation error: Invalid metadata\n"
+                                                       "Successfully submitted to Demo", ws))["additionalContext"]
+    rec = _sub_log(ws)[-1]
+    assert rec["status"] == "submitted" and rec["size"] == (ws / "subs" / "good.csv").stat().st_size
+    assert "exited 0" in ctx and "submission logged" in ctx
+
+
+def test_stale_remaining_count_is_not_reused(plugin_root, ws, monkeypatch):
+    S.CompetitionState(slug="demo", metric="auc", daily_submissions=5, deadline="2099-01-01").save(ws)
+    cmd = 'kaggle competitions submit demo -f subs/good.csv -m "0001_lgbm"'
+    hook(plugin_root, "post_tool.py", _post(cmd, "0 submissions remaining today.", ws))
+    hook(plugin_root, "post_tool.py", _post(cmd.replace("0001", "0002"), "", ws))  # no count printed
+    monkeypatch.syspath_prepend(str(plugin_root / "hooks"))
+    import _common as C
+
+    assert C.server_remaining_today(ws) is None
+    hook(plugin_root, "post_tool.py", _post(cmd, "Could not submit to competition", ws))  # failed: skipped
+    assert C.server_remaining_today(ws) is None

@@ -1,6 +1,7 @@
-"""PostToolUse: after `kaggle competitions submit`, log the submission locally and remind Claude to
-fetch the public score and attach it to the experiment ledger. After a GPU `kaggle kernels push`,
-record the run in the GPU-hour log."""
+"""PostToolUse: after `kaggle competitions submit`, log the submission locally (with the file's SHA-256 and
+what Kaggle says is left today) and remind Claude to fetch the public score and attach it to the
+experiment ledger. After a GPU `kaggle kernels push`, record the run in the GPU-hour log. The Kaggle CLI
+exits 0 after several failed writes; say so when one shows up in the output."""
 
 from __future__ import annotations
 
@@ -8,6 +9,7 @@ import datetime as dt
 import json
 import re
 import sys
+from pathlib import Path
 
 try:
     import _common as C
@@ -24,6 +26,12 @@ def _response_text(payload: dict) -> str:
 
 # A successful `submit -k` (code competition) prints only "N submissions remaining today."
 SUBMIT_OK_RE = re.compile(r"successfully submitted|\d+\s+submissions?\s+remaining\s+today", re.IGNORECASE)
+REMAINING_RE = re.compile(r"(\d+)\s+submissions?\s+remaining\s+today", re.IGNORECASE)
+# Printed by kaggle 2.2.4 with exit status 0: a refused upload, a 404 competition, failed writes.
+SUBMIT_FAILED = ("error", "exception", "forbidden", "401", "403", "404", "400 client", "could not submit",
+                 "could not find competition")
+SILENT_FAILURE_RE = re.compile(r"(?:Dataset(?: version)? creation|Kernel push|Model(?: instance)?(?: version)? "
+                               r"creation) error\b[^\n]*", re.IGNORECASE)
 
 
 def _kernel_runtime_h(root, kernel: str | None) -> float | None:
@@ -64,16 +72,16 @@ def _poll_hint(root, sub: dict, st, slug: str) -> str:
             f"loop")
 
 
-def log_gpu_push(payload: dict, push: dict) -> None:
+def log_gpu_push(payload: dict, push: dict) -> str | None:
     """A raw GPU `kaggle kernels push` spends quota too: record it so budgets account for it."""
     root = C.workspace(payload)
     target = C.push_target(payload, push)
     if root is None or target is None or not C.push_uses_gpu(push, target[1]):
-        return
+        return None
     text = _response_text(payload)
     m = re.search(r"version\s+(\d+)\s+successfully pushed", text, re.IGNORECASE)
     if not m:
-        return
+        return None
     kernel = target[1].get("id") or "?"
     try:
         hours = round(float(push["timeout"]) / 3600, 3) if push.get("timeout") else C.G.SESSION_LIMIT_H
@@ -83,29 +91,48 @@ def log_gpu_push(payload: dict, push: dict) -> None:
                        "accelerator": push.get("accelerator") or target[1].get("machine_shape") or "gpu",
                        "hours": hours, "pushed_at": dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
                        "status": "pushed", "via": "kaggle-cli"})
-    C.emit("PostToolUse", additionalContext=(
-        f"kaggle-grandmaster: GPU kernel {kernel} v{m.group(1)} logged (cap {hours}h of weekly quota). Poll with "
-        f"`python -m kgkit gpu wait {kernel}` in the background (not a tight loop); for kgkit-built training "
-        f"kernels then run `python -m kgkit gpu collect {kernel}`."))
+    return (f"kaggle-grandmaster: GPU kernel {kernel} v{m.group(1)} logged (cap {hours}h of weekly quota). Poll with "
+            f"`python -m kgkit gpu wait {kernel}` in the background (not a tight loop); for kgkit-built training "
+            f"kernels then run `python -m kgkit gpu collect {kernel}`.")
 
 
-def main() -> None:
-    payload = C.read_input()
-    push = C.parse_push(C.command_of(payload))
-    if push is not None:
-        log_gpu_push(payload, push)
-        return
-    sub = C.parse_submit(C.command_of(payload))
-    if sub is None:
-        return
+def silent_failure_note(payload: dict) -> str | None:
+    """An upload or push that printed one of the CLI's exit-0 errors: say nothing was created."""
+    cmd = C.command_of(payload)
+    if C.parse_upload(cmd) is None and C.parse_push(cmd) is None:
+        return None
+    m = SILENT_FAILURE_RE.search(_response_text(payload))
+    if not m:
+        return None
+    hint = ""
+    if "session count" in m.group(0).lower():
+        hint = (" Kaggle allows only so many batch sessions at once (2 GPU, 1 TPU): wait for a running kernel to "
+                "finish (`python -m kgkit gpu status`) and push again.")
+    return (f"kaggle-grandmaster: the Kaggle CLI printed `{C.SF.clean(m.group(0))[:300]}` but exited 0, so nothing "
+            "was created or started and commands chained after it with && still ran. Do not wait for, attach or "
+            f"submit this version.{hint}")
+
+
+def log_submission(payload: dict, sub: dict) -> str | None:
     root = C.workspace(payload)
     if root is None:
-        return
-    text = _response_text(payload)
+        return None
+    # An upload/push error earlier in the same command must not be read as this submit's failure.
+    text = SILENT_FAILURE_RE.sub("", _response_text(payload))
     low = text.lower()
-    failed = any(w in low for w in ("error", "exception", "forbidden", "401", "403", "404", "400 client"))
-    ok = SUBMIT_OK_RE.search(text) is not None
+    failed = any(w in low for w in SUBMIT_FAILED)
+    ok = SUBMIT_OK_RE.search(text) is not None and "could not submit" not in low
     status = "submitted" if ok else ("failed" if failed else "unknown")
+    left = REMAINING_RE.search(text)
+    sha = size = None
+    if sub.get("file") and not sub.get("kernel"):
+        f = Path(sub["file"])
+        f = f if f.is_absolute() else Path(payload.get("cwd") or ".") / f
+        sha = C.file_sha256(f)
+        try:
+            size = f.stat().st_size
+        except OSError:
+            pass
     m = C.EXP_ID_RE.search(sub.get("message") or "") or C.EXP_ID_RE.search(sub.get("file") or "")
     exp_id = m.group(1) if m else None
     rec = {
@@ -116,24 +143,44 @@ def main() -> None:
         "message": sub.get("message"),
         "exp_id": exp_id,
         "status": status,
+        "sha256": sha,
+        "size": size,
+        "remaining_today": int(left.group(1)) if left else None,
     }
     log = C.submissions_log(root)
     log.parent.mkdir(parents=True, exist_ok=True)
     with log.open("a", encoding="utf-8") as f:
         f.write(json.dumps(rec) + "\n")
     if status == "failed":
-        C.emit("PostToolUse", additionalContext=_failure_hint(low))
-        return
+        return _failure_hint(low)
     st = C.S.load(root)
     slug = sub.get("competition") or (st.slug if st else "<slug>")
     used = C.submissions_today(root)
     limit = st.daily_submissions if st else 5
-    ctx = (f"kaggle-grandmaster: submission logged ({used}/{limit} today, UTC). {_poll_hint(root, sub, st, slug)}; "
+    count = (f"Kaggle reports {left.group(1)} left today for the team" if left
+             else f"{used}/{limit} today in the local log, UTC")
+    ctx = (f"kaggle-grandmaster: submission logged ({count}). {_poll_hint(root, sub, st, slug)}; "
            f"when the public score appears, run `python -m kgkit ledger lb {exp_id or '<exp_id>'} <score>` and "
            f"compare with CV.")
     if not exp_id:
         ctx += " (No ledger experiment id found in the message/file name — identify which experiment this was.)"
-    C.emit("PostToolUse", additionalContext=ctx)
+    return ctx
+
+
+def main() -> None:
+    payload = C.read_input()
+    cmd = C.command_of(payload)
+    # One command can chain an upload, a push and a submit: report on each, in one message.
+    notes = [silent_failure_note(payload)]
+    push = C.parse_push(cmd)
+    if push is not None:
+        notes.append(log_gpu_push(payload, push))
+    sub = C.parse_submit(cmd)
+    if sub is not None:
+        notes.append(log_submission(payload, sub))
+    notes = [n for n in notes if n]
+    if notes:
+        C.emit("PostToolUse", additionalContext="\n\n".join(notes))
 
 
 if __name__ == "__main__":
