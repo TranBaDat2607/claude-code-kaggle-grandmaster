@@ -104,9 +104,9 @@ when no other plugin uses the same name.
 | **Slash commands** | 17 | `kg-start`, `kg-adopt`, `kg-recon`, `kg-eda`, `kg-cv`, `kg-baseline`, `kg-experiment`, `kg-grind`, `kg-gpu`, `kg-ensemble`, `kg-submit`, `kg-status`, `kg-kernel`, `kg-final`, `kg-debug`, `kg-ideas`, `kg-postmortem` |
 | **Specialist agents** | 9 | competition-analyst, solution-researcher, data-detective, validation-auditor, feature-engineer, experiment-runner, error-analyst, ensemble-architect, kernel-packager |
 | **Hooks** | 4 | session brief (incl. GPU quota), Kaggle-prompt → skill router, submission + GPU-push + upload guard (validation, repeated files, daily budget, weekly GPU quota, credential protection), submission / GPU-run logger |
-| **`kgkit` toolkit** | 22 modules | Tested Python: leak-free folds, 35+ metrics, threshold/rounding optimisers, hill climbing / multi-level and residual stacking / library pruning, adversarial validation, leak-safe features, brute-force feature search, EDA red flags, experiment ledger with decisions + lineage, paired experiment comparison, fresh-split recheck, idea backlog, public-notebook review, competition pages and discussions, submission validation, Kaggle GPU pipeline, upload and third-party-text safety |
+| **`kgkit` toolkit** | 23 modules | Tested Python: leak-free folds, 35+ metrics, threshold/rounding optimisers, hill climbing / multi-level and residual stacking / library pruning, adversarial validation, leak-safe features, brute-force feature search, EDA red flags, experiment ledger with decisions + lineage, paired experiment comparison, fresh-split recheck, idea backlog, public-notebook review, competition pages and discussions, submission validation, Kaggle GPU/TPU pipeline, dataset download with per-file fallback, upload and third-party-text safety |
 | **Templates** | 5 + metadata | Tabular (LightGBM/XGBoost/CatBoost/HGB + linear/kNN/SVM/MLP), timm image models, HF transformers (both resumable), offline inference kernel, remote GPU training runner |
-| **Evals** | 13 cases | `claude plugin eval` suite with a no-plugin baseline arm |
+| **Evals** | 15 cases | `claude plugin eval` suite with a no-plugin baseline arm |
 
 ## How a competition flows
 
@@ -150,9 +150,9 @@ artifacts/<exp_id>/           oof.npy + test.npy, the inputs for ensembling
 |---|---|
 | SessionStart | Exports `KGKIT_HOME`; inside a workspace it injects a brief: competition facts, deadline countdown and phase, best CV/LB, accepted baseline, backlog top, CV↔LB correlation, recent experiments, submissions today, lessons from past competitions (`~/.kaggle-gm/lessons.md`). Outside a workspace it recognises existing Kaggle work (`kernel-metadata.json`, competition URLs) and suggests `/kg-adopt <slug>` |
 | UserPromptSubmit | Detects competition work and tells Claude which 1–3 plugin skills to load before it answers. In evals this took skill use on Kaggle questions from 0 % to 100 % |
-| PreToolUse (Bash/PowerShell) | **Denies** commands that would print Kaggle credentials: `kaggle.json`, `~/.kaggle/access_token` or `credentials.json`, `KAGGLE_KEY` / `KAGGLE_API_TOKEN`, `kaggle auth print-access-token`, and Kaggle CLI calls with `VERBOSE` on (the CLI then prints the bearer token). **Denies** a `kaggle datasets create / version` or `kaggle models instances ... create` whose folder holds credential-like files (`.env`, `kaggle.json`, `access_token`, keys) or links outside it. **Denies** `kaggle competitions submit` when the file fails validation against `sample_submission` (header, rows, ids, NaNs, index column written by mistake). **Asks** when the same file (SHA-256) was already submitted, when today's budget is used up, or when Kaggle reported 0 submissions left today for the team |
-| PreToolUse (GPU push) | **Asks** before a GPU `kaggle kernels push` when the cached weekly GPU quota, minus kernels still running, is exhausted or smaller than the push's `-t` cap |
-| PostToolUse | Logs submissions with the file's SHA-256 and the team's remaining count as Kaggle reports it, and reminds Claude to fetch the public score and attach it to the ledger (for code competitions: grading reruns the notebook and takes hours, estimated from its measured runtime). Explains a refused submit (`400 Bad Request`, usually `FAILED_PRECONDITION` from a non-versioned dataset). Points out the Kaggle CLI's failures that exit 0 (`Dataset version creation error`, `Kernel push error`, `Could not submit to competition`). Logs GPU kernel pushes so quota accounting includes them |
+| PreToolUse (Bash/PowerShell) | **Denies** commands that would print Kaggle credentials: a file reader on `kaggle.json`, `~/.kaggle/access_token` or `credentials.json`, Python that prints more than their `username` field, `KAGGLE_KEY` / `KAGGLE_API_TOKEN`, `kaggle auth print-access-token`, and Kaggle CLI calls with `VERBOSE` on (the CLI then prints the bearer token); text that only mentions those files passes, and `kgkit whoami` gives the username. **Denies** a `kaggle datasets create / version` or `kaggle models instances ... create` whose folder holds credential-like files (`.env`, `kaggle.json`, `access_token`, keys) or links outside it. **Denies** `kaggle competitions submit` when the file fails validation against `sample_submission` (header, rows, ids, NaNs, index column written by mistake). **Asks** when the same file (SHA-256) was already submitted, when today's budget is used up, or when Kaggle reported 0 submissions left today for the team |
+| PreToolUse (GPU/TPU push) | **Asks** before each GPU or TPU `kaggle kernels push` in a command when the cached weekly quota of that accelerator, minus kernels still running, is exhausted or smaller than the push's `-t` cap |
+| PostToolUse | Logs submissions with the file's SHA-256 and the team's remaining count as Kaggle reports it, and reminds Claude to fetch the public score and attach it to the ledger (for code competitions: grading reruns the notebook and takes hours, estimated from its measured runtime). Explains a refused submit (`400 Bad Request`, usually `FAILED_PRECONDITION` from a non-versioned dataset). Points out the Kaggle CLI's failures that exit 0 (`Dataset version creation error`, `Kernel push error`, `Could not submit to competition`). Logs every GPU/TPU kernel push in a command so quota accounting includes them (a re-push replaces the kernel's older reservation) |
 
 Hooks never block for any other reason. They exit 0 on internal errors, and Python only starts
 for commands that mention Kaggle (or `VERBOSE`), which keeps overhead around 70 ms.
@@ -175,7 +175,7 @@ PYTHONPATH="$KGKIT_HOME" python -m kgkit <command>     # KGKIT_HOME is set by th
 | `ledger compare <new> [<base>] --truth train.csv:y --folds folds.csv:fold [--fold 0] [--groups ...]` | paired per-fold test + paired OOF bootstrap against the accepted baseline → KEEP / DISCARD / INCONCLUSIVE (also works on unassembled 1-fold screens in `artifacts/<name>/`) |
 | `ledger decide <id> keep\|discard\|inconclusive\|baseline` · `baseline` · `lineage` | record decisions; the accepted baseline is the last KEEP, not the best CV; lineage drives reverse ablation |
 | `ledger import <name> oof.npy --test test.npy --truth ... --folds ... --source teammate` | bring a teammate's or public notebook's predictions in, CV recomputed on your folds |
-| `backlog add\|list\|set\|render\|fidelity` | ranked idea backlog; `fidelity` checks that cheap screens rank ideas like full CV |
+| `backlog add\|list\|set\|render\|fidelity` | ranked idea backlog (`--cost` hands-on hours, `--gpu-hours` unattended Kaggle GPU time ranked against the quota left); `fidelity` checks that cheap screens rank ideas like full CV |
 | `features search train.csv --target y --folds folds.csv:fold --recheck-seed 7` | generate count / target encodings, groupby aggregates and pairwise arithmetic, screen in batches, recheck on a fresh split |
 | `kernels top` · `kernels pull <owner/slug>` | top public notebooks; pull with a `REVIEW.md` (CV scheme, models, scores, external inputs, and the lines to read before running it locally: shell, network, credential paths, `exec`/`eval`) and a local script with Kaggle paths remapped |
 | `pages [--page evaluation\|rules\|data-description] [--save reports/pages]` | the competition's own pages as text, from `kaggle competitions pages` (CLI 2.2.4+); the website's pages are rendered by JavaScript, so WebFetch often gets nothing |
@@ -184,7 +184,9 @@ PYTHONPATH="$KGKIT_HOME" python -m kgkit <command>     # KGKIT_HOME is set by th
 | `blend --exp 3 7 9 --truth train.csv:y --folds folds.csv:fold --method hill --sample sample_submission.csv` | hill climbing / weights / rank / `stack --levels N` / `residual --base <id>`, `--prune N` for large libraries, honest nested score; warns if members used different folds |
 | `validate sub.csv sample_submission.csv` | metric-aware submission validation |
 | `metrics` / `score` / `vendor` | metric registry / scoring / copy kgkit into a project or Kaggle dataset |
-| `gpu quota\|plan\|build\|push\|status\|wait\|collect\|log` | train on Kaggle GPUs: live quota, budget to the deadline, remote training kernels, ledger import, GPU-hour accounting ([below](#training-on-kaggle-gpus)) |
+| `gpu quota\|plan\|build\|push\|status\|wait\|collect\|release\|cancel\|log` | train on Kaggle GPUs and TPUs: live quota (GPU + TPU) and what holds it, budget to the deadline, remote training kernels, push of any kernel folder with a cap, ledger import, GPU/TPU-hour accounting ([below](#training-on-kaggle-gpus)) |
+| `datasets pull <owner/slug> <dir> [--files GLOB]` | download a dataset; falls back to one request per file when the whole-dataset archive returns 404 |
+| `whoami` · `config [key=value ...]` | your Kaggle username (never the key) · show or set `competition.json` fields, e.g. `validation=holdout+lb holdout_n=58` |
 
 Python API highlights: `kgkit.cv.assign_folds` (stratified / group / stratified-group /
 multilabel), `time_series_splits(gap=h)`, `purged_kfold_splits`; `kgkit.metrics.get(name)`;
@@ -234,8 +236,13 @@ What it does for you:
   curve at the same fraction of the schedule, using the baseline's fold std as the margin.
 - **Measures itself.** `collect` imports ledger records with fresh ids, records GPU-hours, and flags an idle
   second GPU, input-bound runs (< 60 % utilisation), deadline hits and pruned folds.
-- **Guards the quota.** `push` refuses runs whose cap exceeds the plannable hours. The hook asks
-  before a raw GPU `kaggle kernels push` when the quota is exhausted.
+- **Guards the quota.** `push` refuses runs whose cap exceeds the plannable hours, re-checks runs it had
+  as in flight (finished ones free their reservation), refuses while an attached kernel is still running
+  (inputs are bound at push time), and warns when your account's batch-session slots look full. The hook
+  asks before a raw GPU/TPU `kaggle kernels push` when the quota is exhausted.
+- **Any kernel.** `gpu push <dir> --hours H` takes notebook, inference and diagnostics kernels too.
+- **TPU when the GPU quota is gone.** `--accelerator TpuV5E8` runs one process per TPU chip on the separate
+  20 h/week TPU quota; the skill covers the torch_xla port and the 10-24 h queue.
 
 ## Verification
 

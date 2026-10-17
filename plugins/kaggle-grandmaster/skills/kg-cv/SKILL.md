@@ -11,6 +11,12 @@ Arguments: `$ARGUMENTS` (optional strategy override and group column).
 
 Follow the `validation-strategy` skill.
 
+If decisions in this competition are made on a fixed labelled holdout plus the public LB (no K-fold OOF:
+e.g. a small expert-labelled set, or an accepted baseline forked from public inference notebooks), do not
+invent folds. Record the mode instead: `python -m kgkit config validation=holdout+lb holdout_n=<rows>`
+(optionally `holdout_se=<bootstrap SE>`), so the session brief stops asking for `data/folds.csv` and
+`kgkit status` shows the holdout noise next to any CV-LB correlation.
+
 1. Determine how train/test were split (recon report, data page, adversarial validation, time
    columns, entity ids). State the evidence.
 2. Pick the scheme from the decision table; if groups are suspected but not explicit, look for them

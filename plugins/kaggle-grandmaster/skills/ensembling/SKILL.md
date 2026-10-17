@@ -95,3 +95,16 @@ score, you're overfitting the blend — use fewer models, simpler weights, or pl
 - For code competitions, account for inference time of every member; drop the members with the
   worst (Δscore / runtime) ratio first.
 - Retrain-on-full-data models have no OOF: assign them the weights learned for their CV twins.
+
+## 6. Blending with public submission files (no OOF)
+
+Late in a Playground, the public-LB crowd is usually a blend of public submission files that come
+without OOF predictions. Such a blend cannot be cross-validated:
+- Log it as **LB-only**: `kgkit ledger add <name> lb-only "<members and weights>"`, then
+  `kgkit ledger lb <id> <score>`. Do not log it with its base stack's CV (or tag such a record
+  `--tag lb-blend`): CV-LB correlation is computed only over records with their own CV and at least 4
+  distinct CVs, so borrowed CVs cannot make it look like CV tracks the LB.
+- Its weights are a bet on the public LB, fitted on ~20-30 % of the test. Keep them few and round
+  (e.g. 0.5/0.3/0.2) rather than tuned to the 5th decimal by LB probing.
+- Keep an honest CV-only candidate (your nested-validated stack) as one of the two finals
+  (`final-submission-selection`), and use the LB-only blend as the hedge, not the other way round.

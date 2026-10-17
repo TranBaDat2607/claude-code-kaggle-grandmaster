@@ -1,14 +1,16 @@
 """PreToolUse guard for Bash/PowerShell.
 
-1. Blocks commands that would print Kaggle credentials: kaggle.json, ~/.kaggle/access_token or
-   credentials.json, KAGGLE_KEY / KAGGLE_API_TOKEN, `kaggle auth print-access-token`, and Kaggle CLI calls
-   with VERBOSE / VERBOSE_OUTPUT on for that call (the CLI then prints request headers, bearer token included).
+1. Blocks commands that would print Kaggle credentials: a file reader run on kaggle.json, ~/.kaggle/access_token
+   or credentials.json; Python that loads one and prints anything but the username field; KAGGLE_KEY /
+   KAGGLE_API_TOKEN; `kaggle auth print-access-token`; and Kaggle CLI calls with VERBOSE / VERBOSE_OUTPUT on
+   for that call (the CLI then prints request headers, bearer token included). Text that only mentions the
+   file (a heredoc saved with cat/tee, a commit message) passes; `python -m kgkit whoami` gives the username.
 2. Blocks a dataset or model upload whose folder holds credential-like files or links to files outside it.
 3. Before `kaggle competitions submit -f FILE`: validates FILE against sample_submission (deny with reasons
    when invalid), and asks for confirmation when the same file was already submitted, when today's local
    count has reached the daily limit, or when Kaggle reported no submissions left today for the team.
-4. Before a GPU `kaggle kernels push`: asks for confirmation when the cached weekly GPU quota
-   (minus kernels still running) is exhausted or smaller than the push's -t cap.
+4. Before each GPU or TPU `kaggle kernels push` in the command: asks for confirmation when the cached
+   weekly quota of that accelerator (minus kernels still running) is exhausted or smaller than the -t cap.
 Valid submissions produce no output, so the normal permission flow is unchanged.
 """
 
@@ -23,14 +25,52 @@ try:
 except Exception:  # pragma: no cover - fail open
     sys.exit(0)
 
+CRED_FILE = r"(?:kaggle\.json|\.kaggle[/\\](?:access_token(?:\.txt)?|credentials\.json))"
+CRED_ENV = r"\$?(?:env:)?KAGGLE_(?:KEY|API_TOKEN)\b"
+# A program name only counts where a command starts: prose that merely mentions the file (a commit
+# message, an issue body) is not a read.
+CMD_POS = r"(?:^|[;&|(`'\"\n{]|\$\()\s*(?:sudo\s+|command\s+)?"
+READERS = (r"(?:cat|type|more|less|head|tail|bat|get-content|gc|nl|strings|xxd|od|hexdump|base64|jq|grep|egrep|"
+           r"findstr|select-string|sed|awk|code|notepad|python\S*\s+-m\s+json\.tool)")
 SECRET_READ = re.compile(
-    r"(?:\b(?:cat|type|more|less|head|tail|bat|get-content|gc|nl|strings|xxd|od|print|echo|code|notepad)\b[^|;&\n]*"
-    r"(?:kaggle\.json|\.kaggle[/\\](?:access_token(?:\.txt)?|credentials\.json)))"
-    r"|(?:\b(?:echo|printenv|print|write-output|write-host)\b[^|;&\n]*\$?(?:env:)?KAGGLE_(?:KEY|API_TOKEN))"
-    r"|(?:\bprintenv\s+KAGGLE_(?:KEY|API_TOKEN))"
+    rf"(?:{CMD_POS}{READERS}\b[^|;&\n]*{CRED_FILE})"
+    rf"|(?:{CMD_POS}(?:echo|printf|printenv|print|write-output|write-host)\b[^|;&\n]*{CRED_ENV})"
     r"|(?:\benv\b\s*\|\s*(?:grep|findstr|select-string)\b[^|;&\n]*KAGGLE)",
-    re.IGNORECASE,
+    re.IGNORECASE | re.MULTILINE,
 )
+# Python that loads a credential file and prints: allowed only when it picks the username field alone.
+CRED_REF = re.compile(rf"{CRED_FILE}|{CRED_ENV}", re.IGNORECASE)
+PY_PRINT = re.compile(r"\b(?:print|pprint|sys\.stdout\.write|json\.dumps?)\s*\(", re.IGNORECASE)
+USERNAME_ONLY = re.compile(r"""\[\s*['"]username['"]\s*\]|\.get\(\s*['"]username['"]""")
+SECRET_FIELD = re.compile(r"""['"](?:key|token|access_token|api_token)['"]|\.read\(\)|KAGGLE_(?:KEY|API_TOKEN)""",
+                          re.IGNORECASE)
+HEREDOC = re.compile(r"<<-?\s*(['\"]?)([A-Za-z_]\w*)\1")
+TEXT_SINK = re.compile(r"^\s*(?:cat|tee)\b")
+
+
+def strip_text_heredocs(cmd: str) -> str:
+    """Drop the bodies of heredocs that `cat`/`tee` write to a file: they are text being saved (an issue
+    body, notes), not commands. A heredoc fed to an interpreter is kept."""
+    lines, out, i = cmd.split("\n"), [], 0
+    while i < len(lines):
+        line = lines[i]
+        out.append(line)
+        i += 1
+        m = HEREDOC.search(line)
+        if not m or not TEXT_SINK.match(line):
+            continue
+        redirect = ">" in line[:m.start()] or ">" in line[m.end():] or re.match(r"\s*tee\s+[^-\s<]", line)
+        if not redirect or "|" in line[m.end():]:
+            continue
+        while i < len(lines) and lines[i].strip() != m.group(2):
+            i += 1
+    return "\n".join(out)
+
+
+def python_prints_secret(cmd: str) -> bool:
+    if not CRED_REF.search(cmd) or not PY_PRINT.search(cmd):
+        return False
+    return not (USERNAME_ONLY.search(cmd) and not SECRET_FIELD.search(cmd))
 PRINT_TOKEN = re.compile(r"\bkaggle(?:\.exe)?\s+auth\s+print-access-token\b", re.IGNORECASE)
 # kaggle 2.2.4 / kagglesdk: VERBOSE or VERBOSE_OUTPUT = 1|true|yes prints every request's headers unmasked.
 # kgkit drops both from the environment of its own Kaggle CLI calls (kgkit.safety.kaggle_env), so only a
@@ -55,9 +95,10 @@ def verbose_kaggle_call(cmd: str) -> bool:
 
 
 def secret_reason(cmd: str) -> str | None:
-    if SECRET_READ.search(cmd):
+    text = strip_text_heredocs(cmd)
+    if SECRET_READ.search(text) or python_prints_secret(text):
         return ("this command would print Kaggle API credentials. Never display or copy the key; check auth with "
-                "`kaggle competitions list` instead.")
+                "`kaggle competitions list`, and get the username alone with `python -m kgkit whoami`.")
     if PRINT_TOKEN.search(cmd):
         return "`kaggle auth print-access-token` prints a live access token. Never display it."
     if verbose_kaggle_call(cmd):
@@ -88,34 +129,39 @@ def upload_guard(payload: dict, up: dict) -> bool:
 
 
 def gpu_push_guard(payload: dict, push: dict) -> bool:
-    """Ask before a GPU kernel push when the cached weekly quota cannot cover it; True when it emitted a decision."""
+    """Ask before a GPU/TPU kernel push when the cached weekly quota cannot cover it; True when it emitted a
+    decision."""
     target = C.push_target(payload, push)
     root = C.workspace(payload)
-    if target is None or root is None or not C.push_uses_gpu(push, target[1]):
+    res = C.push_resource(push, target[1]) if target is not None else None
+    if root is None or res is None:
         return False
-    q = C.G.cached_quota(root)
+    q = C.G.cached_quota(root, res)
     if q is None:
-        sys.stderr.write("kaggle-grandmaster: GPU quota unknown - run `python -m kgkit gpu quota` before pushing.\n")
+        sys.stderr.write(f"kaggle-grandmaster: {res} quota unknown - run `python -m kgkit gpu quota` before pushing.\n")
         return False
-    avail = C.G.available_hours(root, q)
+    avail = C.G.available_hours(root, q, res)
     try:
         cap = float(push["timeout"]) / 3600 if push.get("timeout") else None
     except ValueError:
         cap = None
     when = f" (quota checked {q.get('fetched_at')}, resets {q.get('refresh_at')})"
+    kernel = target[1].get("id") or target[0].name
     if avail <= 0.05:
         C.emit("PreToolUse", permissionDecision="ask",
-               permissionDecisionReason=f"kaggle-grandmaster: the weekly Kaggle GPU quota looks exhausted: "
-                                        f"{avail:.2f}h plannable after running kernels{when}. Push anyway?")
+               permissionDecisionReason=f"kaggle-grandmaster: the weekly Kaggle {res} quota looks exhausted: "
+                                        f"{avail:.2f}h plannable after running kernels{when}. Push {kernel} anyway? "
+                                        "(`python -m kgkit gpu quota` re-checks runs that already finished)")
         return True
     if cap is not None and cap > avail:
         C.emit("PreToolUse", permissionDecision="ask",
-               permissionDecisionReason=f"kaggle-grandmaster: this GPU run is capped at {cap:.2f}h but only "
-                                        f"{avail:.2f}h of GPU quota is plannable{when}. Push anyway?")
+               permissionDecisionReason=f"kaggle-grandmaster: {kernel} is capped at {cap:.2f}h but only "
+                                        f"{avail:.2f}h of {res} quota is plannable{when}. Push anyway?")
         return True
     if cap is None:
-        sys.stderr.write("kaggle-grandmaster: GPU push without -t: a hung session can burn up to 12h of quota. "
-                         "Prefer `python -m kgkit gpu push <dir>` (quota check + cap + run log).\n")
+        sys.stderr.write(f"kaggle-grandmaster: {res} push without -t: a hung session can burn up to "
+                         f"{C.G.session_limit(res):g}h of quota. Prefer `python -m kgkit gpu push <dir> [--hours H]` "
+                         "(quota check + cap + run log).\n")
     return False
 
 
@@ -135,9 +181,9 @@ def main() -> None:
     if up is not None and upload_guard(payload, up):
         return
 
-    push = C.parse_push(cmd)
-    if push is not None and gpu_push_guard(payload, push):
-        return
+    for push in C.parse_pushes(cmd):
+        if gpu_push_guard(payload, push):
+            return
 
     sub = C.parse_submit(cmd)
     if sub is None:

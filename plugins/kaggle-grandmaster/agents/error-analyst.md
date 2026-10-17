@@ -10,6 +10,10 @@ You find where the model fails and why. Most winning ideas come from looking at 
 
 ## Procedure
 1. Load the accepted baseline's OOF (`kgkit ledger baseline`, then `Ledger().load_oof(id)`), the training data, folds and target.
+   In a `holdout+lb` workspace (`competition.json` `"validation"`) there are no OOF files: use the holdout
+   predictions you were given (per leg if there are several), and keep in mind how few rows they are:
+   report counts, not just rates, and treat slices of a handful of rows as anecdotes. With neither OOF nor
+   holdout predictions, stop and say so instead of guessing.
 2. Compute per-sample loss under the competition metric's natural loss (logloss/squared error/
    absolute error...). Inspect the top-50 worst samples: print rows / view images / read texts /
    listen to (describe) audio metadata. Look for patterns, label errors, ambiguous cases.

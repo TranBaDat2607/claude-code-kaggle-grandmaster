@@ -9,6 +9,10 @@ Copy to src/, edit CONFIG and add_features(), then:
     python src/train_gbdt.py --seeds 42 43 44         # seed averaging
     python src/train_gbdt.py --model linear --name lin_v1   # diverse baselines on the same folds:
     python src/train_gbdt.py --model mlp --name mlp_v1      #   linear | knn | svm | mlp
+    python src/train_gbdt.py --model xgb --device cuda      # GPU XGBoost / CatBoost (or KG_DEVICE=cuda)
+
+The experiment name defaults to "<model>_baseline" (e.g. xgb_baseline) when neither --name nor
+CONFIG["name"] is set.
 
 What it guarantees:
   * uses the frozen folds in data/folds.csv (joined on id, or by row order when no id column)
@@ -41,7 +45,7 @@ from kgkit.thresholds import OptimizedRounder, best_threshold
 
 # ----------------------------------------------------------------------------- config
 CONFIG = dict(
-    name="lgbm_baseline",
+    name=None,            # default: "<model>_baseline"
     train="data/train.csv",
     test="data/test.csv",
     sample="data/sample_submission.csv",
@@ -50,6 +54,7 @@ CONFIG = dict(
     target=None,          # default: from .kaggle-gm/competition.json
     metric=None,          # default: from .kaggle-gm/competition.json
     model="lgbm",         # lgbm | xgb | cat | hgb | linear | knn | svm | mlp
+    device=os.environ.get("KG_DEVICE", "cpu"),  # cpu | cuda: GPU training for xgb and cat (others stay on CPU)
     task="auto",          # auto | binary | multiclass | regression
     drop=[],              # columns never used as features
     log_target=False,     # train on log1p(y) (RMSLE-style targets)
@@ -78,6 +83,9 @@ DEFAULTS = {
                 early_stopping=True),
 }
 SKLEARN_KINDS = ("linear", "knn", "svm", "mlp")
+# --device cuda; merged before --params, so explicit params win. LightGBM's GPU build is a separate
+# compile and sklearn has no GPU path, so those stay on CPU.
+DEVICE_PARAMS = {"cuda": {"xgb": {"device": "cuda"}, "cat": {"task_type": "GPU"}}}
 
 
 def add_features(train: pd.DataFrame, test: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
@@ -171,6 +179,10 @@ def fit(model, kind, X_tr, y_tr, X_va, y_va, cats, es):
     if kind == "xgb":
         model.set_params(early_stopping_rounds=es)
         model.fit(X_tr, y_tr, eval_set=[(X_va, y_va)], verbose=False)
+        if model.get_params().get("device", "cpu") != "cpu":
+            # predict() gets pandas frames in host memory: predicting on the CPU avoids XGBoost's
+            # "mismatched devices" fallback warning on every call (same trees, same predictions)
+            model.set_params(device="cpu")
         return model, getattr(model, "best_iteration", None)
     if kind == "cat":
         model.fit(X_tr, y_tr, cat_features=cats, eval_set=(X_va, y_va), early_stopping_rounds=es, use_best_model=True)
@@ -190,17 +202,22 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--name")
     ap.add_argument("--model", choices=list(DEFAULTS))
+    ap.add_argument("--device", choices=["cpu", "cuda"], help="cuda: train xgb/cat on the GPU (default: KG_DEVICE or cpu)")
     ap.add_argument("--seeds", type=int, nargs="+")
     ap.add_argument("--params", type=json.loads, help='JSON overrides, e.g. \'{"num_leaves": 127}\'')
     ap.add_argument("--notes")
     ap.add_argument("--smoke", action="store_true", help="1 fold, 50 rounds, no ledger/submission")
     args = ap.parse_args()
     cfg = dict(CONFIG)
-    for k in ("name", "model", "seeds", "notes"):
+    for k in ("name", "model", "device", "seeds", "notes"):
         if getattr(args, k) is not None:
             cfg[k] = getattr(args, k)
+    cfg["name"] = cfg["name"] or f"{cfg['model']}_baseline"
+    cfg["params"] = {**DEVICE_PARAMS.get(cfg["device"], {}).get(cfg["model"], {}), **cfg["params"]}
     if args.params:
         cfg["params"] = {**cfg["params"], **args.params}
+    if cfg["device"] != "cpu" and cfg["model"] not in DEVICE_PARAMS.get(cfg["device"], {}):
+        print(f"note: --device {cfg['device']} has no effect on {cfg['model']} (CPU only in this template)")
 
     st = S.load()
     id_col = cfg["id_col"] or (st.id_col if st else None) or None

@@ -69,12 +69,29 @@ def _tokens(rest: str) -> list[str]:
     return toks
 
 
+def parse_pushes(command: str) -> list[dict]:
+    """Every `kaggle kernels push` in a (possibly compound) command, `--help` calls left out."""
+    out, pos = [], 0
+    while True:
+        m = PUSH_RE.search(command, pos)
+        if not m:
+            return out
+        pos = m.start() + 1
+        push = _parse_push_args(m.group(1))
+        if push is not None:
+            out.append(push)
+
+
 def parse_push(command: str) -> dict | None:
-    """Extract folder / timeout / accelerator from a `kaggle kernels push` command."""
-    m = PUSH_RE.search(command)
-    if not m:
+    """Folder / timeout / accelerator of the first real `kaggle kernels push` in a command."""
+    pushes = parse_pushes(command)
+    return pushes[0] if pushes else None
+
+
+def _parse_push_args(rest: str) -> dict | None:
+    toks = _tokens(rest)
+    if "-h" in toks or "--help" in toks:
         return None
-    toks = _tokens(m.group(1))
     out = {"path": None, "timeout": None, "accelerator": None}
     flags = {"-p": "path", "--path": "path", "-t": "timeout", "--timeout": "timeout", "--accelerator": "accelerator"}
     i = 0
@@ -128,12 +145,18 @@ def push_target(payload: dict, push: dict) -> tuple[Path, dict] | None:
     return folder, meta
 
 
-def push_uses_gpu(push: dict, meta: dict) -> bool:
-    acc = (push.get("accelerator") or "").strip().lower()
+def push_resource(push: dict, meta: dict) -> str | None:
+    """'GPU' or 'TPU' when the push spends that quota, None for a CPU kernel."""
+    acc = (push.get("accelerator") or "").strip()
     if acc:
-        return acc not in {"none", "cpu", "no"} and "tpu" not in acc
-    gpu = meta.get("enable_gpu")
-    return gpu is True or str(gpu).lower() == "true" or str(meta.get("machine_shape", "")).startswith("Nvidia")
+        res = G.resource_of(acc)
+    else:
+        res = G.resource_of(G.kernel_meta_accelerator(meta))
+    return None if res == "CPU" else res
+
+
+def push_uses_gpu(push: dict, meta: dict) -> bool:
+    return push_resource(push, meta) == "GPU"
 
 
 def parse_submit(command: str) -> dict | None:

@@ -58,9 +58,9 @@ def _deadline(st) -> str:
 
 
 def gpu_line(root: Path) -> str:
-    """Cached Kaggle GPU quota (no network at session start) and remote runs still in flight."""
+    """Cached Kaggle GPU quota (no network at session start) and remote runs that may still be in flight."""
     q = C.G.cached_quota(root)
-    active = [r for r in C.G.runs(root) if r.get("status") in C.G.ACTIVE]
+    active = C.G.active_runs(root)
     if q is None and not active:
         return ""
     s = ""
@@ -75,8 +75,13 @@ def gpu_line(root: Path) -> str:
                 s += " - USE IT OR LOSE IT: queue long useful runs before the reset"
         s += "."
     if active:
-        s += f" Remote GPU runs in flight: {', '.join(r['kernel'] for r in active)} (`python -m kgkit gpu status`)."
+        s += (f" Remote runs not yet seen finished: {', '.join(C.G.run_label(r) for r in active)} "
+              "(`python -m kgkit gpu status` checks them and releases their quota reservations).")
     return s.strip()
+
+
+def _own_cv(r: dict) -> bool:
+    return isinstance(r.get("cv"), (int, float)) and not set(r.get("tags") or ()) & {"lb-only", "lb-blend"}
 
 
 def brief(root: Path) -> str:
@@ -90,24 +95,33 @@ def brief(root: Path) -> str:
     if st.code_competition:
         lines.append(f"CODE COMPETITION: runtime limit {st.runtime_limit_hours or '?'}h, internet "
                      f"{'allowed' if st.internet_allowed else 'OFF'} — budget inference early.")
+    holdout = getattr(st, "holdout", False)
+    if holdout:
+        lines.append(f"Validation: fixed holdout" + (f" (n={st.holdout_n})" if st.holdout_n else "")
+                     + " + public LB, no OOF/K-fold: small CV differences are noise; error analysis runs on the "
+                       "holdout predictions; public notebooks are judged on inputs and public score.")
     recs = C.ledger_records(root)
     if recs:
-        scored = [r for r in recs if isinstance(r.get("cv"), (int, float))]
+        scored = [r for r in recs if _own_cv(r) and not r.get("recheck")]
         best = sorted(scored, key=lambda r: r["cv"], reverse=st.greater_is_better)[:1]
-        with_lb = [r for r in scored if isinstance(r.get("lb_public"), (int, float))]
+        with_lb = [r for r in recs if isinstance(r.get("lb_public"), (int, float))]
         s = f"Ledger: {len(recs)} experiments"
         if best:
-            s += f"; best CV {best[0]['cv']:.5f} ({best[0]['id']})"
+            s += f"; best {'holdout' if holdout else 'CV'} {best[0]['cv']:.5f} ({best[0]['id']})"
         if with_lb:
             bl = sorted(with_lb, key=lambda r: r["lb_public"], reverse=st.greater_is_better)[0]
             s += f"; best public LB {bl['lb_public']:.5f} ({bl['id']})"
-            corr = _pearson([r["cv"] for r in with_lb], [r["lb_public"] for r in with_lb])
-            if corr is not None:
-                s += f"; CV-LB pearson {corr:.2f} over {len(with_lb)} subs"
+            pairs = [r for r in with_lb if _own_cv(r) and not r.get("recheck")]
+            corr = _pearson([r["cv"] for r in pairs], [r["lb_public"] for r in pairs])
+            if corr is not None and len({round(r["cv"], 12) for r in pairs}) >= 4:
+                s += (f"; CV-LB pearson {corr:.2f} over {len(pairs)} subs"
+                      + (" (holdout CV: noisy)" if holdout else ""))
         lines.append(s + ".")
-        accepted = next((r for r in reversed(scored) if r.get("decision") in ("baseline", "keep")), None)
+        accepted = next((r for r in reversed(recs) if r.get("decision") in ("baseline", "keep")
+                         and not r.get("recheck")), None)
         if accepted is not None:
-            lines.append(f"Accepted baseline (compare new ideas against this): {accepted['id']} CV {accepted['cv']:.5f}.")
+            cv = f"CV {accepted['cv']:.5f}" if isinstance(accepted.get("cv"), (int, float)) else "LB-only"
+            lines.append(f"Accepted baseline (compare new ideas against this): {accepted['id']} {cv}.")
         elif len(scored) >= 2:
             lines.append("No accepted baseline yet: decide one (`kgkit ledger decide <id> baseline`) so experiments "
                          "are compared against a deliberate choice, not the luckiest CV.")
@@ -116,7 +130,8 @@ def brief(root: Path) -> str:
             cv = f"{r['cv']:.5f}" if isinstance(r.get("cv"), (int, float)) else "?"
             lines.append(f"  - {r['id']}: CV {cv} {('— ' + note) if note else ''}")
     else:
-        lines.append("Ledger is empty — next step is usually /kg-cv then /kg-baseline.")
+        lines.append("Ledger is empty — next step is usually " + ("/kg-baseline (log holdout scores with `kgkit ledger "
+                     "add`)." if holdout else "/kg-cv then /kg-baseline."))
     top = C.B.Backlog(root).ranked()[:3]
     if top:
         lines.append("Backlog top: " + "; ".join(f"#{i['id']} {i['idea'][:60]}" for i in top) + ".")
@@ -125,8 +140,10 @@ def brief(root: Path) -> str:
     gq = gpu_line(root)
     if gq:
         lines.append(gq)
-    if not (root / "data" / "folds.csv").exists():
-        lines.append("No data/folds.csv yet — freeze the CV scheme before comparing experiments (/kg-cv).")
+    if not holdout and not (root / "data" / "folds.csv").exists():
+        lines.append("No data/folds.csv yet — freeze the CV scheme before comparing experiments (/kg-cv). If "
+                     "decisions are made on a fixed holdout + the public LB instead, record that: "
+                     "`python -m kgkit config validation=holdout+lb holdout_n=<rows>`.")
     return "\n".join(lines)
 
 
@@ -170,7 +187,9 @@ def main() -> None:
         b = brief(root)
         if b:
             parts.append(b)
-            parts.append("Follow the workspace CLAUDE.md rules (frozen folds, log every run, validate before submitting).")
+            st = C.S.load(root)
+            frozen = "fixed holdout" if st is not None and st.holdout else "frozen folds"
+            parts.append(f"Follow the workspace CLAUDE.md rules ({frozen}, log every run, validate before submitting).")
         les = lessons()
         if les:
             parts.append(les)

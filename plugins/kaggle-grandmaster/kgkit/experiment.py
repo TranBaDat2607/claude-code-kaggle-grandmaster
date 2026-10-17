@@ -69,6 +69,18 @@ def _git_info(cwd: Path) -> dict[str, Any]:
 
 DECISIONS = ("baseline", "keep", "discard", "inconclusive")
 ACCEPTED = ("baseline", "keep")
+# Records without a cross-validated score of their own: blends with public submission files, forks of
+# public inference notebooks. They carry an LB score only and never enter the CV-LB correlation.
+LB_ONLY_TAGS = ("lb-only", "lb-blend")
+MIN_DISTINCT_CV = 4
+
+
+def has_own_cv(r: dict) -> bool:
+    return isinstance(r.get("cv"), (int, float)) and not set(r.get("tags") or ()) & set(LB_ONLY_TAGS)
+
+
+def fmt_cv(r: dict, digits: int = 5) -> str:
+    return f"{r['cv']:.{digits}f}" if isinstance(r.get("cv"), (int, float)) else "LB-only"
 
 
 def _check_decision(d: str) -> str:
@@ -136,7 +148,7 @@ class Ledger:
     def log(
         self,
         name: str,
-        cv: float,
+        cv: float | None,
         fold_scores: Sequence[float] | None = None,
         params: dict | None = None,
         features: Sequence[str] | None = None,
@@ -152,8 +164,12 @@ class Ledger:
         **extra,
     ) -> dict:
         """Append an experiment. ``folds_hash`` fingerprints the CV split (from ``folds`` if given,
-        else the bytes of ``data/folds.csv``) so blends can detect members trained on different splits."""
+        else the bytes of ``data/folds.csv``) so blends can detect members trained on different splits.
+        ``cv=None`` logs an LB-only record (tagged ``lb-only``): something that cannot be cross-validated,
+        such as a blend with public submission files."""
         recs = self.records()
+        if cv is None and not set(tags) & set(LB_ONLY_TAGS):
+            tags = [*tags, "lb-only"]
         num = 1 + max([int(r["id"].split("_")[0]) for r in recs if r["id"].split("_")[0].isdigit()] or [0])
         exp_id = f"{num:04d}_{_slug(name)}"
         st = S.load(self.root)
@@ -162,7 +178,7 @@ class Ledger:
             "name": name,
             "time": time.strftime("%Y-%m-%dT%H:%M:%S"),
             "metric": metric or (st.metric if st else None),
-            "cv": float(cv),
+            "cv": float(cv) if cv is not None else None,
             "cv_std": float(np.std(fold_scores)) if fold_scores is not None and len(fold_scores) else None,
             "fold_scores": [float(s) for s in fold_scores] if fold_scores is not None else None,
             "model": model,
@@ -316,17 +332,60 @@ class Ledger:
         return True
 
     def best(self, n: int = 5, key: str = "cv") -> list[dict]:
-        recs = [r for r in self.records() if r.get(key) is not None and not r.get("recheck")]
+        recs = [r for r in self.records() if r.get(key) is not None and not r.get("recheck")
+                and (key != "cv" or has_own_cv(r))]
         return sorted(recs, key=lambda r: r[key], reverse=self._gib())[:n]
 
+    def cv_lb_pairs(self) -> list[tuple[float, float]]:
+        """(CV, public LB) of submissions that have a cross-validated score of their own."""
+        return [(r["cv"], r["lb_public"]) for r in self.records()
+                if r.get("lb_public") is not None and has_own_cv(r) and not r.get("recheck")]
+
     def cv_lb_correlation(self) -> dict | None:
-        pairs = [(r["cv"], r["lb_public"]) for r in self.records() if r.get("lb_public") is not None]
-        if len(pairs) < 3:
+        """None unless >= MIN_DISTINCT_CV submissions with distinct own CVs: with fewer, a correlation of
+        1.00 is an artefact (two LB-only blends logged with their base stack's CV gave exactly that)."""
+        pairs = self.cv_lb_pairs()
+        if len(pairs) < 3 or len({round(c, 12) for c, _ in pairs}) < MIN_DISTINCT_CV:
             return None
         cv, lb = np.array(pairs).T
+        if np.ptp(lb) == 0:
+            return None
         from scipy.stats import pearsonr, spearmanr
 
         return {"n": len(pairs), "pearson": float(pearsonr(cv, lb)[0]), "spearman": float(spearmanr(cv, lb)[0])}
+
+    def holdout_note(self) -> str:
+        """For a holdout+lb workspace: how noisy the 'CV' column is."""
+        st = S.load(self.root)
+        if st is None or not st.holdout:
+            return ""
+        se = st.holdout_se
+        n = st.holdout_n
+        if se is None and n:
+            cvs = [r["cv"] for r in self.records() if has_own_cv(r) and 0 < r["cv"] < 1]
+            if cvs:  # binomial approximation; a bootstrap of the holdout metric is better (holdout_se)
+                p = float(np.median(cvs))
+                se = (p * (1 - p) / n) ** 0.5
+        size = f"n={n}" if n else "size unknown"
+        noise = f", SE ~{se:.3f}: differences under ~{2 * se:.3f} are noise" if se else ""
+        return f"CV here is a fixed holdout ({size}{noise}); the public LB is the second opinion"
+
+    def cv_lb_summary(self) -> str:
+        """One line on CV-LB agreement, or why it is not reported."""
+        corr = self.cv_lb_correlation()
+        pairs = self.cv_lb_pairs()
+        lb_only = sum(1 for r in self.records() if r.get("lb_public") is not None and not has_own_cv(r))
+        skipped = f"; {lb_only} LB-only submission(s) left out" if lb_only else ""
+        if corr:
+            line = (f"CV-LB correlation over {corr['n']} subs: pearson {corr['pearson']:.2f}, "
+                    f"spearman {corr['spearman']:.2f}{skipped}")
+        elif pairs:
+            line = (f"CV-LB correlation: not reported ({len(pairs)} subs with their own CV, "
+                    f"{len({round(c, 12) for c, _ in pairs})} distinct CVs; needs >= {MIN_DISTINCT_CV}){skipped}")
+        else:
+            return ""
+        note = self.holdout_note()
+        return line + (f"\n  {note}" if note else "")
 
     def table(self, n: int = 15, sort: str = "time") -> str:
         recs = self.records()
@@ -341,6 +400,6 @@ class Ledger:
             std = f"{r['cv_std']:.4f}" if r.get("cv_std") is not None else ""
             lb = f"{r['lb_public']:.5f}" if r.get("lb_public") is not None else ""
             note = (r.get("notes") or "").replace("|", "/").replace("\n", " ")[:70]
-            lines.append(f"| {r['id']} | {r['cv']:.5f} | {std} | {lb} | {r.get('decision') or ''} | "
+            lines.append(f"| {r['id']} | {fmt_cv(r)} | {std} | {lb} | {r.get('decision') or ''} | "
                          f"{r.get('model') or ''} | {note} |")
         return "\n".join(lines)

@@ -42,10 +42,12 @@ submissions and experiments, leaving your layout alone.
   - prior art: `pages` (the competition's pages as text), `kernels top / pull` (notebook review with the
     lines to read before running it + local script), `discussions sync / top / search / solutions / read`
     (forum, live via the Kaggle CLI)
-  - `gpu` for quota-aware training on Kaggle GPUs
+  - `gpu` for quota-aware training on Kaggle GPUs and TPUs (reservations released when runs finish,
+    any kernel folder pushable with a cap, busy-session and input checks); `datasets pull` (per-file
+    fallback when a dataset archive 404s); `whoami`; `config` (e.g. `validation=holdout+lb`)
 - `templates/`: tabular (GBDTs + linear / kNN / SVM / MLP), image and transformer training, remote GPU
   training runner, offline inference kernel, workspace CLAUDE.md
-- `evals/`: `claude plugin eval` suite (13 cases)
+- `evals/`: `claude plugin eval` suite (15 cases)
 
 ## Data and network access
 
@@ -60,7 +62,9 @@ make no network calls.
   submits, and the hooks block files that fail validation.
 - GPU training (`/kg-gpu`, `kgkit gpu`): `kaggle kernels push` uploads a private kernel containing
   your workspace's `src/`, `kgkit`, `competition.json` and `data/folds.csv`. `kaggle kernels status /
-  logs / output` fetch its results, and `kaggle quota` reads your weekly GPU quota.
+  logs / output` fetch its results, `kaggle quota` reads your weekly GPU and TPU quota, and `kaggle
+  kernels list -m` + `status` count your busy sessions before a push.
+- Datasets: `kaggle datasets files / download` (`kgkit datasets pull`).
 - Code-competition notebooks and model weights (`/kg-kernel`): `kaggle kernels push` and
   `kaggle datasets create / version`, private unless you make them public.
 - Public notebooks: `kaggle kernels list / pull` (`kgkit kernels top / pull`).
@@ -72,11 +76,14 @@ make no network calls.
 public competition pages, past solution write-ups and papers. They don't upload your files, and Claude
 asks before each call unless you have allowed these tools.
 
-**Credentials.** The plugin never uses or sends your Kaggle API key. `kgkit gpu` takes only your
-Kaggle username, from `KAGGLE_USERNAME` or the `username` field of `kaggle.json`, to name your
-kernels. The PreToolUse hook blocks commands that would print a credential (`kaggle.json`,
-`~/.kaggle/access_token`, `credentials.json`, `KAGGLE_KEY`, `kaggle auth print-access-token`, `VERBOSE`
-Kaggle CLI calls) and dataset or model uploads whose folder holds credential-like files. `kgkit` drops
+**Credentials.** The plugin never uses or sends your Kaggle API key. `kgkit gpu` and `kgkit whoami`
+take only your Kaggle username, from `KAGGLE_USERNAME`, the `username` field of `kaggle.json`, or the
+`username` line of `kaggle config view` (token logins), to name your kernels. The PreToolUse hook blocks
+commands that would print a credential (a file reader on `kaggle.json`, `~/.kaggle/access_token` or
+`credentials.json`, Python printing more than their username field, `KAGGLE_KEY`, `kaggle auth
+print-access-token`, `VERBOSE` Kaggle CLI calls) and dataset or model uploads whose folder holds
+credential-like files. Text that only mentions those files (an issue body saved with a heredoc, a commit
+message) is not blocked. `kgkit` drops
 `VERBOSE` / `VERBOSE_OUTPUT` from the environment of its own Kaggle CLI calls. `kgkit gpu build`
 leaves credential-like files and links outside the project out of the kernel it uploads.
 

@@ -16,7 +16,9 @@ Arguments: `$ARGUMENTS`
    `python -m kgkit vendor src/` so `from kgkit import ...` works, and adapt the CONFIG block
    (paths, target, id, metric, features, model).
 3. Smoke test (1 fold, tiny settings), then the full run. Keep the baseline simple and fast — its
-   job is to be correct and to calibrate CV vs LB.
+   job is to be correct and to calibrate CV vs LB. With a local NVIDIA GPU, train XGBoost / CatBoost
+   there: `python src/train_gbdt.py --model xgb --device cuda` (or `KG_DEVICE=cuda`). Without `--name`
+   the run is named `<model>_baseline`.
 4. **Tabular: diverse baselines on the same folds.** Also run `--model linear` and `--model mlp`
    (plus `knn` / `svm` on data below ~50k rows, or a row subsample), each a few minutes. Report
    which families fit (GBDT ≫ linear → interactions to engineer; linear ≈ GBDT → simple signal or a leak
