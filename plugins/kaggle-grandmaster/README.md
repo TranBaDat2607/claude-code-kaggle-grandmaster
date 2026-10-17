@@ -41,7 +41,7 @@ submissions and experiments, leaving your layout alone.
     climbing, multi-level and residual stacking, `--prune`
   - prior art: `pages` (the competition's pages as text), `kernels top / pull` (notebook review with the
     lines to read before running it + local script), `discussions sync / top / search / solutions / read`
-    (forum via Meta Kaggle)
+    (forum, live via the Kaggle CLI)
   - `gpu` for quota-aware training on Kaggle GPUs
 - `templates/`: tabular (GBDTs + linear / kNN / SVM / MLP), image and transformer training, remote GPU
   training runner, offline inference kernel, workspace CLAUDE.md
@@ -64,8 +64,8 @@ make no network calls.
 - Code-competition notebooks and model weights (`/kg-kernel`): `kaggle kernels push` and
   `kaggle datasets create / version`, private unless you make them public.
 - Public notebooks: `kaggle kernels list / pull` (`kgkit kernels top / pull`).
-- Forum history: `kaggle datasets download kaggle/meta-kaggle`, Kaggle's public forum export
-  (`kgkit discussions`).
+- Forums: `kaggle competitions topics` / `topic-messages` (CLI 2.2.4+), and for finished competitions
+  `kaggle datasets download kaggle/meta-kaggle`, Kaggle's public forum export (`kgkit discussions --source meta`).
 
 **Web reads.** `/kg-start`, `/kg-recon`, `/kg-ideas`, `/kg-grind`, `/kg-postmortem` and the
 `competition-analyst` and `solution-researcher` agents use Claude's WebSearch and WebFetch to read
@@ -89,5 +89,5 @@ network, credential-path and `exec`/`eval` lines before you run it locally.
 - `.kaggle-gm/` in the workspace: experiment ledger, idea backlog, submission log, GPU-run log and
   the last quota snapshot.
 - `artifacts/` in the workspace: out-of-fold and test predictions.
-- `~/.kaggle-gm/meta-kaggle/`: the cached forum export.
+- `~/.kaggle-gm/meta-kaggle/`: the cached forum export (only with `discussions --source meta`).
 - `~/.kaggle-gm/lessons.md`: optional lessons from past competitions, read by the session brief.

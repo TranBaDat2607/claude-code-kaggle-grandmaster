@@ -169,6 +169,7 @@ def test_kaggle_env_drops_verbose(monkeypatch):
     monkeypatch.setenv("KG_OTHER", "x")
     env = SF.kaggle_env()
     assert "VERBOSE" not in env and "VERBOSE_OUTPUT" not in env and env["KG_OTHER"] == "x"
+    assert env["PYTHONIOENCODING"] == "utf-8"  # else a Windows pipe stops the CLI at the first emoji
 
 
 def test_pages_fetch_tolerates_noise_and_timeout(monkeypatch):

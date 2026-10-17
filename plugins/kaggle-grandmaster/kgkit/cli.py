@@ -13,7 +13,7 @@ Commands
   backlog     add | list | set | render | fidelity  — the ranked idea backlog
   features    search  — generate and screen thousands of candidate features on the frozen folds
   kernels     top | pull | review  — study and reproduce public notebooks
-  discussions sync | top | search | solutions | read  — competition forum via Meta Kaggle
+  discussions sync | top | search | solutions | read  — competition forum (live, or Meta Kaggle)
   pages       the competition's own pages (evaluation, rules, data description) as text, via the Kaggle CLI
   recheck     re-draw the folds with a new seed, re-run old vs current pipeline: does the gain survive?
   blend       hill / weights / rank / multi-level stack / residual stack over ledger OOFs + submission
@@ -180,7 +180,8 @@ def cmd_adopt(a):
     else:
         cmd = [shutil.which("kaggle") or "kaggle", "competitions", "submissions", slug, "--format", "json"]
         try:
-            r = subprocess.run(cmd, capture_output=True, text=True, timeout=120, env=SF.kaggle_env())
+            r = subprocess.run(cmd, capture_output=True, encoding="utf-8", errors="replace", timeout=120,
+                               env=SF.kaggle_env())
             text = r.stdout if r.returncode == 0 else None
             err = (r.stderr or r.stdout).strip().splitlines()[-1:] if r.returncode else []
         except (OSError, subprocess.TimeoutExpired) as e:
@@ -695,43 +696,78 @@ def cmd_discussions(a):
     root = S.find_root()
     idx_path = (root / "reports" if root else Path("reports")) / (
         "discussions.csv" if not a.competition or (st and a.competition == st.slug) else f"discussions_{slug}.csv")
-    if a.action == "sync":
-        files = ["Competitions.csv", "ForumTopics.csv"] + (["ForumMessages.csv"] if a.messages else [])
-        d = D.ensure(files, max_age_days=a.max_age, force=a.force)
+    def build_index():
+        """(topics, Meta Kaggle competition row or None, where they came from)"""
+        if a.source != "meta":
+            try:
+                return D.live_index(slug, a.max_pages), None, "live, Kaggle CLI"
+            except D.LiveUnavailable as e:
+                if a.source == "live":
+                    raise SystemExit(str(e))
+                print(f"{e}; falling back to Meta Kaggle (finished competitions only)")
+        d = D.ensure(["Competitions.csv"], max_age_days=a.max_age, force=a.force)
         comp = D.competition_row(slug, d)
-        t = D.index(slug, d)
+        D.forum_id(comp, slug)  # stop before the ~70 MB topic download when the export hides this forum
+        D.ensure(["ForumTopics.csv"], max_age_days=a.max_age, force=a.force)
+        return D.index(slug, d), comp, f"Meta Kaggle cache {d}"
+
+    if a.action == "sync":
+        t, comp, where = build_index()
+        if a.messages:
+            D.ensure(["ForumMessages.csv"], max_age_days=a.max_age, force=a.force)
         idx_path.parent.mkdir(parents=True, exist_ok=True)
         t.to_csv(idx_path, index=False)
-        print(f"{slug}: {len(t)} topics -> {idx_path} (Meta Kaggle cache {d})")
-        f = D.facts(comp)
-        if f:
-            print("facts: " + f)
+        print(f"{slug}: {len(t)} topics -> {idx_path} ({where})")
+        if t.attrs.get("truncated"):
+            print(f"stopped at --max-pages {a.max_pages} (the {len(t)} most voted topics); raise it for the rest")
+        if comp is None and (D.meta_dir() / "Competitions.csv").is_file():
+            try:  # rule facts from an already cached export; never downloaded for this
+                comp = D.competition_row(slug)
+            except SystemExit:
+                pass
+        f = D.facts(comp) if comp else ""
+        print("facts: " + f if f else "facts: `kaggle competitions list -s <slug>` (deadline), the rules page "
+              "(`kgkit pages --page rules`) for merger deadline / team size")
+        src = D.SOURCES[t["Source"].iloc[0]] if len(t) else "kaggle-cli"
         print("\nmost voted (" + SF.UNTRUSTED_NOTE + "):\n"
-              + SF.wrap(D.format_table(D.top(t, min(a.n, 10), "votes")), "meta-kaggle", competition=slug))
+              + SF.wrap(D.format_table(D.top(t, min(a.n, 10), "votes")), src, competition=slug))
         return
     if a.action == "read":
         if not a.query:
             raise SystemExit("usage: discussions read <topic_id>")
         tid = int(a.query)
         url = f"https://www.kaggle.com/competitions/{slug}/discussion/{tid}"
-        try:
-            msgs = D.read_thread(tid)
-        except FileNotFoundError:
-            print(f"ForumMessages.csv is not cached (run `discussions sync --messages`, ~1.8 GB once).\nRead it at {url}")
-            return
+        msgs, src = [], "meta-kaggle"
+        if a.source != "meta":
+            try:
+                msgs, src = D.live_thread(slug, tid), "kaggle-cli"
+            except D.LiveUnavailable as e:
+                if a.source == "live":
+                    raise SystemExit(str(e))
+                print(f"{e}; trying the Meta Kaggle message cache")
         if not msgs:
-            print(f"topic {tid} not in the cached export (newer than the last daily refresh?). Read it at {url}")
+            src = "meta-kaggle"
+            try:
+                msgs = D.read_thread(tid)
+            except FileNotFoundError:
+                print(f"ForumMessages.csv is not cached (`discussions sync --source meta --messages`, ~1.8 GB once)."
+                      f"\nRead it at {url}")
+                return
+        if not msgs:
+            print(f"topic {tid} not found (wrong competition, or newer than the last Meta Kaggle export). "
+                  f"Read it at {url}")
             return
         print(SF.UNTRUSTED_NOTE)
         for m in msgs[: a.n if a.n else None]:
             medal = int(m["Medal"]) if pd.notna(m.get("Medal")) and m.get("Medal") else None
-            print(SF.wrap(m["text"][:a.max_chars], "meta-kaggle", topic=tid, posted=m.get("PostDate"), medal=medal))
+            print(SF.wrap(m["text"][:a.max_chars], src, topic=tid, posted=m.get("PostDate"), medal=medal))
         print(url)
         return
     if idx_path.is_file():
         t = pd.read_csv(idx_path, parse_dates=["Created"])
     else:
-        t = D.index(slug, D.ensure(["Competitions.csv", "ForumTopics.csv"], max_age_days=a.max_age))
+        t = build_index()[0]
+    src = D.SOURCES.get(t["Source"].iloc[0], "meta-kaggle") if "Source" in t and len(t) else "meta-kaggle"
     if a.action == "top":
         out = D.top(t, a.n, a.sort)
     elif a.action == "search":
@@ -744,7 +780,7 @@ def cmd_discussions(a):
             print("no write-up threads found (competition still running, or write-ups not in the export yet)")
             return
     print(SF.UNTRUSTED_NOTE)
-    print(SF.wrap(D.format_table(out), "meta-kaggle", competition=slug, view=a.action))
+    print(SF.wrap(D.format_table(out), src, competition=slug, view=a.action))
     print("\nread one: python -m kgkit discussions read <id>   (or WebFetch its URL: "
           f"https://www.kaggle.com/competitions/{slug}/discussion/<id>)")
 
@@ -999,13 +1035,18 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--out", default="reports/featsearch.json")
     s.set_defaults(fn=cmd_features)
 
-    s = sub.add_parser("discussions", help="competition forum via Meta Kaggle")
+    s = sub.add_parser("discussions", help="competition forum, live via the Kaggle CLI or from Meta Kaggle")
     s.add_argument("action", choices=["sync", "top", "search", "solutions", "read"])
     s.add_argument("query", nargs="?", help="search: regex on titles; read: topic id")
     s.add_argument("--competition", help="default: competition.json slug (any slug works, e.g. a past competition)")
+    s.add_argument("--source", default="auto", choices=["auto", "live", "meta"],
+                   help="live: Kaggle CLI 2.2.4+ (any competition); meta: Meta Kaggle export (finished competitions "
+                        "only, has view counts and medals); auto: live, else Meta Kaggle")
+    s.add_argument("--max-pages", type=int, default=50, help="live sync: pages of 20 topics, most voted first")
     s.add_argument("-n", type=int, default=20)
     s.add_argument("--sort", default="votes", choices=["votes", "recent", "replies", "views"])
-    s.add_argument("--messages", action="store_true", help="sync: also cache ForumMessages.csv (~1.8 GB) for `read`")
+    s.add_argument("--messages", action="store_true",
+                   help="sync: also cache Meta Kaggle's ForumMessages.csv (~1.8 GB) for offline `read`")
     s.add_argument("--max-age", type=float, default=3, help="refresh cached files older than this many days")
     s.add_argument("--force", action="store_true", help="re-download the cached files")
     s.add_argument("--max-chars", type=int, default=4000, help="read: characters per message")

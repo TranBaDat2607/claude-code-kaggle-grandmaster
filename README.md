@@ -179,7 +179,7 @@ PYTHONPATH="$KGKIT_HOME" python -m kgkit <command>     # KGKIT_HOME is set by th
 | `features search train.csv --target y --folds folds.csv:fold --recheck-seed 7` | generate count / target encodings, groupby aggregates and pairwise arithmetic, screen in batches, recheck on a fresh split |
 | `kernels top` · `kernels pull <owner/slug>` | top public notebooks; pull with a `REVIEW.md` (CV scheme, models, scores, external inputs, and the lines to read before running it locally: shell, network, credential paths, `exec`/`eval`) and a local script with Kaggle paths remapped |
 | `pages [--page evaluation\|rules\|data-description] [--save reports/pages]` | the competition's own pages as text, from `kaggle competitions pages` (CLI 2.2.4+); the website's pages are rendered by JavaScript, so WebFetch often gets nothing |
-| `discussions sync\|top\|search\|solutions\|read` | competition forum from Meta Kaggle (Kaggle's daily forum export): topic index, title search, "Nth place solution" write-ups of any past competition, full threads, plus merger deadline / team size / daily submissions. Forum and page text is printed inside `<untrusted-content-…>` blocks, as data rather than instructions |
+| `discussions sync\|top\|search\|solutions\|read` | competition forum, live through the Kaggle CLI (2.2.4+) for active and finished competitions, or from Meta Kaggle (Kaggle's daily forum export, finished competitions only): topic index, title search, "Nth place solution" write-ups of any past competition, full threads. Forum and page text is printed inside `<untrusted-content-…>` blocks, as data rather than instructions |
 | `recheck --seed 7 --run "<old>" --run "<current>" --exp <old_id> <cur_id>` | re-draw the folds with the frozen recipe and a new seed, re-run both pipelines on it, report how much of the gain survived |
 | `blend --exp 3 7 9 --truth train.csv:y --folds folds.csv:fold --method hill --sample sample_submission.csv` | hill climbing / weights / rank / `stack --levels N` / `residual --base <id>`, `--prune N` for large libraries, honest nested score; warns if members used different folds |
 | `validate sub.csv sample_submission.csv` | metric-aware submission validation |
@@ -302,8 +302,8 @@ make no network calls.
 - Code-competition notebooks and model weights (`/kg-kernel`): `kaggle kernels push` and
   `kaggle datasets create / version`, private unless you make them public.
 - Public notebooks: `kaggle kernels list / pull` (`kgkit kernels top / pull`).
-- Forum history: `kaggle datasets download kaggle/meta-kaggle`, Kaggle's public forum export
-  (`kgkit discussions`).
+- Forums: `kaggle competitions topics` / `topic-messages` (CLI 2.2.4+), and for finished competitions
+  `kaggle datasets download kaggle/meta-kaggle`, Kaggle's public forum export (`kgkit discussions --source meta`).
 
 **Web reads.** `/kg-start`, `/kg-recon`, `/kg-ideas`, `/kg-grind`, `/kg-postmortem` and the
 `competition-analyst` and `solution-researcher` agents use Claude's WebSearch and WebFetch to read
@@ -326,7 +326,7 @@ network, credential-path and `exec`/`eval` lines before you run it locally.
 - `.kaggle-gm/` in the workspace: experiment ledger, idea backlog, submission log, GPU-run log and
   the last quota snapshot.
 - `artifacts/` in the workspace: out-of-fold and test predictions.
-- `~/.kaggle-gm/meta-kaggle/`: the cached forum export.
+- `~/.kaggle-gm/meta-kaggle/`: the cached forum export (only with `discussions --source meta`).
 - `~/.kaggle-gm/lessons.md`: optional lessons from past competitions, read by the session brief.
 
 ## Limitations
