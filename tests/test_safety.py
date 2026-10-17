@@ -99,6 +99,7 @@ def test_kernel_review_lists_lines_to_read(tmp_path):
     rev["risks"] = risks
     text = K.format_review("me/nb", rev)
     assert "## Before running it locally" in text and "cell 1 line 1 (runs shell commands)" in text
+    assert text.count("</untrusted-content-") == 2  # the notebook's facts and its risky lines
     assert "Third-party code" in K.to_local_script(cells, "demo", "nb")
     rev["risks"] = []
     assert "a pattern scan, not a guarantee" in K.format_review("me/nb", rev)
@@ -140,4 +141,49 @@ def test_pages_old_cli_message(monkeypatch):
     monkeypatch.setattr(P.subprocess, "run", lambda args, **kw: subprocess.CompletedProcess(
         args, 2, "", "kaggle competitions: error: argument command: invalid choice: 'pages'"))
     with pytest.raises(SystemExit, match="2.2.4"):
+        P.fetch("demo")
+
+
+@pytest.mark.skipif(os.name == "nt", reason="symlinks need privileges on Windows")
+def test_gpu_bundle_refuses_included_link_outside(tmp_path):
+    outside = tmp_path / "secrets" / "configs"
+    outside.mkdir(parents=True)
+    (outside / "wandb_key.txt").write_text("k")
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    S.CompetitionState(slug="demo", metric="auc").save(proj)
+    (proj / "configs").symlink_to(outside, target_is_directory=True)
+    (proj / "src").mkdir()
+    (proj / "src" / "train.py").write_text("print(1)")
+    (proj / "src" / "leak.txt").symlink_to(outside / "wandb_key.txt")
+    for inc in ("configs", "configs/wandb_key.txt"):
+        with pytest.raises(SystemExit, match="outside the project"):
+            G.build_bundle(proj, [inc])
+    names = zipfile.ZipFile(io.BytesIO(G.build_bundle(proj, ["src"]))).namelist()
+    assert "src/train.py" in names and "src/leak.txt" not in names
+
+
+def test_kaggle_env_drops_verbose(monkeypatch):
+    monkeypatch.setenv("VERBOSE", "1")
+    monkeypatch.setenv("VERBOSE_OUTPUT", "true")
+    monkeypatch.setenv("KG_OTHER", "x")
+    env = SF.kaggle_env()
+    assert "VERBOSE" not in env and "VERBOSE_OUTPUT" not in env and env["KG_OTHER"] == "x"
+
+
+def test_pages_fetch_tolerates_noise_and_timeout(monkeypatch):
+    rows = [{"name": "rules", "content": "5 per day"}]
+    out = "Warning: [deprecated] option\n" + json.dumps(rows) + "\nNext Page Token = abc\n"
+    monkeypatch.setattr(P.shutil, "which", lambda _: "kaggle")
+    monkeypatch.setattr(P.subprocess, "run", lambda args, **kw: subprocess.CompletedProcess(args, 0, out, ""))
+    assert [p["name"] for p in P.fetch("demo")] == ["rules"]
+    monkeypatch.setattr(P.subprocess, "run", lambda args, **kw: subprocess.CompletedProcess(args, 0, "no json", ""))
+    with pytest.raises(SystemExit, match="failed"):
+        P.fetch("demo")
+
+    def slow(args, **kw):
+        raise subprocess.TimeoutExpired(args, 120)
+
+    monkeypatch.setattr(P.subprocess, "run", slow)
+    with pytest.raises(SystemExit, match="timed out"):
         P.fetch("demo")

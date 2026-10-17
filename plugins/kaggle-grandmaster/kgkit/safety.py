@@ -43,15 +43,30 @@ def looks_secret(name: str) -> bool:
     return name not in NOT_SECRET and _SECRET_RE.match(name) is not None
 
 
+def inside(path: Path, base: Path) -> bool:
+    """True when ``path``, links resolved, is ``base`` or below it. Pass ``base`` already resolved."""
+    try:
+        target = path.resolve()
+    except (OSError, RuntimeError):
+        return False
+    return target == base or base in target.parents
+
+
 def links_outside(path: Path, base: Path) -> bool:
     """True when ``path`` is a symlink whose target is not inside ``base``."""
     if not path.is_symlink():
         return False
     try:
-        target, base = path.resolve(), base.resolve()
+        base = base.resolve()
     except (OSError, RuntimeError):
         return True
-    return target != base and base not in target.parents
+    return not inside(path, base)
+
+
+def kaggle_env() -> dict[str, str]:
+    """The environment for a Kaggle CLI call, without VERBOSE / VERBOSE_OUTPUT: with either on, kagglesdk
+    prints every request's headers unmasked, bearer token included."""
+    return {k: v for k, v in os.environ.items() if k.upper() not in ("VERBOSE", "VERBOSE_OUTPUT")}
 
 
 def _ignore_rules(patterns: list[str]) -> tuple[re.Pattern, re.Pattern]:
@@ -66,35 +81,43 @@ def scan_upload(folder: str | Path, recursive: bool = True, ignore: list[str] | 
     """Paths an upload of ``folder`` would send that look like credentials or link outside the folder.
 
     ``recursive=False`` is the CLI's default ``--dir-mode skip`` (top-level files only); ``ignore`` takes
-    ``--ignore-patterns`` values.
+    ``--ignore-patterns`` values. Names are matched first and only links are resolved, so a large folder
+    costs one directory listing per folder (``os.scandir`` gives the link flag without a stat).
     """
     folder = Path(folder)
     dir_rx, file_rx = _ignore_rules([".git/", "*/.git/", ".cache/", ".huggingface/", *(ignore or [])])
     found: list[str] = []
     seen = 0
-    for root, dirs, files in os.walk(folder):
-        here = Path(root)
-        rel_root = here.relative_to(folder).as_posix()
-        prefix = "" if rel_root == "." else rel_root + "/"
-        keep = []
-        for d in dirs if recursive else []:
-            if dir_rx.match(f"{prefix}{d}/"):
+    stack = [(str(folder), "")]
+    while stack:
+        here, prefix = stack.pop()
+        try:
+            entries = list(os.scandir(here))
+        except OSError:
+            continue
+        for e in entries:
+            rel = prefix + e.name
+            try:
+                link, is_dir = e.is_symlink(), e.is_dir()
+            except OSError:
                 continue
-            if links_outside(here / d, folder):
-                found.append(f"{prefix}{d}/ (a link to a folder outside the upload)")
+            if is_dir:
+                if not recursive or dir_rx.match(rel + "/"):
+                    continue
+                if link:  # not followed, like os.walk; flagged when it leaves the folder
+                    if links_outside(Path(e.path), folder):
+                        found.append(f"{rel}/ (a link to a folder outside the upload)")
+                    continue
+                stack.append((e.path, rel + "/"))
                 continue
-            keep.append(d)
-        dirs[:] = keep
-        for f in files:
             seen += 1
             if seen > SCAN_LIMIT:
                 return sorted(found)
-            rel = prefix + f
             if file_rx.match(rel):
                 continue
-            if links_outside(here / f, folder):
+            if link and links_outside(Path(e.path), folder):
                 found.append(f"{rel} (a link to a file outside the upload)")
-            elif looks_secret(f):
+            elif looks_secret(e.name):
                 found.append(rel)
     return sorted(found)
 

@@ -142,6 +142,7 @@ def cmd_adopt(a):
     import subprocess
 
     from . import adopt as A
+    from . import safety as SF
     from . import state as S
 
     root = Path(a.dir).resolve()
@@ -179,7 +180,7 @@ def cmd_adopt(a):
     else:
         cmd = [shutil.which("kaggle") or "kaggle", "competitions", "submissions", slug, "--format", "json"]
         try:
-            r = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+            r = subprocess.run(cmd, capture_output=True, text=True, timeout=120, env=SF.kaggle_env())
             text = r.stdout if r.returncode == 0 else None
             err = (r.stderr or r.stdout).strip().splitlines()[-1:] if r.returncode else []
         except (OSError, subprocess.TimeoutExpired) as e:
@@ -655,6 +656,7 @@ def cmd_features(a):
 
 def cmd_kernels(a):
     from . import kernels as K
+    from . import safety as SF
     from . import state as S
 
     st = S.load()
@@ -663,8 +665,10 @@ def cmd_kernels(a):
         if not slug:
             raise SystemExit("--competition required (no competition state found)")
         rows = K.top(slug, a.n, a.sort_by)
-        for r in rows:
-            print(f"{r.get('totalVotes', ''):>5}  {r.get('ref', '')}  |  {r.get('title', '')}  ({r.get('lastRunTime', '')})")
+        table = "\n".join(f"{r.get('totalVotes', ''):>5}  {r.get('ref', '')}  |  {r.get('title', '')}  "
+                          f"({r.get('lastRunTime', '')})" for r in rows)
+        print(SF.UNTRUSTED_NOTE)
+        print(SF.wrap(table, "kaggle-cli", competition=slug, view="top kernels"))
         print("\nnext: python -m kgkit kernels pull <ref>   (review + local script under ref/)")
     elif a.action in ("pull", "review"):
         if not a.ref:
@@ -760,7 +764,9 @@ def cmd_pages(a):
             print(f"wrote {f}")
         return
     if not a.page:
-        print(f"{slug}: " + ", ".join(f"{p['name']} ({len(p['text'])} chars)" for p in pages))
+        print(SF.UNTRUSTED_NOTE)
+        print(SF.wrap(", ".join(f"{p['name']} ({len(p['text'])} chars)" for p in pages), "kaggle-cli",
+                      competition=slug, view="page names"))
         print("\nread one: python -m kgkit pages --page <name>   (all: --save reports/pages)")
         return
     page = P.pick(pages, a.page)

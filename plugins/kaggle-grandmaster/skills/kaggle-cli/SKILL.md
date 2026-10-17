@@ -13,7 +13,8 @@ description: Using the official Kaggle CLI/API from Claude Code — authenticati
   folder is `C:\Users\<user>\.kaggle\`.
 - **Never print, commit, or paste a credential.** Do not read those files, do not run
   `kaggle auth print-access-token`, and never set `VERBOSE` / `VERBOSE_OUTPUT`: with either on, the CLI prints
-  every request's headers, bearer token included. The plugin's hook blocks all of these. If auth fails, ask
+  every request's headers, bearer token included. The plugin's hook blocks all of these, and `kgkit` drops
+  both variables from its own Kaggle CLI calls. If auth fails, ask
   the user to create a token at kaggle.com → Settings → API and place it themselves.
 - You must have joined the competition and accepted its rules on the website before downloading
   or submitting (403 otherwise) — only the user can do that.

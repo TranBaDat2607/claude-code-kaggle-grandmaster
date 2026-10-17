@@ -76,7 +76,8 @@ asks before each call unless you have allowed these tools.
 Kaggle username, from `KAGGLE_USERNAME` or the `username` field of `kaggle.json`, to name your
 kernels. The PreToolUse hook blocks commands that would print a credential (`kaggle.json`,
 `~/.kaggle/access_token`, `credentials.json`, `KAGGLE_KEY`, `kaggle auth print-access-token`, `VERBOSE`
-Kaggle CLI calls) and dataset or model uploads whose folder holds credential-like files. `kgkit gpu build`
+Kaggle CLI calls) and dataset or model uploads whose folder holds credential-like files. `kgkit` drops
+`VERBOSE` / `VERBOSE_OUTPUT` from the environment of its own Kaggle CLI calls. `kgkit gpu build`
 leaves credential-like files and links outside the project out of the kernel it uploads.
 
 **Text from Kaggle.** Competition pages, forum posts and public notebooks are written by other people.

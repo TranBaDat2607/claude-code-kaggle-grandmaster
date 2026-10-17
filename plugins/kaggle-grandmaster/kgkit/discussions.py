@@ -29,6 +29,8 @@ from pathlib import Path
 
 import pandas as pd
 
+from . import safety
+
 TOPIC_COLS = ["Id", "ForumId", "KernelId", "CreationDate", "LastCommentDate", "Title", "IsSticky", "TotalViews",
               "Score", "TotalMessages", "TotalReplies"]
 COMP_COLS = ["Id", "Slug", "Title", "ForumId", "DeadlineDate", "TeamMergerDeadlineDate", "MaxTeamSize",
@@ -63,7 +65,7 @@ def ensure(files: list[str], max_age_days: float = 3, force: bool = False) -> Pa
             raise SystemExit("kaggle CLI not found: pip install kaggle (and authenticate; see skill kaggle-cli)")
         print(f"downloading kaggle/meta-kaggle {name} ...", flush=True)
         r = subprocess.run([exe, "datasets", "download", "kaggle/meta-kaggle", "-f", name, "-p", str(d), "--force"],
-                           capture_output=True, text=True, timeout=3600)
+                           capture_output=True, text=True, timeout=3600, env=safety.kaggle_env())
         z = d / f"{name}.zip"
         if z.is_file():
             with zipfile.ZipFile(z) as zf:

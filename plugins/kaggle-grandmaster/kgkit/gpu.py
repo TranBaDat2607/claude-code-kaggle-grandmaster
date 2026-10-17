@@ -90,7 +90,7 @@ def kaggle_cmd() -> list[str]:
 
 def run_kaggle(args: list[str], timeout: float = 600) -> subprocess.CompletedProcess:
     return subprocess.run([*kaggle_cmd(), *args], capture_output=True, text=True, timeout=timeout,
-                          encoding="utf-8", errors="replace")
+                          encoding="utf-8", errors="replace", env=safety.kaggle_env())
 
 
 def kaggle_username() -> str | None:
@@ -262,13 +262,14 @@ def _git(root: Path) -> tuple[str | None, bool | None]:
 
 
 def _add_tree(z: zipfile.ZipFile, src: Path, arc: str, base: Path | None = None) -> int:
-    """Add ``src`` under ``arc``. Credential-like files, and links that leave ``base``, never go in: the
-    bundle is embedded in the kernel's code, which is uploaded to Kaggle."""
-    base = base or (src if src.is_dir() else src.parent)
+    """Add ``src`` under ``arc``. Credential-like files, and anything whose real path leaves ``base`` (through
+    a link at any level, ``src`` included), never go in: the bundle is embedded in the kernel's code, which
+    is uploaded to Kaggle."""
+    base = (base or (src if src.is_dir() else src.parent)).resolve()
+    if not safety.inside(src, base) or (src.is_file() and safety.looks_secret(src.name)):
+        raise SystemExit(f"--include {src}: looks like a credential file or links outside the project; "
+                         "it would be uploaded inside the kernel")
     if src.is_file():
-        if safety.looks_secret(src.name) or safety.links_outside(src, base):
-            raise SystemExit(f"--include {src}: looks like a credential file or links outside the project; "
-                             "it would be uploaded inside the kernel")
         z.write(src, arc)
         return 1
     n, skipped = 0, []
@@ -278,8 +279,7 @@ def _add_tree(z: zipfile.ZipFile, src: Path, arc: str, base: Path | None = None)
             continue
         if p.suffix.lower() in BUNDLE_EXCLUDE_SUFFIXES:
             continue
-        if safety.looks_secret(p.name) or any(safety.links_outside(src / Path(*rel.parts[:i + 1]), base)
-                                              for i in range(len(rel.parts))):
+        if safety.looks_secret(p.name) or not safety.inside(p, base):
             skipped.append(f"{arc}/{rel.as_posix()}")
             continue
         z.write(p, f"{arc}/{rel.as_posix()}")

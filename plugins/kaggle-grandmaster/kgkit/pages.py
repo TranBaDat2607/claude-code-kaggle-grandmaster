@@ -73,17 +73,35 @@ def fetch(slug: str) -> list[dict]:
     exe = shutil.which("kaggle")
     if exe is None:
         raise SystemExit("kaggle CLI not found: pip install -U kaggle (and authenticate; see skill kaggle-cli)")
-    r = subprocess.run([exe, "competitions", "pages", slug, "list", slug, "--content", "--format", "json"],
-                       capture_output=True, text=True, timeout=120)
+    try:
+        r = subprocess.run([exe, "competitions", "pages", slug, "list", slug, "--content", "--format", "json"],
+                           capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=120,
+                           env=safety.kaggle_env())
+    except subprocess.TimeoutExpired:
+        raise SystemExit("kaggle competitions pages timed out after 120s; retry, or check `kaggle competitions list`")
     out = r.stdout or ""
-    start = out.find("[")
-    if r.returncode != 0 or start < 0:
-        msg = (r.stderr or out).strip()
+    rows = _json_list(out) if r.returncode == 0 else None
+    if rows is None:
+        msg = (r.stderr or out).strip() or "no JSON list in its output"
         if "invalid choice" in msg or "unrecognized arguments" in msg:
             msg += "\n(`kaggle competitions pages` needs Kaggle CLI 2.2.4 or later: pip install -U kaggle)"
         raise SystemExit(f"kaggle competitions pages failed: {msg[-800:]}")
-    rows = json.loads(out[start:])
-    return [{"name": str(x.get("name", "")), "text": to_text(x.get("content") or "")} for x in rows]
+    return [{"name": str(x.get("name", "")), "text": to_text(x.get("content") or "")}
+            for x in rows if isinstance(x, dict)]
+
+
+def _json_list(out: str) -> list | None:
+    """The first JSON list in ``out``: the CLI can print warnings (which may contain '[') before it and
+    other lines after it."""
+    dec = json.JSONDecoder()
+    for m in re.finditer(r"\[", out):
+        try:
+            rows, _ = dec.raw_decode(out, m.start())
+        except json.JSONDecodeError:
+            continue
+        if isinstance(rows, list):
+            return rows
+    return None
 
 
 def _key(name: str) -> str:

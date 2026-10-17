@@ -231,17 +231,21 @@ def submission_records(root: Path) -> list[dict]:
     return out
 
 
-def submissions_today(root: Path) -> int:
-    return sum(1 for r in submission_records(root)
-               if str(r.get("time_utc", "")).startswith(today_utc()) and r.get("status") != "failed")
+def submissions_today(root: Path, records: list[dict] | None = None) -> int:
+    recs = submission_records(root) if records is None else records
+    return sum(1 for r in recs if str(r.get("time_utc", "")).startswith(today_utc()) and r.get("status") != "failed")
 
 
-def server_remaining_today(root: Path) -> int | None:
+def server_remaining_today(root: Path, records: list[dict] | None = None) -> int | None:
     """What Kaggle said was left today (UTC) after the latest logged submit: it counts the whole team and
-    the website, which the local log cannot see. None when no submit today reported it."""
-    for r in reversed(submission_records(root)):
-        if str(r.get("time_utc", "")).startswith(today_utc()) and isinstance(r.get("remaining_today"), int):
-            return r["remaining_today"]
+    the website, which the local log cannot see. None when that submit printed no count (an older, larger
+    count would be stale) or no submit was logged today."""
+    recs = submission_records(root) if records is None else records
+    for r in reversed(recs):
+        if not str(r.get("time_utc", "")).startswith(today_utc()) or r.get("status") == "failed":
+            continue
+        left = r.get("remaining_today")
+        return left if isinstance(left, int) else None
     return None
 
 
@@ -258,12 +262,23 @@ def file_sha256(path: Path, max_bytes: int = 2 * 1024 ** 3) -> str | None:
         return None
 
 
-def previous_submission(root: Path, sha: str | None) -> dict | None:
-    """The latest logged submission of a file with this SHA-256 that Kaggle did not refuse."""
+def previous_submission(root: Path, path: Path, records: list[dict] | None = None) -> dict | None:
+    """The latest logged submission of a byte-identical file that Kaggle did not refuse. The file is hashed
+    only when a logged submission has the same size (or none recorded), so a new file costs one stat."""
+    recs = [r for r in (submission_records(root) if records is None else records)
+            if r.get("sha256") and r.get("status") != "failed"]
+    try:
+        size = path.stat().st_size
+    except OSError:
+        return None
+    recs = [r for r in recs if r.get("size") in (None, size)]
+    if not recs:
+        return None
+    sha = file_sha256(path)
     if not sha:
         return None
-    for r in reversed(submission_records(root)):
-        if r.get("sha256") == sha and r.get("status") != "failed":
+    for r in reversed(recs):
+        if r["sha256"] == sha:
             return r
     return None
 
