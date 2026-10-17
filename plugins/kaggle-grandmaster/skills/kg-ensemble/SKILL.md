@@ -17,4 +17,7 @@ libraries `--prune 40` then `--method stack --levels 1|2`, or `--method residual
 winner only if `kgkit ledger compare` says it beats the simpler blend → re-tune thresholds/rounding on the
 blended OOF → validate the submission.
 
+Blends that include public submission files (no OOF) cannot be scored this way: log them LB-only
+(`kgkit ledger add <name> lb-only`, then `kgkit ledger lb`) and follow `ensembling` §6.
+
 Report members, weights, single vs blended (honest) CV, and whether it deserves a submission slot.

@@ -25,7 +25,10 @@ does around the existing work: submission logging and the daily budget, the sess
    only for what you cannot determine.
 2. **Workspace.** Run from the repo root:
    `python -m kgkit adopt <slug> --metric <m> --task <t> --target <col> --id-col <id>
-   [--code-competition --runtime-hours H --no-internet] [--daily-subs N] --deadline <YYYY-MM-DD>`.
+   [--code-competition --runtime-hours H --no-internet] [--daily-subs N] --deadline <YYYY-MM-DD>
+   [--validation holdout+lb --holdout-n <rows>]`. Use `holdout+lb` when the repo decides on a fixed
+   labelled holdout plus the public LB rather than K-fold OOF (no `data/folds.csv` will be asked for).
+   Fields can be changed later with `python -m kgkit config key=value`.
    It writes only `.kaggle-gm/competition.json` (no folders, `.gitignore` or `CLAUDE.md`) and imports
    the history from `kaggle competitions submissions <slug>` into `.kaggle-gm/submissions.jsonl`, so
    today's used submissions count against the budget. If the CLI is not authenticated, say so and
@@ -37,7 +40,9 @@ does around the existing work: submission logging and the daily budget, the sess
    - with OOF predictions on file: `python -m kgkit ledger import <name> <oof.npy|FILE:COL>
      [--test <test preds>] --truth <train FILE:target> --folds <FILE:fold> --source notebook --notes "<origin>"`
      so the CV is recomputed on the repo's folds and the run is blendable;
-   - with a score only: `python -m kgkit ledger add <name> <cv> <notes>`.
+   - with a score only: `python -m kgkit ledger add <name> <cv> <notes>`;
+   - with no validation score at all (a fork of public notebooks, a blend with public files):
+     `python -m kgkit ledger add <name> lb-only <notes>`, then attach its public score.
    Attach public scores you can match to a submission with `python -m kgkit ledger lb <id> <score>`.
    Mark the model the user currently builds on with `python -m kgkit ledger decide <id> baseline`.
    Do not invent numbers: skip an experiment whose CV you cannot find, and say so.

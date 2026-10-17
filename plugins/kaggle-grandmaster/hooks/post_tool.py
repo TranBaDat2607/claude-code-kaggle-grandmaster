@@ -1,6 +1,7 @@
 """PostToolUse: after `kaggle competitions submit`, log the submission locally (with the file's SHA-256 and
 what Kaggle says is left today) and remind Claude to fetch the public score and attach it to the
-experiment ledger. After a GPU `kaggle kernels push`, record the run in the GPU-hour log. The Kaggle CLI
+experiment ledger. After each GPU or TPU `kaggle kernels push` in the command (`--help` calls aside),
+record the run in the GPU-hour log; a re-push of a kernel replaces its earlier reservation. The Kaggle CLI
 exits 0 after several failed writes; say so when one shows up in the output."""
 
 from __future__ import annotations
@@ -72,28 +73,49 @@ def _poll_hint(root, sub: dict, st, slug: str) -> str:
             f"loop")
 
 
-def log_gpu_push(payload: dict, push: dict) -> str | None:
-    """A raw GPU `kaggle kernels push` spends quota too: record it so budgets account for it."""
+PUSHED_RE = re.compile(r"version\s+(\d+)\s+successfully pushed(?:[^\n]*?/code/([\w.-]+/[\w.-]+))?", re.IGNORECASE)
+
+
+def _pushed_version(text: str, kernel: str, n_pushes: int) -> int | None:
+    """The version Kaggle reported for ``kernel``: matched on the progress URL when the command pushed several
+    kernels, else the only success line."""
+    hits = [(int(m.group(1)), (m.group(2) or "").lower()) for m in PUSHED_RE.finditer(text)]
+    slug = kernel.split("/")[-1].lower()
+    for v, ref in hits:
+        if ref and ref.split("/")[-1] == slug:
+            return v
+    if n_pushes == 1 and len(hits) == 1:
+        return hits[0][0]
+    return None
+
+
+def log_gpu_push(payload: dict, push: dict, n_pushes: int = 1) -> str | None:
+    """A raw GPU/TPU `kaggle kernels push` spends quota too: record it so budgets account for it."""
     root = C.workspace(payload)
     target = C.push_target(payload, push)
-    if root is None or target is None or not C.push_uses_gpu(push, target[1]):
-        return None
-    text = _response_text(payload)
-    m = re.search(r"version\s+(\d+)\s+successfully pushed", text, re.IGNORECASE)
-    if not m:
+    res = C.push_resource(push, target[1]) if target is not None else None
+    if root is None or res is None:
         return None
     kernel = target[1].get("id") or "?"
+    version = _pushed_version(_response_text(payload), kernel, n_pushes)
+    if version is None:
+        return None
     try:
-        hours = round(float(push["timeout"]) / 3600, 3) if push.get("timeout") else C.G.SESSION_LIMIT_H
+        hours = round(float(push["timeout"]) / 3600, 3) if push.get("timeout") else C.G.session_limit(res)
     except ValueError:
-        hours = C.G.SESSION_LIMIT_H
-    C.G.log_run(root, {"kernel": kernel, "version": int(m.group(1)), "name": target[0].name,
-                       "accelerator": push.get("accelerator") or target[1].get("machine_shape") or "gpu",
-                       "hours": hours, "pushed_at": dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-                       "status": "pushed", "via": "kaggle-cli"})
-    return (f"kaggle-grandmaster: GPU kernel {kernel} v{m.group(1)} logged (cap {hours}h of weekly quota). Poll with "
-            f"`python -m kgkit gpu wait {kernel}` in the background (not a tight loop); for kgkit-built training "
-            f"kernels then run `python -m kgkit gpu collect {kernel}`.")
+        hours = C.G.session_limit(res)
+    acc = push.get("accelerator") or C.G.kernel_meta_accelerator(target[1])
+    C.G.record_push(root, {"kernel": kernel, "version": version, "name": target[0].name, "accelerator": acc,
+                           "resource": res, "hours": hours,
+                           "pushed_at": dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                           "status": "pushed", "via": "kaggle-cli"})
+    queue = (" TPU jobs usually wait 10-24h in the queue; `kaggle kernels logs` is empty until the session ends."
+             if res == "TPU" else "")
+    return (f"kaggle-grandmaster: {res} kernel {kernel} v{version} logged (cap {hours}h of weekly quota"
+            + ("" if push.get("timeout") else ": no -t, so the full session limit is reserved") + f").{queue} Poll "
+            f"with `python -m kgkit gpu wait {kernel}` in the background (not a tight loop); it releases the "
+            f"reservation when the run ends. For kgkit-built training kernels then run `python -m kgkit gpu "
+            f"collect {kernel}`.")
 
 
 def silent_failure_note(payload: dict) -> str | None:
@@ -172,9 +194,9 @@ def main() -> None:
     cmd = C.command_of(payload)
     # One command can chain an upload, a push and a submit: report on each, in one message.
     notes = [silent_failure_note(payload)]
-    push = C.parse_push(cmd)
-    if push is not None:
-        notes.append(log_gpu_push(payload, push))
+    pushes = C.parse_pushes(cmd)
+    for push in pushes:
+        notes.append(log_gpu_push(payload, push, len(pushes)))
     sub = C.parse_submit(cmd)
     if sub is not None:
         notes.append(log_submission(payload, sub))

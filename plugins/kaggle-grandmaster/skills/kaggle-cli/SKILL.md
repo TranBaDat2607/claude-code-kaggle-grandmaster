@@ -16,6 +16,10 @@ description: Using the official Kaggle CLI/API from Claude Code — authenticati
   every request's headers, bearer token included. The plugin's hook blocks all of these, and `kgkit` drops
   both variables from its own Kaggle CLI calls. If auth fails, ask
   the user to create a token at kaggle.com → Settings → API and place it themselves.
+- Your username (for `"id": "<username>/<slug>"` in kernel/dataset metadata): `python -m kgkit whoami`.
+  It reads `KAGGLE_USERNAME`, the `username` field of kaggle.json, or the `username` line of
+  `kaggle config view` (which resolves token and OAuth logins), never the key. The hook blocks
+  other ways of reading those files.
 - You must have joined the competition and accepted its rules on the website before downloading
   or submitting (403 otherwise) — only the user can do that.
 - Check installation: `kaggle --version`; install with `pip install kaggle`.
@@ -68,9 +72,12 @@ kaggle kernels output <user>/<kernel> -p artifacts/ref/      # download a public
 kaggle kernels init -p kernels/infer                          # creates kernel-metadata.json
 kaggle kernels push -p kernels/infer -t 21600 --accelerator NvidiaTeslaT4   # -t caps the run (s)
 kaggle kernels status <user>/<kernel>
-kaggle kernels logs <user>/<kernel>                           # execution log (-f to follow)
+kaggle kernels logs <user>/<kernel> -f                        # live log of a running GPU kernel (empty on TPU)
 kaggle quota --format json                                    # weekly GPU/TPU quota + refreshAt
 ```
+`python -m kgkit gpu push <dir> --hours H` pushes any kernel folder with a quota check, a `-t` cap, a check
+that attached kernels have finished (inputs are bound at push time) and a busy-session preflight (2 batch
+GPU sessions and 1 batch TPU session per account).
 
 `kernel-metadata.json` keys: `id`, `title`, `code_file`, `language` (python), `kernel_type`
 (script|notebook), `is_private`, `enable_gpu`, `enable_tpu`, `enable_internet`, `machine_shape`
@@ -106,8 +113,17 @@ kaggle datasets init -p kernels/weights                 # dataset-metadata.json 
 kaggle datasets create -p kernels/weights --dir-mode zip
 kaggle datasets version -p kernels/weights -m "fold models v3" --dir-mode zip
 kaggle datasets download <owner>/<slug> -p data/ext --unzip
+python -m kgkit datasets pull <owner>/<slug> data/ext/<slug>   # same, file by file when the archive 404s
 kaggle models instances versions create ...              # Kaggle Models (for model hubs) — see `kaggle models -h`
 ```
+**404 on `datasets download`.** Some public datasets (seen on OOF libraries with many versions or recent
+updates) return `404 Client Error: Not Found for url: .../DownloadDataset` for the whole-dataset archive,
+while `kaggle datasets files` lists them and `-f <file>` downloads every file. `kgkit datasets pull` tries
+the archive and falls back to one request per file (all pages of the listing, folders kept, per-file zips
+unpacked); `--files "*.npy"` takes a subset. By hand, use the JSON listing (CSV breaks on commas in
+names) and follow `Next Page Token = ...` with `--page-token`:
+`kaggle datasets files <ds> --format json --page-size 200`, then
+`kaggle datasets download <ds> -f <name> -p <dir>` for each name.
 Keep weight datasets private until the competition rules require publishing. `datasets create|version` and
 `models instances [versions] create` upload **every** file in the folder except `.git`, `.cache` and
 `.huggingface` (subfolders too with `--dir-mode zip|tar`), so build the upload folder from the files you

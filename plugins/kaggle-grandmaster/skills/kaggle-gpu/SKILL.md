@@ -1,6 +1,6 @@
 ---
 name: kaggle-gpu
-description: Training models on Kaggle's free GPUs with a limited weekly quota — T4x2 vs P100 choice, quota and session limits, remote training kernels (kgkit gpu build/push/wait/collect), screening ideas on one fold with learning-curve pruning, packing two jobs per 2xT4 session, resuming past the 12h limit, CPU kernels for preprocessing, input-pipeline throughput, and budgeting GPU hours until the deadline. Use when training on Kaggle notebooks/kernels, planning or rationing GPU quota, choosing an accelerator, or when a remote run was slow, idle, timed out or wasted hours.
+description: Training models on Kaggle's free GPUs and TPUs with limited weekly quotas — T4x2 vs P100 vs TPU v5e-8 choice, quota, session and concurrency limits, remote training kernels (kgkit gpu build/push/wait/collect/release), screening ideas on one fold with learning-curve pruning, packing two jobs per 2xT4 session, resuming past the 12h limit, porting to torch_xla and the TPU queue, CPU kernels for preprocessing, input-pipeline throughput, and budgeting accelerator hours until the deadline. Use when training on Kaggle notebooks/kernels, planning or rationing GPU/TPU quota, choosing an accelerator, or when a remote run was slow, idle, queued, timed out or wasted hours.
 ---
 
 # Training on Kaggle GPUs
@@ -10,11 +10,21 @@ Unused quota expires at the weekly reset, so hours you don't spend are also lost
 
 ## 1. Facts to work from (verify live, they change)
 
-- `kaggle quota` (CLI ≥ 2.2): GPU hours used/remaining and `refreshAt` (weekly reset, UTC).
-  `python -m kgkit gpu quota` caches it in `.kaggle-gm/gpu_quota.json`, adjusts for kernels still running,
-  and warns when hours are about to expire unused.
-- Per-session limit 12 h (GPU/CPU). The push timeout `-t` caps a run below that, and a capped run never
-  burns more than its cap.
+- `kaggle quota` (CLI ≥ 2.2): GPU hours (30 h/week) and **TPU hours (20 h/week, a separate quota)**
+  used/remaining and `refreshAt` (weekly reset, UTC). `python -m kgkit gpu quota` caches both in
+  `.kaggle-gm/gpu_quota.json`, re-checks the runs it has as in flight (finished ones release their
+  reservation), lists what still holds hours, and warns when hours are about to expire unused.
+- Per-session limit 12 h (GPU/CPU), 9 h (TPU). The push timeout `-t` caps a run below that, and a capped
+  run never burns more than its cap. A push without `-t` reserves the full session limit until the run is
+  seen finished.
+- Batch sessions at once per account: **2 GPU, 1 TPU**, across all competitions. A push beyond that
+  prints `Maximum batch GPU session count of 2 reached` and exits 0. `kgkit gpu push` checks your busy
+  sessions first.
+- **Inputs are bound at push time.** `kernel_sources` resolve to the outputs that exist when the kernel is
+  pushed, not when it starts. A job queued behind a run that is still going starts without that run's new
+  output. `kgkit gpu push` refuses when an attached kernel is still queued or running.
+- `kaggle kernels logs <user>/<kernel> -f` streams the log of a running GPU kernel (CLI 2.2.4); outputs
+  appear when the session ends. For TPU sessions the log stays empty until the end.
 - Accelerators (`--accelerator` / `machine_shape`): **`NvidiaTeslaT4`** = 2× T4 16 GB (Turing sm_75,
   fp16 tensor cores, no bf16); **`NvidiaTeslaP100`** = 1× P100 16 GB (sm_60, faster fp32/HBM, no tensor
   cores, no Triton → no `torch.compile`). The quota is charged per session-hour either way, so
@@ -30,14 +40,23 @@ Unused quota expires at the weekly reset, so hours you don't spend are also lost
 ## 2. The pipeline (`python -m kgkit gpu ...`)
 
 ```
-quota / plan        ->  how many hours, until when, what to reserve
+quota / plan        ->  how many hours (GPU and TPU), until when, what to reserve, what holds a reservation
 build               ->  kernels/<name>-train/: runner + your src/ + kgkit + competition.json + data/folds.csv
-push                ->  quota check, -t cap, --accelerator, logs the run in .kaggle-gm/gpu_runs.jsonl
+push                ->  input-kernel and busy-session checks, quota check, -t cap, --accelerator, run log
+                        (.kaggle-gm/gpu_runs.jsonl). Also any other kernel folder: `gpu push <dir> --hours H`
+                        reads kernel-metadata.json (notebooks, inference and holdout-diagnostic kernels)
 wait                ->  polls every 90 s; prints the log tail on error   (run it in the background)
-collect             ->  outputs (no weights by default) -> ledger import, artefacts, GPU-hour accounting,
+status              ->  re-checks every run still marked in flight; finished ones free their hours
+collect             ->  outputs (no weights by default) -> ledger import, artefacts, GPU/TPU-hour accounting,
                         diagnostics (idle GPU, input-bound, deadline hit, pruned)
+release <kernel>    ->  drop a reservation by hand (a run that was deleted or never started)
+cancel <kernel>     ->  how to stop it: running = website "Stop session"; queued = only `kaggle kernels
+                        delete` frees the slot (irreversible: ask the user)
 log                 ->  every remote run with its cost and result
 ```
+Raw `kaggle kernels push` calls are logged by the plugin's hook too (every push in a compound command),
+and a re-push of the same kernel replaces its older reservation. Your username (for `"id"` in
+kernel-metadata.json): `python -m kgkit whoami`.
 
 The runner links every attached input into `./data` and points `./artifacts` and `./subs` into
 `/kaggle/working`. Your training command then runs unchanged, with the same relative paths and the same frozen
@@ -120,6 +139,7 @@ for deadline, resume and pruning. The image and transformer templates already do
 |---|---|
 | second T4 idle | ≥ 2 tasks per session (2 folds, or `--extra-job`), or DDP |
 | GPU util < 60 % | input-bound: pre-resize, uint8, GPU augmentation, fewer CPU transforms, `persistent_workers` |
+| too short to diagnose | a smoke/dev run (< 20 min) is mostly start-up; judge throughput on a longer run |
 | deadline hit | `--resume-from`; next time raise `--hours` or lower epochs/res |
 | pruned | discard or change the idea materially; don't re-run it unchanged |
 | fold failed | read the log tail; reproduce with `--smoke` locally before re-pushing |
@@ -127,9 +147,37 @@ for deadline, resume and pruning. The image and transformer templates already do
 Throughput tuning on T4 (AMP, channels_last, compile, batch size, dataloaders, DDP vs fold-parallel)
 is covered in [references/throughput.md](references/throughput.md).
 
+## 6. TPU v5e-8 when the GPU quota is gone
+
+The TPU quota (20 h/week) is separate and expires at the same reset, so it is free hours once the GPU
+quota is spent. Measured on a bandwidth-bound ConvNeXt-small (Oct 2026): one v5e chip ≈ **5 T4s** per
+step, bf16 losses matching the T4 run to 3-4 decimals. The catch is the queue:
+
+- Batch TPU jobs wait **10-24 h** (12 h 49 min measured) before they start, plus ~20 min of start-up. One
+  batch TPU session per account; a queued job holds that slot for its whole wait.
+- Expected finish = now + ~13 h queue + 20 min + (T4 time / 5). Use the TPU when that beats the GPU
+  finish: for training longer than a GPU session, or when the GPU quota is gone. For runs under ~12 h
+  with GPU hours left, the GPU usually wins on wall time. Queue about half a day before you need it,
+  and keep a GPU fallback scheduled for after the reset.
+- `machine_shape`: ask for `TpuV5E8`. `TpuV5E1`/`TpuV5E4`/`TpuV6E1` are silently stored as `TpuV5E8`;
+  `TpuV6E8` is a separate pool that often has no capacity.
+- A queued job cannot be cancelled through the API (it has no session id yet). The only way to free the
+  slot is `kaggle kernels delete` (irreversible; ask the user), then a re-push, which starts the queue
+  again from zero. So **validate before queueing**: run the XLA path locally on PJRT CPU, then the same
+  code on a ~5 min 2×T4 dev run. A bug found after the queue costs a whole queue cycle.
+- `kgkit gpu build --accelerator TpuV5E8 --hours <= 9` runs one process per chip for `{fold}` tasks (PJRT
+  `TPU_VISIBLE_CHIPS=<k>` with single-chip process bounds), so each fold/seed keeps the per-process batch
+  it had on one GPU. A command without `{fold}` gets the whole TPU (`PJRT_DEVICE=TPU`). Hours are
+  accounted as TPU-hours, not GPU-hours.
+- Porting a CUDA trainer to torch_xla (bf16, static shapes, `mark_step`, `xm.save`, timm checkpointing,
+  resuming CUDA checkpoints): [references/tpu-xla.md](references/tpu-xla.md).
+
 ## Guardrails
 
-- `kgkit gpu push` (and raw `kaggle kernels push` with GPU) spends the user's quota and is
+- `kgkit gpu push` (and raw `kaggle kernels push` with GPU or TPU) spends the user's quota and is
   outward-facing. Confirm with the user unless they authorised remote runs for this task.
-- Never print credentials. The username comes from `KAGGLE_USERNAME` or the `username` field of kaggle.json.
+- Never print credentials. The username comes from `python -m kgkit whoami` (`KAGGLE_USERNAME`, the
+  `username` field of kaggle.json, or `kaggle config view` for token logins). It never reads the key.
+- Deleting a kernel (the only way to drop a queued TPU job) destroys every version and output: the user
+  decides.
 - Keep kernels private (the default) unless the competition rules require publishing.

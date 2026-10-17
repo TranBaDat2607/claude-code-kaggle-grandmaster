@@ -14,7 +14,8 @@ Load the `kaggle-gpu` skill first and follow its protocol. Commands below are
 `python -m kgkit gpu ...` (PYTHONPATH=$KGKIT_HOME).
 
 ## Always first
-1. `gpu quota` and `gpu log`: hours plannable, reset time, runs in flight, measured cost per fold.
+1. `gpu quota` and `gpu log`: GPU and TPU hours plannable, reset time, runs in flight (and which pushes
+   hold a reservation), measured cost per fold.
 2. `python -m kgkit status` and `python -m kgkit ledger baseline`: the accepted baseline, its fold
    scores and std.
 
@@ -48,8 +49,18 @@ Rebuild the same command with `--resume-from <kernel> --slug <name>-train-r<N>`.
 skipped and timed-out folds continue from their checkpoint.
 
 ## status / collect <kernel>
-`gpu status`, or `gpu collect <kernel>`. Act on every diagnostic line (idle GPU, input-bound, deadline,
-pruned) as the skill's table says.
+`gpu status` (re-checks every run still marked in flight and frees the quota of finished ones), or
+`gpu collect <kernel>`. Act on every diagnostic line (idle GPU, input-bound, deadline, pruned) as the
+skill's table says. A run that was deleted or never started: `gpu release <kernel>`.
+
+## Other kernels (notebooks, inference, holdout diagnostics)
+`gpu push <kernel-dir> --hours <cap>` works on any folder with `kernel-metadata.json`: same quota,
+input and session checks, `-t` cap and run log. Collect its files with `kaggle kernels output`.
+
+## TPU
+When the GPU quota is gone (or a run is longer than a GPU session), follow the skill's TPU section:
+validate the XLA port off-quota, then `gpu build --accelerator TpuV5E8 --hours <= 9`, and queue it about
+half a day before it is needed. A queued TPU job can only be removed by deleting the kernel: ask first.
 
 ## Report
 Hours used / remaining / until the reset, runs launched or collected with results (ledger ids, fold deltas),

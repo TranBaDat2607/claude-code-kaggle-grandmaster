@@ -15,6 +15,7 @@ from pathlib import Path
 
 STATE_DIR = ".kaggle-gm"
 STATE_FILE = "competition.json"
+VALIDATION_MODES = ("kfold", "holdout+lb")
 
 
 @dataclass
@@ -34,7 +35,16 @@ class CompetitionState:
     deadline: str = ""                # ISO date of the final submission deadline (UTC)
     team_merger_deadline: str = ""
     external_data_allowed: str = "unknown"
+    # kfold: decisions on OOF over data/folds.csv. holdout+lb: a fixed labelled holdout (holdout_n rows,
+    # e.g. a small expert-labelled set) plus the public LB; there are no OOF files to blend or compare.
+    validation: str = "kfold"
+    holdout_n: int | None = None
+    holdout_se: float | None = None   # standard error of the holdout score, if measured (bootstrap)
     notes: list[str] = field(default_factory=list)
+
+    @property
+    def holdout(self) -> bool:
+        return self.validation.startswith("holdout")
 
     def save(self, root: str | Path = ".") -> Path:
         d = Path(root) / STATE_DIR

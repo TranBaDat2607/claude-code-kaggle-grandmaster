@@ -17,13 +17,14 @@ parts of a competition that are easy to get subtly wrong:
 - ``kgkit.compare``     paired fold test + paired bootstrap: is the new experiment really better?
 - ``kgkit.backlog``     the ranked idea backlog and screen-vs-full fidelity
 - ``kgkit.kernels``     study and reproduce public notebooks
-- ``kgkit.discussions`` competition forums (topics, search, write-ups, threads) from Meta Kaggle
+- ``kgkit.discussions`` competition forums (topics, search, write-ups, threads), live or from Meta Kaggle
+- ``kgkit.datasets``    dataset download with a per-file fallback when the whole-dataset archive 404s
 - ``kgkit.pages``       a competition's own pages (evaluation, rules, data description) as text
 - ``kgkit.safety``      credential checks for uploads; a boundary around text written by other Kaggle users
 - ``kgkit.recheck``     re-draw the folds with a new seed and re-run old vs current: does the gain survive?
 - ``kgkit.submission``  submission validation against sample_submission
 - ``kgkit.state``       competition state (``.kaggle-gm/competition.json``)
-- ``kgkit.gpu``         training on Kaggle GPUs: quota, remote kernels, GPU-hour accounting
+- ``kgkit.gpu``         training on Kaggle GPUs/TPUs: quota, remote kernels, accelerator-hour accounting
 - ``kgkit.budget``      training-loop guard: session deadline, resume checkpoints, learning-curve pruning
 
 Run ``python -m kgkit --help`` for the command line interface.

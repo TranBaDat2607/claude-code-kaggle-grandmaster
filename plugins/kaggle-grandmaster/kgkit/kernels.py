@@ -29,6 +29,7 @@ import json
 import re
 import shutil
 import subprocess
+import tokenize
 from pathlib import Path
 
 from . import safety
@@ -59,6 +60,11 @@ LIB_PATTERNS = {
     "RAPIDS (cuDF/cuML)": r"\bcudf\b|\bcuml\b",
     "Polars": r"\bpolars\b",
 }
+# Training code; a notebook without any that writes a submission is inference-only (common in code competitions).
+TRAIN_RX = re.compile(r"\.fit\s*\(|\.backward\s*\(|optimizer\.step\s*\(|\btrainer\.train\s*\(|\bTrainer\s*\("
+                      r"|\b(?:lgb|xgb|lightgbm|xgboost|catboost)\.(?:train|cv)\s*\("
+                      r"|\.fit_transform\s*\(\s*\w+\s*,\s*\w+")
+SUBMIT_RX = re.compile(r"submission\.(?:csv|parquet)|sample_submission")
 SCORE_RX = re.compile(r"(?i)\b(cv|oof|valid(?:ation)?|val|lb|score|auc|rmse|logloss|f1|qwk|map@\d+)\b[^\n\d-]{0,25}"
                       r"(-?\d+\.\d{3,})")
 INPUT_RX = re.compile(r"/kaggle/input/(?:competitions/|datasets/[^/'\"\s]+/)?([A-Za-z0-9._-]+)")
@@ -130,6 +136,21 @@ def risky_lines(cells: list[str], limit: int = 25) -> list[dict]:
     return hits
 
 
+def strip_strings(code: str) -> str:
+    """The code without string literals and comments: notebooks that embed helper modules' source as strings
+    (written to disk at run time) would otherwise look like they train. Falls back to the raw text."""
+    lines = ["# " + l if l.lstrip().startswith(("!", "%")) else l for l in code.splitlines()]
+    drop = {tokenize.STRING, tokenize.COMMENT} | {getattr(tokenize, n) for n in
+                                                  ("FSTRING_START", "FSTRING_MIDDLE", "FSTRING_END")
+                                                  if hasattr(tokenize, n)}
+    try:
+        toks = [t for t in tokenize.generate_tokens(io.StringIO("\n".join(lines) + "\n").readline)
+                if t.type not in drop]
+        return tokenize.untokenize((t.type, t.string) for t in toks)
+    except (tokenize.TokenError, IndentationError, SyntaxError, ValueError):
+        return code
+
+
 def review(code: str, outputs: str, meta: dict, competition: str | None) -> dict:
     cv = [name for name, rx in CV_PATTERNS.items() if re.search(rx, code)]
     libs = [name for name, rx in LIB_PATTERNS.items() if re.search(rx, code, re.IGNORECASE)]
@@ -143,8 +164,10 @@ def review(code: str, outputs: str, meta: dict, competition: str | None) -> dict
         "models": list(meta.get("model_sources", []) or []),
     }
     other_inputs = [i for i in inputs if i not in comp_names]
+    inference_only = TRAIN_RX.search(strip_strings(code)) is None and SUBMIT_RX.search(code) is not None
     return {"cv": cv, "libs": libs, "scores": scores, "inputs": inputs, "external": external,
-            "other_inputs": other_inputs, "seeds_fixed": bool(re.search(r"seed|random_state", code))}
+            "other_inputs": other_inputs, "seeds_fixed": bool(re.search(r"seed|random_state", code)),
+            "inference_only": inference_only}
 
 
 def to_local_script(cells: list[str], competition: str | None, ref_slug: str) -> str:
@@ -168,10 +191,17 @@ def to_local_script(cells: list[str], competition: str | None, ref_slug: str) ->
     return "\n".join(out)
 
 
-def format_review(ref: str, rev: dict) -> str:
+def format_review(ref: str, rev: dict, holdout: bool = False) -> str:
     ext = rev["external"]
+    infer = rev.get("inference_only")
+    if infer:
+        cv_line = ("n/a: inference-only notebook (no training code; it loads trained weights/predictions) - judge it "
+                   "on its inputs and its public score")
+    else:
+        cv_line = ", ".join(rev["cv"]) or "none found (single fit? LB-tuned? treat its scores with suspicion)"
     # Scores, paths, attached sources and code lines come from the author's notebook: wrapped as untrusted.
-    facts = [f"- **CV scheme**: {', '.join(rev['cv']) or 'none found (single fit? LB-tuned? treat its scores with suspicion)'}",
+    facts = [f"- **Kind**: {'inference only' if infer else 'trains models'}",
+             f"- **CV scheme**: {cv_line}",
              f"- **Libraries / model families**: {', '.join(rev['libs']) or '-'}",
              f"- **Scores printed in outputs**: {'; '.join(rev['scores']) or 'none found'}",
              f"- **Inputs read**: {', '.join(rev['inputs']) or '-'}",
@@ -192,26 +222,40 @@ def format_review(ref: str, rev: dict) -> str:
     else:
         lines.append("- No shell, network, credential-path, dynamic-code or folder-deleting lines found (a pattern scan, "
                      "not a guarantee).")
-    lines += ["", "## Checklist", "",
+    lines += ["", f"Public score: the Kaggle API does not expose it; read it on https://www.kaggle.com/code/{ref} "
+              "(the version that produced the submission).", "", "## Checklist", "",
               "- [ ] Read the lines above before running the local script",
-              "- [ ] External inputs are public, allowed by the rules, and accessible (private/deleted ones block reproduction)",
-              "- [ ] Its CV scheme matches ours (grouping / time); if not, its CV number is not comparable",
-              "- [ ] Re-run on data/folds.csv; log with `kgkit ledger import` (OOF) so it can join the blend",
-              "- [ ] Note the ideas worth stealing in the backlog: `kgkit backlog add ... --source notebook`"]
+              "- [ ] External inputs are public, allowed by the rules, and accessible (private/deleted ones block reproduction)"]
+    if infer:
+        lines += ["- [ ] Every attached dataset/model is pinned to a version you can attach too (code competitions "
+                  "refuse notebooks with non-versioned datasets); note which version produced the public score",
+                  "- [ ] Score it the way decisions are made here: " + (
+                      "on the holdout (`kgkit ledger add <name> <holdout score>`), or LB-only "
+                      "(`kgkit ledger add <name> lb-only`, then `ledger lb`)" if holdout else
+                      "its training is elsewhere, so log it LB-only (`kgkit ledger add <name> lb-only`) unless "
+                      "OOF predictions for our folds exist (`kgkit ledger import`)")]
+    elif holdout:
+        lines += ["- [ ] Score it on our holdout (`kgkit ledger add <name> <holdout score>`); its own CV is not comparable"]
+    else:
+        lines += ["- [ ] Its CV scheme matches ours (grouping / time); if not, its CV number is not comparable",
+                  "- [ ] Re-run on data/folds.csv; log with `kgkit ledger import` (OOF) so it can join the blend"]
+    lines += ["- [ ] Note the ideas worth stealing in the backlog: `kgkit backlog add ... --source notebook`"]
     return "\n".join(lines) + "\n"
 
 
-def pull(ref: str, dest_root: str | Path = "ref", competition: str | None = None, check_access: bool = False) -> dict:
+def pull(ref: str, dest_root: str | Path = "ref", competition: str | None = None, check_access: bool = False,
+         holdout: bool = False) -> dict:
     slug = ref.split("/")[-1]
     dest = Path(dest_root) / slug
     dest.mkdir(parents=True, exist_ok=True)
     r = _kaggle(["kernels", "pull", ref, "-p", str(dest), "-m"])
     if r.returncode != 0:
         raise SystemExit(f"kaggle kernels pull failed: {r.stderr.strip() or r.stdout.strip()}")
-    return analyse_dir(dest, ref, competition, check_access)
+    return analyse_dir(dest, ref, competition, check_access, holdout)
 
 
-def analyse_dir(dest: Path, ref: str, competition: str | None = None, check_access: bool = False) -> dict:
+def analyse_dir(dest: Path, ref: str, competition: str | None = None, check_access: bool = False,
+                holdout: bool = False) -> dict:
     slug = ref.split("/")[-1]
     meta_p = dest / "kernel-metadata.json"
     meta = json.loads(meta_p.read_text(encoding="utf-8")) if meta_p.is_file() else {}
@@ -226,7 +270,7 @@ def analyse_dir(dest: Path, ref: str, competition: str | None = None, check_acce
     if check_access:
         rev["inaccessible"] = [d for d in rev["external"]["datasets"]
                                if _kaggle(["datasets", "files", d], timeout=60).returncode != 0]
-    text = format_review(ref, rev)
+    text = format_review(ref, rev, holdout)
     if rev.get("inaccessible"):
         text += ("\n**Inaccessible datasets** (private or deleted):\n"
                  + safety.wrap(", ".join(rev["inaccessible"]), "kaggle-notebook", ref=ref) + "\n")

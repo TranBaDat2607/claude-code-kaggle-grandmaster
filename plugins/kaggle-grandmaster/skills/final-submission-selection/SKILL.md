@@ -31,6 +31,9 @@ std; treat LB gaps below ~2 std as ties broken by CV.
   sufficiently different and credible; or a version with/without the risky component (PL,
   leak, post-processing); or the full-data retrained version.
 - Avoid two near-identical submissions (correlation > 0.995) — the second pick buys nothing.
+- LB-only candidates (blends with public submission files, forks with no OOF; `LB-only` in the ledger)
+  have no honest CV. They can be the hedge, never both picks: keep a CV-backed candidate as pick 1.
+  Their weights were chosen on the public LB, so expect them to lose some of their public edge on private.
 - If both CV and LB agree on a candidate, take it, and hedge with the second-best on a
   different axis.
 
