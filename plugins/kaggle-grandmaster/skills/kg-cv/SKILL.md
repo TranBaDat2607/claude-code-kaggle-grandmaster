@@ -13,9 +13,13 @@ Follow the `validation-strategy` skill.
 
 If decisions in this competition are made on a fixed labelled holdout plus the public LB (no K-fold OOF:
 e.g. a small expert-labelled set, or an accepted baseline forked from public inference notebooks), do not
-invent folds. Record the mode instead: `python -m kgkit config validation=holdout+lb holdout_n=<rows>`
-(optionally `holdout_se=<bootstrap SE>`), so the session brief stops asking for `data/folds.csv` and
-`kgkit status` shows the holdout noise next to any CV-LB correlation.
+invent folds. Record the mode and the holdout labels instead:
+`python -m kgkit config validation=holdout+lb holdout_n=<rows> eval_truth=<FILE>:<label cols, comma-separated>`
+(plus `eval_groups=<FILE>:<col>` when several rows share a patient/study), so the session brief stops
+asking for `data/folds.csv`. Log each candidate with its holdout predictions
+(`kgkit ledger add <name> auto --pred <FILE>:<cols>`): the score is recomputed from them and compared,
+paired, against the accepted baseline. Do not judge differences by the holdout size alone: two models
+scored on the same rows differ far less by chance than one score varies.
 
 1. Determine how train/test were split (recon report, data page, adversarial validation, time
    columns, entity ids). State the evidence.

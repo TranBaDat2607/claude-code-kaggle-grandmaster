@@ -98,7 +98,8 @@ def brief(root: Path) -> str:
     holdout = getattr(st, "holdout", False)
     if holdout:
         lines.append(f"Validation: fixed holdout" + (f" (n={st.holdout_n})" if st.holdout_n else "")
-                     + " + public LB, no OOF/K-fold: small CV differences are noise; error analysis runs on the "
+                     + " + public LB, no OOF/K-fold: judge differences with `kgkit ledger compare` on stored "
+                       "holdout predictions (paired), not by the holdout size; error analysis runs on the "
                        "holdout predictions; public notebooks are judged on inputs and public score.")
     recs = C.ledger_records(root)
     if recs:

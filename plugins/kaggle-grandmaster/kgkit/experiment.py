@@ -355,19 +355,20 @@ class Ledger:
         return {"n": len(pairs), "pearson": float(pearsonr(cv, lb)[0]), "spearman": float(spearmanr(cv, lb)[0])}
 
     def holdout_note(self) -> str:
-        """For a holdout+lb workspace: how noisy the 'CV' column is."""
+        """For a holdout+lb workspace: what is known about the noise of the 'CV' column.
+
+        Never a formula of n and the score: two models scored on the same rows are strongly correlated, so the
+        noise of their *difference* is far below the SE of one absolute score, and only a paired comparison on
+        stored predictions measures it."""
         st = S.load(self.root)
         if st is None or not st.holdout:
             return ""
-        se = st.holdout_se
-        n = st.holdout_n
-        if se is None and n:
-            cvs = [r["cv"] for r in self.records() if has_own_cv(r) and 0 < r["cv"] < 1]
-            if cvs:  # binomial approximation; a bootstrap of the holdout metric is better (holdout_se)
-                p = float(np.median(cvs))
-                se = (p * (1 - p) / n) ** 0.5
-        size = f"n={n}" if n else "size unknown"
-        noise = f", SE ~{se:.3f}: differences under ~{2 * se:.3f} are noise" if se else ""
+        size = f"n={st.holdout_n}" if st.holdout_n else "size unknown"
+        noise = ("; noise of differences not measured yet: store holdout predictions and run `kgkit ledger compare` "
+                 "(paired)")
+        if st.holdout_se:
+            noise += (f"; holdout_se {st.holdout_se:.4f} is the SE of one absolute score, not a threshold for "
+                      "differences between models")
         return f"CV here is a fixed holdout ({size}{noise}); the public LB is the second opinion"
 
     def cv_lb_summary(self) -> str:

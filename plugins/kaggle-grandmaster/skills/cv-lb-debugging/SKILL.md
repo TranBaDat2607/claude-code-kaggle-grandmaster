@@ -26,20 +26,24 @@ description: Systematic diagnosis when cross-validation and leaderboard disagree
    when it is fit; check fold assignment against groups/time; search for duplicates.
 4. **Shift analysis**: `python -m kgkit adv` — drifting features; compare per-feature importance
    with drift ranking; try dropping top drifting features and see whether CV↔LB agreement improves.
-5. **Public LB noise estimate**: public set size n and metric — bootstrap OOF on n-sized samples
-   to get the std of the metric at that size. If the LB difference is within ~2 std, it's noise.
+5. **Public LB noise estimate**: ask the right question. Two submissions are scored on the *same*
+   public rows, so the noise of their LB *gap* is the paired SE, often several times smaller than the
+   SE of one score: `python -m kgkit ledger compare <a> <b> --public-n <rows>` (paired bootstrap of
+   their OOF/holdout predictions at the public-set size). The SE of one *absolute* score at that size,
+   `python -m kgkit ledger noise <id> --public-n <rows>`, is only the yardstick for a single
+   submission's CV-LB gap. Both assume the public rows look like your evaluation rows.
 6. **CV-LB correlation across subs**: `python -m kgkit status`. Low correlation with several diverse
    submissions → the validation doesn't mirror the test; rebuild it (time split? grouping?
    test-like holdout via adversarial p(test)).
 7. Record the conclusion in the ledger notes and CLAUDE.md — this knowledge drives final picks.
 
-## Bootstrap snippet (public LB noise)
+## Snippet (public LB noise, outside the CLI)
 
 ```python
-import numpy as np
-from kgkit import metrics as M
-rng = np.random.default_rng(0)
+from kgkit.compare import describe, estimate
 n_public = 5000  # rows in public split (overview/data page: e.g. 20% of test)
-scores = [M.score("auc", y[idx], oof[idx]) for idx in (rng.choice(len(y), n_public) for _ in range(500))]
-print(np.std(scores))  # LB differences below ~2x this are noise
+gap = estimate(y, oof_a, oof_b, "auc", size=n_public, groups=None)  # paired: LB gap between a and b
+one = estimate(y, oof_a, None, "auc", size=n_public)                # absolute: one score's CV-LB gap
+print(describe(gap))  # LB gaps between a and b below ~2x this SE are noise
+print(describe(one))  # a CV-LB gap of a's within ~2x this SE is sampling noise, not a validation problem
 ```
