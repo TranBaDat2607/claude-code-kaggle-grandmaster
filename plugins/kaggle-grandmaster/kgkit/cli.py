@@ -591,7 +591,8 @@ def _auto_compare(led, a, r: dict) -> None:
         print(f"not compared with the baseline {base['id']}: its predictions are on a different evaluation set")
         return
     print()
-    _ledger_compare(led, argparse.Namespace(**{**vars(a), "args": [r["id"], base["id"]]}))
+    folds = {"folds": None, "fold": None} if led._holdout() else {}  # a fixed holdout has no folds to pair
+    _ledger_compare(led, argparse.Namespace(**{**vars(a), "args": [r["id"], base["id"]], **folds}))
 
 
 def _ledger_compare(led, a):
