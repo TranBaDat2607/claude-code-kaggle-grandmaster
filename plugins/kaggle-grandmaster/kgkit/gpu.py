@@ -278,6 +278,30 @@ def available_hours(root: str | Path, quota: dict | None = None, resource: str =
     return q["remaining_h"] - in_flight_hours(root, q, resource)
 
 
+def quota_line(root: str | Path) -> str:
+    """Cached Kaggle GPU quota (no network) and remote runs that may still be in flight, for the session brief
+    and `kgkit status`; empty when neither is on file."""
+    q = cached_quota(root)
+    active = active_runs(root)
+    if q is None and not active:
+        return ""
+    s = ""
+    if q is not None:
+        avail = available_hours(root, q)
+        s = f"Kaggle GPU quota (cached {q.get('fetched_at', '?')}): {avail:.1f}h plannable of {q.get('total_h', 0):.0f}h"
+        refresh = _parse_time(q.get("refresh_at"))
+        if refresh is not None:
+            h = (refresh - _now()).total_seconds() / 3600
+            s += f", resets in {h:.0f}h"
+            if 0 < h <= 36 and avail >= 1:
+                s += " - USE IT OR LOSE IT: queue long useful runs before the reset"
+        s += "."
+    if active:
+        s += (f" Remote runs not yet seen finished: {', '.join(run_label(r) for r in active)} "
+              "(`python -m kgkit gpu status` checks them and releases their quota reservations).")
+    return s.strip()
+
+
 def resets_before(q: dict, deadline: str | None) -> int:
     """Weekly resets from the quota's refreshAt (7-day steps) that land before the deadline day ends."""
     if not deadline:

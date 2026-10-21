@@ -6,7 +6,6 @@ workspace, a repo with signs of Kaggle work (kernel-metadata.json, competition U
 
 from __future__ import annotations
 
-import datetime as dt
 import math
 import os
 import sys
@@ -44,42 +43,6 @@ def _pearson(xs, ys):
     return sxy / math.sqrt(sxx * syy)
 
 
-def _deadline(st) -> str:
-    if not st.deadline:
-        return "deadline: unknown (set it in .kaggle-gm/competition.json)"
-    try:
-        d = dt.date.fromisoformat(st.deadline[:10])
-    except ValueError:
-        return f"deadline: {st.deadline}"
-    days = (d - dt.datetime.now(dt.timezone.utc).date()).days
-    phase = ("ENDED — run /kg-postmortem" if days < 0 else "FINAL DAYS — robustness + /kg-final" if days <= 3
-             else "endgame — freeze ensemble design" if days <= 14 else "exploration")
-    return f"deadline {d.isoformat()} ({days} days left; phase: {phase})"
-
-
-def gpu_line(root: Path) -> str:
-    """Cached Kaggle GPU quota (no network at session start) and remote runs that may still be in flight."""
-    q = C.G.cached_quota(root)
-    active = C.G.active_runs(root)
-    if q is None and not active:
-        return ""
-    s = ""
-    if q is not None:
-        avail = C.G.available_hours(root, q)
-        s = f"Kaggle GPU quota (cached {q.get('fetched_at', '?')}): {avail:.1f}h plannable of {q.get('total_h', 0):.0f}h"
-        refresh = C.G._parse_time(q.get("refresh_at"))
-        if refresh is not None:
-            h = (refresh - dt.datetime.now(dt.timezone.utc)).total_seconds() / 3600
-            s += f", resets in {h:.0f}h"
-            if 0 < h <= 36 and avail >= 1:
-                s += " - USE IT OR LOSE IT: queue long useful runs before the reset"
-        s += "."
-    if active:
-        s += (f" Remote runs not yet seen finished: {', '.join(C.G.run_label(r) for r in active)} "
-              "(`python -m kgkit gpu status` checks them and releases their quota reservations).")
-    return s.strip()
-
-
 def _own_cv(r: dict, holdout: bool = False) -> bool:
     return C.EV.own_score(r, holdout)
 
@@ -91,7 +54,7 @@ def brief(root: Path) -> str:
         return ""
     direction = "higher" if st.greater_is_better else "lower"
     lines.append(f"Competition workspace: **{st.slug}** — metric {st.metric or '?'} ({direction} is better), "
-                 f"task {st.task or '?'}, target `{st.target or '?'}`; {_deadline(st)}.")
+                 f"task {st.task or '?'}, target `{st.target or '?'}`; {C.S.deadline_line(st)}.")
     if st.code_competition:
         lines.append(f"CODE COMPETITION: runtime limit {st.runtime_limit_hours or '?'}h, internet "
                      f"{'allowed' if st.internet_allowed else 'OFF'} — budget inference early.")
@@ -139,9 +102,8 @@ def brief(root: Path) -> str:
     top = C.B.Backlog(root).ranked()[:3]
     if top:
         lines.append("Backlog top: " + "; ".join(f"#{i['id']} {i['idea'][:60]}" for i in top) + ".")
-    used = C.submissions_today(root)
-    lines.append(f"Submissions logged today (UTC): {used}/{st.daily_submissions}.")
-    gq = gpu_line(root)
+    lines.append(C.S.submissions_line(root, st) + ".")
+    gq = C.G.quota_line(root)
     if gq:
         lines.append(gq)
     if not holdout and not (root / "data" / "folds.csv").exists():

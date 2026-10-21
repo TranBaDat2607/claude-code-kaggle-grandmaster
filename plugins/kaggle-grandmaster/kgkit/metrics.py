@@ -28,6 +28,8 @@ custom ones included, works without them through the plain bootstrap:
 
 from __future__ import annotations
 
+import difflib
+import re
 from dataclasses import dataclass
 from typing import Callable, Sequence
 
@@ -71,12 +73,50 @@ def register(name, greater_is_better, kind, description="", aliases=(), influenc
     return deco
 
 
+class UnknownMetric(KeyError):
+    """A metric name that is neither registered nor an alias; the message suggests the closest ones."""
+
+
+def _key(name: str) -> str:
+    return name.strip().lower().replace("-", "_").replace(" ", "_")
+
+
 def get(name: str) -> Metric:
-    key = name.lower().replace("-", "_").replace(" ", "_")
+    key = _key(name)
     key = _ALIASES.get(key, key)
     if key not in _REGISTRY:
-        raise KeyError(f"unknown metric {name!r}; known: {sorted(_REGISTRY)}")
+        close = suggest(name)
+        hint = f"; did you mean {' or '.join(close)}?" if close else ""
+        raise UnknownMetric(f"unknown metric {name!r}{hint} (`python -m kgkit metrics` lists them; known: "
+                            f"{', '.join(sorted(_REGISTRY))})")
     return _REGISTRY[key]
+
+
+def aliases_of(name: str) -> list[str]:
+    return sorted(a for a, n in _ALIASES.items() if n == name)
+
+
+_STOP = {"a", "an", "and", "at", "by", "for", "in", "of", "on", "or", "over", "the", "to", "vs", "with"}
+
+
+def _words(text: str) -> set[str]:
+    return {w for w in re.split(r"[^a-z0-9]+", text.lower()) if w and w not in _STOP}
+
+
+def suggest(name: str, n: int = 3) -> list[str]:
+    """Registered metrics an unknown name probably means: close spellings of a name or alias (``rmsee`` -> rmse),
+    else the metrics whose name, aliases and description share the most words with it
+    (``macro_averaged_roc_auc`` -> mean_col_auc, auc)."""
+    key = _key(name)
+    names = {**{k: k for k in _REGISTRY}, **_ALIASES}
+    out = [names[c] for c in difflib.get_close_matches(key, list(names), n=n, cutoff=0.75)]
+    if not out:
+        words = _words(name)
+        overlap = {k: len(words & _words(" ".join([k, m.description, *aliases_of(k)])))
+                   for k, m in _REGISTRY.items()}
+        out = sorted((k for k in overlap if overlap[k]),
+                     key=lambda k: (-overlap[k], -difflib.SequenceMatcher(None, key, k).ratio()))
+    return list(dict.fromkeys(out))[:n]
 
 
 def score(name: str, y_true, y_pred, **kw) -> float:
@@ -249,8 +289,19 @@ def _gini_influence(y, p):
     return 2 * theta - 1, 2 * c
 
 
-def _mean_col_auc_influence(y, p):
+def _label_columns(y, p) -> tuple[np.ndarray, np.ndarray]:
+    """Per-label (truth, score) columns: multilabel indicators as they are; class codes 0..K-1 against K score
+    columns one-hot encoded (one-vs-rest, as sklearn's ``multi_class="ovr"``); one binary column as one."""
     y, p = _a(y), _a(p)
+    if p.ndim == 1:
+        p = p[:, None]
+    if y.ndim == 1:
+        y = y[:, None] if p.shape[1] == 1 else (y[:, None] == np.arange(p.shape[1])).astype(int)
+    return y, p
+
+
+def _mean_col_auc_influence(y, p):
+    y, p = _label_columns(y, p)
     parts = [_auc_infl(y[:, j], p[:, j]) for j in range(y.shape[1]) if len(np.unique(y[:, j])) > 1]
     return float(np.mean([t for t, _ in parts])), np.mean([c for _, c in parts], axis=0)
 
@@ -275,10 +326,13 @@ def pr_auc(y, p, sample_weight=None):
     return skm.average_precision_score(y, p, sample_weight=sample_weight)
 
 
-@register("mean_col_auc", True, "proba", "mean column-wise ROC AUC (multilabel)", aliases=("mcauc",),
+@register("mean_col_auc", True, "proba", "macro AUC: mean column-wise ROC AUC (multilabel; multiclass codes "
+          "one-vs-rest), single-class columns skipped",
+          aliases=("mcauc", "macro_auc", "auc_macro", "macro_roc_auc", "roc_auc_macro", "mean_auc", "column_auc",
+                   "mean_column_auc", "columnwise_auc"),
           influence=_mean_col_auc_influence, weighted=True)
 def mean_col_auc(y, p, sample_weight=None):
-    y, p = _a(y), _a(p)
+    y, p = _label_columns(y, p)
     cols = [binary_auc(y[:, j], p[:, j], sample_weight) for j in range(y.shape[1]) if len(np.unique(y[:, j])) > 1]
     return float(np.mean(cols))
 

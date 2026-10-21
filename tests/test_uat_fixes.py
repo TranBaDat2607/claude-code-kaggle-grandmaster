@@ -670,3 +670,122 @@ def test_review_shows_the_public_score_on_record(tmp_path, monkeypatch):
     K.analyse_dir(d, "a/nb", "comp", score_lookup=True)
     text = (d / "REVIEW.md").read_text()
     assert "Public score: unknown (the search lookup timed out)" in text and "Title check" not in text
+
+
+# ----------------------------------------------------------------------------- #31 CLI papercuts
+def test_macro_auc_is_mean_col_auc_however_it_is_meant():
+    from sklearn.metrics import roc_auc_score
+
+    from kgkit import metrics as M
+
+    m = M.get("macro_auc")
+    assert m is M.get("mean_col_auc") is M.get("Macro AUC") is M.get("column-auc")
+    rng = np.random.default_rng(0)
+    y = rng.integers(0, 4, 400)  # multiclass codes against 4 score columns: one-vs-rest macro
+    p = rng.random((400, 4)) + 0.4 * np.eye(4)[y]
+    p /= p.sum(1, keepdims=True)
+    ref = roc_auc_score(y, p, multi_class="ovr")
+    assert m(y, p) == pytest.approx(ref) and m.influence(y, p)[0] == pytest.approx(ref)
+    ml = (rng.random((300, 3)) < 0.3).astype(int)  # multilabel indicators
+    s = rng.random((300, 3)) + 0.3 * ml
+    assert m(ml, s) == pytest.approx(roc_auc_score(ml, s, average="macro"))
+    yb, sb = ml[:, 0], s[:, 0]  # one binary column
+    assert m(yb, sb) == pytest.approx(M.score("auc", yb, sb))
+
+
+def test_unknown_metric_names_suggest_registered_ones():
+    from kgkit import metrics as M
+
+    assert M.suggest("macro_averaged_roc_auc")[0] == "mean_col_auc"
+    assert M.suggest("mean_colauc") == ["mean_col_auc"]
+    assert M.suggest("rmsee")[0] == "rmse" and M.suggest("xyz") == []
+    with pytest.raises(KeyError, match="did you mean rmse"):
+        M.get("rmsee")
+
+
+def test_metric_given_to_adopt_and_config_is_resolved(tmp_path, monkeypatch, capsys):
+    from kgkit import cli
+
+    cli.main(["adopt", "rsna", "--dir", str(tmp_path), "--metric", "macro_auc", "--no-submissions"])
+    out = capsys.readouterr().out
+    st = S.load(tmp_path)
+    assert st.metric == "mean_col_auc" and st.greater_is_better
+    assert "macro_auc -> mean_col_auc" in out and "registry" not in out
+    cli.main(["adopt", "rsna", "--dir", str(tmp_path), "--metric", "macro_averaged_auc_roc", "--no-submissions",
+              "--force"])
+    out = capsys.readouterr().out
+    assert "not in kgkit's registry - did you mean" in out and "mean_col_auc" in out and "src/metric.py" not in out
+    assert S.load(tmp_path).metric == "macro_averaged_auc_roc"
+
+    monkeypatch.chdir(tmp_path)
+    cli.main(["config", "metric=rmse"])  # the direction follows the metric
+    st = S.load(tmp_path)
+    assert st.metric == "rmse" and not st.greater_is_better
+    cli.main(["config", "greater_is_better=false", "metric=mcauc"])  # unless it is set in the same call
+    st = S.load(tmp_path)
+    assert st.metric == "mean_col_auc" and not st.greater_is_better
+
+    pd.DataFrame({"y": [0, 1, 1], "p": [0.2, 0.7, 0.9]}).to_csv(tmp_path / "d.csv", index=False)
+    with pytest.raises(SystemExit, match="did you mean rmse"):  # any command: the hint, not a traceback
+        cli.main(["score", "rmsee", "d.csv:y", "d.csv:p"])
+
+
+def test_ledger_and_backlog_actions_show_their_own_arguments(ws, monkeypatch, capsys):
+    from kgkit import cli
+
+    monkeypatch.chdir(ws)
+    monkeypatch.setenv("COLUMNS", "200")
+
+    def help_of(*argv):
+        with pytest.raises(SystemExit) as e:
+            cli.main(list(argv))
+        assert e.value.code == 0
+        return capsys.readouterr().out
+
+    out = help_of("ledger", "add", "--help")
+    assert "name cv|auto|lb-only [notes ...]" in out and "--pred" in out and "--source" not in out
+    out = help_of("ledger", "-h")
+    assert "<exp_id> <public_score> [private_score]" in out and "<exp_id> <baseline|keep|discard|inconclusive>" in out
+    out = help_of("backlog", "set", "--help")
+    assert " id" in out and "--screen-gain" in out and "--first-experiment" not in out
+    with pytest.raises(SystemExit) as e:
+        cli.main(["ledger", "lb", "1"])
+    assert e.value.code == 2 and "public_score" in capsys.readouterr().err
+
+    # the command bodies still read the positionals in order; --notes joins the notes words
+    cli.main(["ledger", "add", "lgbm", "0.81", "first", "try", "--notes", "seed 0"])
+    cli.main(["ledger", "lb", "1", "0.8"])
+    cli.main(["ledger", "decide", "1", "baseline", "the", "start"])
+    r = Ledger(ws).get("1")
+    assert r["notes"] == "first try seed 0" and r["lb_public"] == 0.8
+    assert r["decision"] == "baseline" and r["decision_note"] == "the start"
+    cli.main(["backlog", "add", "pseudo", "label", "--gain", "3"])
+    cli.main(["backlog", "set", "1", "--status", "running"])
+    assert B.Backlog(ws).items()[0]["idea"] == "pseudo label" and B.Backlog(ws).items()[0]["status"] == "running"
+
+
+def test_status_shows_submissions_deadline_and_gpu_like_the_brief(plugin_root, ws, monkeypatch, capsys):
+    from kgkit import cli
+
+    now = dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    S.submissions_log(ws).write_text(json.dumps({"time_utc": now, "status": "submitted"}) + "\n")
+    monkeypatch.chdir(ws)
+    cli.main(["status"])
+    out = capsys.readouterr().out
+    assert "Submissions logged today (UTC): 1/5\n" in out and "days left; phase: exploration" in out
+    assert "Kaggle GPU quota: not fetched yet" in out
+
+    with S.submissions_log(ws).open("a") as f:
+        f.write(json.dumps({"time_utc": now, "status": "submitted", "remaining_today": 2}) + "\n")
+    _quota(ws)
+    cli.main(["status"])
+    out = capsys.readouterr().out
+    assert "Submissions logged today (UTC): 2/5; Kaggle reported 2 left today for the team" in out
+    assert "18.0h plannable of 30h" in out
+    r = subprocess.run([sys.executable, str(plugin_root / "hooks" / "session_start.py")],
+                       input=json.dumps({"hook_event_name": "SessionStart", "cwd": str(ws)}),
+                       capture_output=True, text=True, timeout=60)
+    ctx = json.loads(r.stdout)["hookSpecificOutput"]["additionalContext"]
+    st = S.load(ws)
+    for line in (S.deadline_line(st), S.submissions_line(ws, st), G.quota_line(ws)):
+        assert line and line in ctx and line in out

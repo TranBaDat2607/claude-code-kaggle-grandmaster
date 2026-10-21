@@ -180,14 +180,8 @@ def import_submissions(root: str | Path, records: list[dict], window_s: float = 
     A record is a duplicate when one with the same message (or file) is logged within ``window_s``
     seconds: the hook logs a submission when the CLI returns, Kaggle dates it a little earlier.
     """
-    log = Path(root) / S.STATE_DIR / "submissions.jsonl"
-    existing = []
-    if log.is_file():
-        for line in log.read_text(encoding="utf-8").splitlines():
-            try:
-                existing.append(json.loads(line))
-            except ValueError:
-                continue
+    log = S.submissions_log(root)
+    existing = S.submission_records(root)
 
     def key(r):
         return r.get("message") or r.get("file") or ""
