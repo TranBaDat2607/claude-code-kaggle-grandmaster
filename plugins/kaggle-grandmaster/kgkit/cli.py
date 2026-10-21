@@ -564,7 +564,8 @@ def _ledger_add_preds(led, a, extra: dict) -> dict:
     folds = _col(a.folds).to_numpy() if a.folds and not holdout else None
     score, fold_scores = score_preds(m.name, y, p, folds)
     if passed is not None and abs(passed - score) > 1e-6 * max(1.0, abs(score)):
-        print(f"note: {m.name} recomputed from the predictions is {score:.6f}, not {passed}; logging the recomputed score")
+        print(f"note: {m.name} recomputed from the predictions is {score:.6f}, not {passed}; "
+              "logging the recomputed score")
     kw = dict(notes=" ".join(a.args[2:]), parent=a.parent, tags=a.tag or (), metric=m.name, fold_scores=fold_scores,
               **extra)
     r = led.log(a.args[0], score, holdout_pred=p, **kw) if holdout else led.log(a.args[0], score, oof=p, **kw)
@@ -672,7 +673,9 @@ def _ledger_compare(led, a):
                   "probabilities)")
         groups_spec = a.groups or (st.eval_groups if st else "")
         groups = _col(groups_spec).to_numpy() if groups_spec else None
-        boot = estimate(y, pa, pb, m.name, method=a.method, n_boot=a.boot, groups=groups, mask=ok)
+        rope = a.rope if a.rope is not None else (st.rope if st else None)
+        boot = estimate(y, pa, pb, m.name, method=_method(a), n_boot=a.boot, groups=groups, mask=ok, rope=rope)
+        boot = _add_seed_noise(led, boot, a.args[0], base_ref)
     v = verdict(folds_res, boot)
     print(format_comparison(new_id, base_id, v))
     lb = None
@@ -682,11 +685,31 @@ def _ledger_compare(led, a):
             print(f"  note: {c}")
         public_n = a.public_n or (st.public_lb_n if st else None)
         if public_n:
-            lb = estimate(y, pa, pb, m.name, method=a.method, n_boot=a.boot, groups=groups, mask=ok, size=public_n)
+            lb = estimate(y, pa, pb, m.name, method=_method(a), n_boot=a.boot, groups=groups, mask=ok, size=public_n)
             print(f"  public LB (n={public_n}): {describe(lb)}: LB gaps between these two under ~{2 * lb['se']:.5f} "
                   "are noise (assumes the public rows look like the evaluation rows)")
     _log_comparison(led, new_id, base_id, folds_res, boot, lb, v["decision"])
     print(f"\nrecord it: python -m kgkit ledger decide {new_id} keep|discard|inconclusive \"<why>\" --parent {base_id}")
+
+
+def _method(a) -> str:
+    """--method, where an explicit --boot asks for the bootstrap."""
+    return "bootstrap" if a.method == "auto" and a.boot else a.method
+
+
+def _add_seed_noise(led, res: dict, new_ref: str, base_ref: str) -> dict:
+    """Training noise from re-runs on file (same pipeline, other seeds): added to the resampling SE, which only
+    sees the rows. Without re-runs, a close call says so."""
+    from .compare import n_seeds, seed_variance, with_seed_noise
+
+    seed = seed_variance(led.records(), led.eval_record_key)
+    recs = [led.get(r) if not Path(r).is_dir() else {} for r in (new_ref, base_ref)]
+    if seed is not None:
+        return with_seed_noise(res, seed, n_seeds(recs[0]), n_seeds(recs[1]))
+    if not abs(res.get("z", 0)) >= 4:
+        res["caveats"].append("seed noise not included: re-run one pipeline with another seed and log it with the "
+                              "same --variant (or the same params on a clean commit) to measure it")
+    return res
 
 
 def _log_comparison(led, new_id: str, base_id: str, folds_res: dict | None, boot: dict | None, lb: dict | None,
@@ -735,13 +758,13 @@ def _ledger_noise(led, a):
     p, rid = _load_pred(led, a.args[0], len(y))
     groups_spec = a.groups or (st.eval_groups if st else "")
     groups = _col(groups_spec).to_numpy() if groups_spec else None
-    res = estimate(y, p, None, m.name, method=a.method, n_boot=a.boot, groups=groups)
+    res = estimate(y, p, None, m.name, method=_method(a), n_boot=a.boot, groups=groups)
     print(f"{rid}: {m.name} {res['value']:.5f}; {describe(res)}")
     for c in res["caveats"]:
         print(f"  note: {c}")
     public_n = a.public_n or (st.public_lb_n if st else None)
     if public_n:
-        lb = estimate(y, p, None, m.name, method=a.method, n_boot=a.boot, groups=groups, size=public_n)
+        lb = estimate(y, p, None, m.name, method=_method(a), n_boot=a.boot, groups=groups, size=public_n)
         gap = math.hypot(res["se"], lb["se"])
         print(f"public LB (n={public_n}): {describe(lb)}; a CV-LB gap within ~{2 * gap:.5f} (2 x sqrt(SE_eval^2 + "
               "SE_LB^2)) is sampling noise, not a validation problem (assumes the public rows look like the "
@@ -1325,8 +1348,11 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--groups", help="compare: FILE:COLUMN groups to resample whole (patients, sessions; default "
                                     "eval_groups)")
     s.add_argument("--boot", type=int, help="compare/noise: bootstrap resamples (default 1000, 300 above 20k rows)")
-    s.add_argument("--method", default="auto", choices=["auto", "bootstrap"],
-                   help="compare/noise: how noise is measured")
+    s.add_argument("--method", default="auto", choices=["auto", "bootstrap", "bayes", "clt"],
+                   help="compare/noise: bootstrap; bayes (Bayesian bootstrap, weighted metrics); clt (the metric's "
+                        "influence function, instant); auto: clt from 1000 units when available, else bootstrap")
+    s.add_argument("--rope", type=float, help="compare: gains within +/- this are practically equivalent "
+                                              "(default: rope in competition.json)")
     s.add_argument("--public-n", type=int, help="compare/noise: rows in the public LB (default public_lb_n): noise "
                                                 "projected to the LB's sample size")
     s.add_argument("--metric")

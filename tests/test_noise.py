@@ -32,7 +32,8 @@ def hws(tmp_path, monkeypatch):
     """holdout+lb workspace with a 58-study, 12-label holdout and three prediction files (rows shuffled)."""
     y, a, b, c = _multilabel(np.random.default_rng(3))
     ids = [f"s{i:03d}" for i in range(N)]
-    pd.DataFrame(y, columns=COLS).assign(study_id=ids)[["study_id", *COLS]].to_csv(tmp_path / "holdout.csv", index=False)
+    truth = pd.DataFrame(y, columns=COLS).assign(study_id=ids)[["study_id", *COLS]]
+    truth.to_csv(tmp_path / "holdout.csv", index=False)
     for k, p in {"a": a, "b": b, "c": c}.items():
         df = pd.DataFrame(1 / (1 + np.exp(-p)), columns=COLS).assign(study_id=ids)
         df.sample(frac=1, random_state=1).to_csv(tmp_path / f"pred_{k}.csv", index=False)
@@ -230,3 +231,113 @@ def test_kfold_compare_without_oof_still_uses_fold_scores(tmp_path, monkeypatch,
     _cli("ledger", "compare", "2")
     assert "KEEP" in capsys.readouterr().out
     assert EV.comparisons(tmp_path)[-1]["method"] == "fold-paired t"
+
+
+# ----------------------------------------------------------------------------- phase 3: fast paths, seeds, ROPE
+@pytest.mark.parametrize("metric", ["logloss", "rmse", "auc", "mean_col_auc", "accuracy", "map@5"])
+def test_influence_clt_agrees_with_the_bootstrap(metric):
+    from kgkit.compare import estimate
+
+    rng = np.random.default_rng(5)
+    n = 3000
+    if metric == "mean_col_auc":
+        y, a, b, _ = _multilabel(rng, n)
+    elif metric == "map@5":
+        y = [list(rng.choice(30, 3, replace=False)) for _ in range(n)]
+        a = [list(t[:2]) + list(rng.permutation(30)[:10]) for t in y]
+        b = [list(t[:1]) + list(rng.permutation(30)[:11]) for t in y]
+    else:
+        y = rng.integers(0, 2, n) if metric != "rmse" else rng.normal(size=n)
+        s = y + rng.normal(0, 1.0, n)
+        a, b = s, s + rng.normal(0, 0.4, n)
+        if metric == "logloss":
+            a, b = 1 / (1 + np.exp(-a)), 1 / (1 + np.exp(-b))
+        if metric == "accuracy":
+            a, b = (a > 0.5).astype(int), (b > 0.5).astype(int)
+    clt = estimate(y, a, b, metric, method="clt")
+    boot = estimate(y, a, b, metric, method="bootstrap", n_boot=300)
+    assert clt["method"] == "clt" and clt["n_boot"] == 0
+    assert np.isclose(clt["gain"], boot["gain"])
+    assert 0.75 < clt["se"] / boot["se"] < 1.33, (clt["se"], boot["se"])
+    assert estimate(y, a, b, metric)["method"] == "clt"  # auto: >= 1000 units and an influence function
+
+
+def test_clt_is_cluster_robust_and_projects():
+    from kgkit.compare import estimate
+
+    rng = np.random.default_rng(6)
+    g = np.repeat(np.arange(500), 4)
+    eff = rng.normal(0, 1, 500)[g]
+    y = (eff + rng.normal(0, 0.5, len(g)) > 0).astype(int)
+    a = eff + rng.normal(0, 1, len(g))
+    rows = estimate(y, a, None, "auc", method="clt")
+    grouped = estimate(y, a, None, "auc", method="clt", groups=g)
+    boot = estimate(y, a, None, "auc", method="bootstrap", n_boot=300, groups=g)
+    assert grouped["se"] > 1.15 * rows["se"] and 0.8 < grouped["se"] / boot["se"] < 1.25
+    lb = estimate(y, a, None, "auc", method="clt", groups=g, size=8 * len(g))
+    assert np.isclose(lb["se"], grouped["se"] / np.sqrt(8))
+
+
+def test_bayesian_bootstrap_and_fallbacks():
+    from kgkit.compare import estimate
+
+    y, a, b, _ = _multilabel(np.random.default_rng(7))
+    bayes = estimate(y, a, b, "mean_col_auc", method="bayes", n_boot=300)
+    boot = estimate(y, a, b, "mean_col_auc", method="bootstrap", n_boot=300)
+    assert bayes["method"] == "bayesian bootstrap" and bayes["n_redrawn"] == 0
+    assert 0.6 < bayes["se"] / boot["se"] < 1.6
+    rng = np.random.default_rng(8)
+    yr = rng.normal(size=200)
+    sp = estimate(yr, yr + rng.normal(size=200), None, "spearman", method="bayes", n_boot=100)
+    assert sp["method"] == "bootstrap" and any("takes no sample weights" in c for c in sp["caveats"])
+    custom = estimate(yr, yr + rng.normal(size=200), None, lambda t, p: float(np.mean(t - p)), greater_is_better=True,
+                      method="clt", n_boot=100)
+    assert custom["method"] == "bootstrap" and any("no influence function" in c for c in custom["caveats"])
+    assert estimate(yr, yr, None, "rmse", n_boot=50)["method"] == "bootstrap"  # auto below 1000 units
+
+
+def test_rope_marks_practically_equivalent_changes():
+    from kgkit.compare import estimate, verdict
+
+    rng = np.random.default_rng(9)
+    n = 5000
+    y = rng.integers(0, 2, n)
+    a = y + rng.normal(0, 1.0, n)
+    b = a + rng.normal(0, 0.05, n)  # a negligible change
+    res = estimate(y, b, a, "auc", method="clt", rope=0.005)
+    assert res["p_rope"] > 0.95 and np.isclose(res["p_rope"] + res["p_above_rope"] + res["p_below_rope"], 1)
+    v = verdict(None, res)
+    assert v["decision"] == "INCONCLUSIVE" and any("practically equivalent" in r for r in v["reasons"])
+    big = estimate(y, a + rng.normal(0, 0.01, n), a + rng.normal(0, 2.0, n), "auc", n_boot=200, rope=0.005)
+    assert big["p_above_rope"] > 0.95 and verdict(None, big)["decision"] == "KEEP"
+
+
+def test_seed_noise_is_pooled_from_re_runs_and_added():
+    from kgkit.compare import estimate, n_seeds, replica_key, seed_variance, with_seed_noise
+
+    recs = [{"cv": c, "variant": v, "tags": []} for c, v in
+            [(0.900, "a"), (0.904, "a"), (0.902, "a"), (0.910, "b"), (0.914, "b"), (0.95, None)]]
+    sv = seed_variance(recs)
+    assert sv["df"] == 3 and sv["n_variants"] == 2 and 0.001 < sv["sd"] < 0.004
+    assert replica_key({"params": {"lr": 0.1, "seed": 1}, "git_commit": "abc", "git_dirty": False}) == \
+        replica_key({"params": {"lr": 0.1, "seed": 2}, "git_commit": "abc", "git_dirty": False})
+    assert replica_key({"params": {"lr": 0.1}, "git_commit": "abc", "git_dirty": True}) is None
+    assert n_seeds({"seeds": [1, 2, 3]}) == 3 and n_seeds({}) == 1
+    y, a, b, _ = _multilabel(np.random.default_rng(10))
+    res = estimate(y, a, b, "mean_col_auc", n_boot=200)
+    total = with_seed_noise(res, sv)
+    assert total["se"] > res["se"] and total["se_rows"] == res["se"] and "seed noise" in total["method"]
+
+
+def test_cli_compare_with_seed_replicas_rope_and_clt(hws, capsys):
+    cols = ",".join(COLS)
+    _cli("ledger", "add", "a", "auto", "--pred", f"pred_a.csv:{cols}", "--variant", "A")
+    _cli("ledger", "decide", "1", "baseline")
+    _cli("ledger", "add", "b", "auto", "--pred", f"pred_b.csv:{cols}", "--variant", "A", "--boot", "100")
+    out = capsys.readouterr().out
+    assert "seed noise (sd" in out  # a and b share a variant: their spread is taken as seed noise
+    _cli("ledger", "compare", "2", "1", "--method", "clt", "--rope", "0.01")
+    out = capsys.readouterr().out
+    assert "influence-function CLT" in out and "ROPE +/-0.01" in out
+    _cli("config", "rope=0.002", "public_lb_n=600")
+    assert S.load(hws).rope == 0.002 and S.load(hws).public_lb_n == 600
