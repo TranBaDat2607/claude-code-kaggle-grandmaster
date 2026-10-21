@@ -24,8 +24,8 @@ from pathlib import Path
 
 from . import state as S
 
-# Records without a score of their own: blends with public submission files, forks of public inference
-# notebooks. They carry an LB score only and never enter the CV-LB correlation.
+# lb-only: no score of its own at all (logged with cv=None). lb-blend: blended with public submission files; in a
+# K-fold workspace such a blend has no OOF, so a CV logged for it was borrowed from a component.
 LB_ONLY_TAGS = ("lb-only", "lb-blend")
 DECIDED = ("keep", "discard", "inconclusive")
 COMPARISONS = "comparisons.jsonl"
@@ -79,13 +79,19 @@ def record_key(rec: dict, holdout: bool) -> str | None:
     return rec.get("eval_hash") if holdout else rec.get("folds_hash")
 
 
-def own_score(rec: dict) -> bool:
-    """True when the record's score is its own on the evaluation set. LB-only records have none, except that a
-    score recomputed from the record's own stored holdout predictions is its own whatever the tag says: a blend
-    with public files still has a real holdout score."""
+def own_score(rec: dict, holdout: bool = False) -> bool:
+    """True when the record's score is its own on the evaluation set.
+
+    K-fold: a record tagged ``lb-only`` or ``lb-blend`` has none (a blend with public files has no OOF, so its CV
+    was borrowed from a component). Fixed holdout (``holdout=True``): the blend itself is scored on the holdout, so
+    ``lb-blend`` only says it includes public files; only ``lb-only`` means no score of its own. A score recomputed
+    from the record's own stored holdout predictions is always its own."""
     if not isinstance(rec.get("cv"), (int, float)):
         return False
-    return not set(rec.get("tags") or ()) & set(LB_ONLY_TAGS) or bool(rec.get("holdout_path"))
+    if rec.get("holdout_path"):
+        return True
+    tags = set(rec.get("tags") or ())
+    return "lb-only" not in tags if holdout else not tags & set(LB_ONLY_TAGS)
 
 
 def decisions_on(records: list[dict], key: str | None, holdout: bool) -> int:

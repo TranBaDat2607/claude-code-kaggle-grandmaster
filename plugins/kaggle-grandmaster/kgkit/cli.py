@@ -339,8 +339,14 @@ def cmd_status(a):
     print(f"experiments logged: {len(recs)}")
     if recs:
         best = led.best(1)
+        borrowed = led.borrowed_scores()
+        tags = sorted({t for r in borrowed for t in r.get("tags") or () if t in ("lb-only", "lb-blend")})
+        left_out = (f"; {len(borrowed)} record(s) with a CV that is not their own left out ({', '.join(tags)})"
+                    if borrowed else "")
         if best:
-            print(f"best CV: {best[0]['cv']:.5f} ({best[0]['id']})")
+            print(f"best CV: {best[0]['cv']:.5f} ({best[0]['id']}{left_out})")
+        elif borrowed:
+            print(f"best CV: none of its own{left_out}")
         base = led.baseline(fallback=False)
         if base is not None:
             print(f"accepted baseline: {fmt_cv(base)} ({base['id']}, {base.get('decision')}) - new ideas are "
@@ -483,8 +489,14 @@ def cmd_ledger(a):
             raise SystemExit("'auto' recomputes the score from predictions: pass --pred FILE:COLS (or preds.npy)")
         r = led.log(a.args[0], _cv_arg(a.args[1]), notes=" ".join(a.args[2:]), parent=a.parent, tags=a.tag or (),
                     **extra)
-        print(f"logged {r['id']}" + ("" if r["cv"] is not None else " (LB-only: attach its score with "
-                                     f"`ledger lb {r['id']} <score>`; it stays out of the CV-LB correlation)"))
+        note = ""
+        if r["cv"] is None:
+            note = (f" (LB-only: attach its score with `ledger lb {r['id']} <score>`; it stays out of the CV-LB "
+                    "correlation)")
+        elif "lb-blend" in r["tags"]:
+            note = (" (lb-blend on a fixed holdout: the blend's holdout score is its own and counts)" if led._holdout()
+                    else " (lb-blend: this CV is not the blend's own; kept out of best CV and the CV-LB correlation)")
+        print(f"logged {r['id']}{note}")
     elif a.action == "compare":
         _ledger_compare(led, a)
     elif a.action == "noise":
@@ -1361,8 +1373,9 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--cv", type=float, help="import: reported CV when no --truth is given")
     s.add_argument("--source", default="external", help="import: teammate | notebook | external")
     s.add_argument("--notes")
-    s.add_argument("--tag", action="append", help="add: tag the record (lb-blend: blended with public files, "
-                                                  "kept out of the CV-LB correlation); repeatable")
+    s.add_argument("--tag", action="append", help="add: tag the record; repeatable. lb-blend: blended with public "
+                                                  "files (K-fold: its CV is borrowed, kept out of best CV and the "
+                                                  "CV-LB correlation; holdout+lb: its holdout score still counts)")
     s.add_argument("--pred", help="add: FILE:COL[,COL...] or .npy predictions on the evaluation set (holdout+lb: "
                                   "the holdout; else OOF); the score is recomputed and the predictions stored")
     s.add_argument("--variant", help="add: name shared by re-runs of one pipeline with other seeds (seed noise)")

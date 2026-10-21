@@ -74,9 +74,9 @@ LB_ONLY_TAGS = E.LB_ONLY_TAGS  # LB score only: blends with public files, forks 
 MIN_DISTINCT_CV = 4
 
 
-def has_own_cv(r: dict) -> bool:
+def has_own_cv(r: dict, holdout: bool = False) -> bool:
     """A score of its own on the evaluation set (see ``kgkit.evalset.own_score``)."""
-    return E.own_score(r)
+    return E.own_score(r, holdout)
 
 
 def score_preds(metric: str, y_true, pred, folds=None) -> tuple[float, list[float] | None]:
@@ -361,14 +361,23 @@ class Ledger:
         return True
 
     def best(self, n: int = 5, key: str = "cv") -> list[dict]:
+        holdout = self._holdout()
         recs = [r for r in self.records() if r.get(key) is not None and not r.get("recheck")
-                and (key != "cv" or has_own_cv(r))]
+                and (key != "cv" or has_own_cv(r, holdout))]
         return sorted(recs, key=lambda r: r[key], reverse=self._gib())[:n]
+
+    def borrowed_scores(self) -> list[dict]:
+        """Records with a CV that is not their own (e.g. a K-fold blend with public files logged with a component's
+        CV): left out of best CV and the CV-LB correlation."""
+        holdout = self._holdout()
+        return [r for r in self.records() if isinstance(r.get("cv"), (int, float)) and not r.get("recheck")
+                and not has_own_cv(r, holdout)]
 
     def cv_lb_pairs(self) -> list[tuple[float, float]]:
         """(CV, public LB) of submissions that have a cross-validated score of their own."""
+        holdout = self._holdout()
         return [(r["cv"], r["lb_public"]) for r in self.records()
-                if r.get("lb_public") is not None and has_own_cv(r) and not r.get("recheck")]
+                if r.get("lb_public") is not None and has_own_cv(r, holdout) and not r.get("recheck")]
 
     def cv_lb_correlation(self) -> dict | None:
         """None unless >= MIN_DISTINCT_CV submissions with distinct own CVs: with fewer, a correlation of
@@ -411,7 +420,8 @@ class Ledger:
         """One line on CV-LB agreement, or why it is not reported."""
         corr = self.cv_lb_correlation()
         pairs = self.cv_lb_pairs()
-        lb_only = sum(1 for r in self.records() if r.get("lb_public") is not None and not has_own_cv(r))
+        holdout = self._holdout()
+        lb_only = sum(1 for r in self.records() if r.get("lb_public") is not None and not has_own_cv(r, holdout))
         skipped = f"; {lb_only} LB-only submission(s) left out" if lb_only else ""
         if corr:
             line = (f"CV-LB correlation over {corr['n']} subs: pearson {corr['pearson']:.2f}, "

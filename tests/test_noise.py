@@ -89,6 +89,39 @@ def test_blend_with_its_own_holdout_predictions_counts(hws):
     assert led.cv_lb_correlation()["n"] == 4
 
 
+def test_typed_holdout_score_of_an_lb_blend_counts_in_holdout_mode(tmp_path, monkeypatch, capsys, plugin_root):
+    # #33 repro: on a fixed holdout the blend itself is scored, so lb-blend only says "uses public files"
+    S.CompetitionState(slug="demo", metric="auc", validation="holdout+lb", holdout_n=58).save(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    _cli("ledger", "add", "a", "0.905", "x")
+    _cli("ledger", "add", "b", "0.9406", "y", "--tag", "lb-blend")
+    assert "holdout score is its own and counts" in capsys.readouterr().out
+    led = Ledger(tmp_path)
+    for i, (cv, lb) in enumerate([(0.91, 0.951), (0.92, 0.955)]):
+        led.log(f"m{i}", cv)
+    for r, lb in zip(led.records(), (0.950, 0.960, 0.951, 0.955)):
+        led.attach_lb(r["id"], lb)
+    assert led.best(1)[0]["id"] == "0002_b" and led.borrowed_scores() == []
+    assert led.cv_lb_correlation()["n"] == 4 and "LB-only submission" not in led.cv_lb_summary()
+    _cli("status")
+    assert "best CV: 0.94060 (0002_b)" in capsys.readouterr().out
+    assert EV.own_score({"cv": 0.9, "tags": ["lb-blend"]}, holdout=True)
+    assert not EV.own_score({"cv": 0.9, "tags": ["lb-only"]}, holdout=True)
+
+
+def test_kfold_lb_blend_cv_stays_borrowed_and_status_says_so(tmp_path, monkeypatch, capsys):
+    S.CompetitionState(slug="demo", metric="auc").save(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    _cli("ledger", "add", "a", "0.905", "x")
+    _cli("ledger", "add", "b", "0.9406", "y", "--tag", "lb-blend")
+    assert "not the blend's own" in capsys.readouterr().out
+    led = Ledger(tmp_path)
+    assert led.best(1)[0]["id"] == "0001_a" and [r["id"] for r in led.borrowed_scores()] == ["0002_b"]
+    _cli("status")
+    assert "best CV: 0.90500 (0001_a; 1 record(s) with a CV that is not their own left out (lb-blend))" in \
+        capsys.readouterr().out
+
+
 def test_compare_in_holdout_mode_uses_the_stored_predictions(hws, capsys):
     cols = ",".join(COLS)
     _cli("ledger", "add", "a", "auto", "--pred", f"pred_a.csv:{cols}")

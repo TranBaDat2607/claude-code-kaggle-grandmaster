@@ -80,8 +80,8 @@ def gpu_line(root: Path) -> str:
     return s.strip()
 
 
-def _own_cv(r: dict) -> bool:
-    return C.EV.own_score(r)
+def _own_cv(r: dict, holdout: bool = False) -> bool:
+    return C.EV.own_score(r, holdout)
 
 
 def brief(root: Path) -> str:
@@ -106,7 +106,7 @@ def brief(root: Path) -> str:
                        "public notebooks are judged on inputs and public score.")
     recs = C.ledger_records(root)
     if recs:
-        scored = [r for r in recs if _own_cv(r) and not r.get("recheck")]
+        scored = [r for r in recs if _own_cv(r, holdout) and not r.get("recheck")]
         best = sorted(scored, key=lambda r: r["cv"], reverse=st.greater_is_better)[:1]
         with_lb = [r for r in recs if isinstance(r.get("lb_public"), (int, float))]
         s = f"Ledger: {len(recs)} experiments"
@@ -115,7 +115,7 @@ def brief(root: Path) -> str:
         if with_lb:
             bl = sorted(with_lb, key=lambda r: r["lb_public"], reverse=st.greater_is_better)[0]
             s += f"; best public LB {bl['lb_public']:.5f} ({bl['id']})"
-            pairs = [r for r in with_lb if _own_cv(r) and not r.get("recheck")]
+            pairs = [r for r in with_lb if _own_cv(r, holdout) and not r.get("recheck")]
             corr = _pearson([r["cv"] for r in pairs], [r["lb_public"] for r in pairs])
             if corr is not None and len({round(r["cv"], 12) for r in pairs}) >= 4:
                 s += (f"; CV-LB pearson {corr:.2f} over {len(pairs)} subs"
