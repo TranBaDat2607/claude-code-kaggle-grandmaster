@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import csv
-import datetime as dt
 import hashlib
 import json
 import os
@@ -21,6 +20,8 @@ from kgkit import evalset as EV  # noqa: E402  (stdlib-only module)
 from kgkit import gpu as G  # noqa: E402  (stdlib-only module)
 from kgkit import safety as SF  # noqa: E402  (stdlib-only module)
 from kgkit import state as S  # noqa: E402  (stdlib-only module)
+from kgkit.state import (server_remaining_today, submission_records, submissions_log,  # noqa: E402,F401
+                         submissions_today, today_utc)
 
 SUBMIT_RE = re.compile(r"kaggle(?:\.exe)?\s+(?:competitions|c)\s+submit\b(.*)", re.IGNORECASE | re.DOTALL)
 PUSH_RE = re.compile(r"kaggle(?:\.exe)?\s+kernels\s+(?:push|update)\b(.*)", re.IGNORECASE | re.DOTALL)
@@ -232,45 +233,6 @@ def validate_csv(sub: Path, sample: Path) -> tuple[list[str], list[str]]:
     elif ids != rids:
         warnings.append("ids are in a different order than sample_submission")
     return errors, warnings
-
-
-def submissions_log(root: Path) -> Path:
-    return root / S.STATE_DIR / "submissions.jsonl"
-
-
-def today_utc() -> str:
-    return dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%d")
-
-
-def submission_records(root: Path) -> list[dict]:
-    p = submissions_log(root)
-    if not p.is_file():
-        return []
-    out = []
-    for line in p.read_text(encoding="utf-8").splitlines():
-        try:
-            out.append(json.loads(line))
-        except json.JSONDecodeError:
-            continue
-    return out
-
-
-def submissions_today(root: Path, records: list[dict] | None = None) -> int:
-    recs = submission_records(root) if records is None else records
-    return sum(1 for r in recs if str(r.get("time_utc", "")).startswith(today_utc()) and r.get("status") != "failed")
-
-
-def server_remaining_today(root: Path, records: list[dict] | None = None) -> int | None:
-    """What Kaggle said was left today (UTC) after the latest logged submit: it counts the whole team and
-    the website, which the local log cannot see. None when that submit printed no count (an older, larger
-    count would be stale) or no submit was logged today."""
-    recs = submission_records(root) if records is None else records
-    for r in reversed(recs):
-        if not str(r.get("time_utc", "")).startswith(today_utc()) or r.get("status") == "failed":
-            continue
-        left = r.get("remaining_today")
-        return left if isinstance(left, int) else None
-    return None
 
 
 def file_sha256(path: Path, max_bytes: int = 2 * 1024 ** 3) -> str | None:

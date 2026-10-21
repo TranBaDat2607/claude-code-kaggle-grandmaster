@@ -143,6 +143,28 @@ def _load_pred(led, ref: str, n: int | None):
 
 
 # ---------------------------------------------------------------------------- commands
+def _metric_choice(name: str) -> tuple[str, bool | None]:
+    """(name to record, greater_is_better) for a metric given to init / adopt / config: a registered name or alias
+    becomes the registry name and its direction; an unknown one is kept as given, direction None (the caller
+    decides), with the closest registered metrics suggested."""
+    from . import metrics as M
+
+    try:
+        m = M.get(name)
+    except M.UnknownMetric:
+        close = M.suggest(name)
+        print(f"note: metric {name!r} is not in kgkit's registry"
+              + (f" - did you mean {' or '.join(close)}?" if close else "")
+              + " (`python -m kgkit metrics` lists names and aliases). Commands that score predictions (`ledger add "
+                "--pred`, `ledger compare`/`noise` with --truth, `blend`, `score`) need a registered name: "
+                "`python -m kgkit config metric=<name>`. For a metric kgkit lacks, score with the project's own code "
+                "and log the number: `ledger add <name> <cv>`.")
+        return name, None
+    if m.name != M._key(name):
+        print(f"metric: {name} -> {m.name} ({m.description})")
+    return m.name, m.greater_is_better
+
+
 def _state_from_args(a):
     from . import state as S
 
@@ -154,14 +176,11 @@ def _state_from_args(a):
         eval_groups=a.eval_groups or "", public_lb_n=a.public_lb_n,
     )
     if a.metric:
-        from . import metrics as M
-
-        try:
-            st.greater_is_better = M.get(a.metric).greater_is_better
-        except KeyError:
-            st.greater_is_better = not a.lower_is_better
-            print(f"note: metric {a.metric!r} is not in the registry — implement it in src/metric.py; "
-                  f"direction set to {'higher' if st.greater_is_better else 'lower'} is better")
+        st.metric, gib = _metric_choice(a.metric)
+        st.greater_is_better = (not a.lower_is_better) if gib is None else gib
+        if gib is None:
+            print(f"direction recorded: {'higher' if st.greater_is_better else 'lower'} is better"
+                  + ("" if a.lower_is_better else " (pass --lower-is-better for an error or loss)"))
     if a.lower_is_better:
         st.greater_is_better = False
     return st
@@ -280,6 +299,7 @@ def cmd_config(a):
         for k in fields:
             print(f"{k} = {json.dumps(getattr(st, k))}")
         return
+    direction_given = any(kv.partition("=")[0].strip().replace("-", "_") == "greater_is_better" for kv in a.set)
     for kv in a.set:
         k, sep, v = kv.partition("=")
         k = k.strip().replace("-", "_")
@@ -300,6 +320,11 @@ def cmd_config(a):
             val = v.strip()
         if k == "validation" and val not in S.VALIDATION_MODES:
             raise SystemExit(f"validation must be one of {', '.join(S.VALIDATION_MODES)}")
+        if k == "metric" and val:
+            val, gib = _metric_choice(val)
+            if gib is not None and not direction_given and gib != st.greater_is_better:
+                st.greater_is_better = gib
+                print(f"greater_is_better = {json.dumps(gib)} (the metric's direction)")
         setattr(st, k, val)
         print(f"{k} = {json.dumps(val)}")
     st.save(root)
@@ -321,21 +346,16 @@ def cmd_status(a):
     bits = []
     if st.code_competition:
         bits.append(f"CODE COMPETITION (runtime {st.runtime_limit_hours or '?'}h, internet {'on' if st.internet_allowed else 'OFF'})")
-    if st.deadline:
-        bits.append(f"deadline {st.deadline}")
     bits.append(f"{st.daily_submissions} subs/day, {st.final_submissions} final picks")
     if st.holdout:
         bits.append(f"validation: {st.validation}" + (f" (holdout n={st.holdout_n})" if st.holdout_n else ""))
     print("; ".join(bits))
     from . import gpu as G
 
-    q = G.cached_quota(root)
-    active = G.active_runs(root)
-    if q is not None or active:
-        avail = (f"{G.available_hours(root, q):.1f}h plannable (cached {q.get('fetched_at')}, resets "
-                 f"{q.get('refresh_at')})" if q is not None else "quota not fetched yet")
-        print(f"Kaggle GPU: {avail}" + (f"; in flight (as last seen, `gpu status` refreshes): "
-                                         f"{', '.join(G.run_label(r) for r in active)}" if active else ""))
+    # the same lines as the session brief (one implementation, so the two cannot drift)
+    print(S.deadline_line(st))
+    print(S.submissions_line(root, st))
+    print(G.quota_line(root) or "Kaggle GPU quota: not fetched yet (`python -m kgkit gpu quota` caches it)")
     print(f"experiments logged: {len(recs)}")
     if recs:
         best = led.best(1)
@@ -444,7 +464,9 @@ def cmd_metrics(a):
     from . import metrics as M
 
     for m in M.list_metrics():
-        print(f"{m.name:20s} {'max' if m.greater_is_better else 'min'}  {m.kind:8s} {m.description}")
+        aliases = M.aliases_of(m.name)
+        print(f"{m.name:20s} {'max' if m.greater_is_better else 'min'}  {m.kind:8s} {m.description}"
+              + (f"  [aliases: {', '.join(aliases)}]" if aliases else ""))
 
 
 def _cv_arg(v: str) -> float | None:
@@ -455,6 +477,11 @@ def _cv_arg(v: str) -> float | None:
         return float(v)
     except ValueError:
         raise SystemExit(f"CV must be a number or 'lb-only', got {v!r}")
+
+
+def _add_notes(a) -> str:
+    """`ledger add` notes: the words after the CV, then --notes."""
+    return " ".join([*a.args[2:], *([a.notes] if a.notes else [])])
 
 
 def cmd_ledger(a):
@@ -468,8 +495,6 @@ def cmd_ledger(a):
     elif a.action == "show":
         print(json.dumps(led.get(a.args[0]), indent=2))
     elif a.action == "lb":
-        if len(a.args) < 2:
-            raise SystemExit("usage: ledger lb <exp_id> <public_score> [private_score]")
         priv = float(a.args[2]) if len(a.args) > 2 else None
         r = led.attach_lb(a.args[0], float(a.args[1]), priv)
         print(f"{r['id']}: CV {fmt_cv(r)} -> public LB {r['lb_public']}")
@@ -477,9 +502,6 @@ def cmd_ledger(a):
         if agreement:
             print(agreement)
     elif a.action == "add":
-        if len(a.args) < 2:
-            raise SystemExit("usage: ledger add <name> <cv|auto|lb-only> [notes] [--pred FILE:COLS|preds.npy] "
-                             "[--tag lb-blend] [--variant V]")
         extra = {"variant": a.variant} if a.variant else {}
         if a.pred:
             r = _ledger_add_preds(led, a, extra)
@@ -487,7 +509,7 @@ def cmd_ledger(a):
             return
         if a.args[1].lower() == "auto":
             raise SystemExit("'auto' recomputes the score from predictions: pass --pred FILE:COLS (or preds.npy)")
-        r = led.log(a.args[0], _cv_arg(a.args[1]), notes=" ".join(a.args[2:]), parent=a.parent, tags=a.tag or (),
+        r = led.log(a.args[0], _cv_arg(a.args[1]), notes=_add_notes(a), parent=a.parent, tags=a.tag or (),
                     **extra)
         note = ""
         if r["cv"] is None:
@@ -502,8 +524,6 @@ def cmd_ledger(a):
     elif a.action == "noise":
         _ledger_noise(led, a)
     elif a.action == "decide":
-        if len(a.args) < 2:
-            raise SystemExit("usage: ledger decide <exp_id> baseline|keep|discard|inconclusive [note] [--parent ID]")
         r = led.decide(a.args[0], a.args[1], " ".join(a.args[2:]), parent=a.parent)
         print(f"{r['id']}: {r['decision']}" + (f" (vs {r['parent']})" if r.get("parent") else ""))
         if r["decision"] in ("keep", "baseline"):
@@ -528,10 +548,6 @@ def cmd_ledger(a):
                   "small gains decided on the same folds can be noise that compounded.")
     elif a.action == "import":
         import numpy as np
-
-        if len(a.args) < 2:
-            raise SystemExit("usage: ledger import <name> <oof.npy|FILE:COLUMN> [--test test.npy|FILE:COLUMN] "
-                             "[--truth FILE:COL --folds FILE:COL | --cv X] [--source teammate|notebook]")
 
         def arr(spec):
             return np.load(spec) if spec.endswith(".npy") else _col(spec).to_numpy()
@@ -560,10 +576,7 @@ def _ledger_add_preds(led, a, extra: dict) -> dict:
     metric = a.metric or (st.metric if st else None)
     if not metric:
         raise SystemExit("--metric required (no competition state found)")
-    try:
-        m = M.get(metric)
-    except KeyError as e:
-        raise SystemExit(e.args[0])
+    m = M.get(metric)
     auto = a.args[1].lower() == "auto"
     passed = None if auto else _cv_arg(a.args[1])
     if not auto and passed is None:
@@ -578,7 +591,7 @@ def _ledger_add_preds(led, a, extra: dict) -> dict:
     if passed is not None and abs(passed - score) > 1e-6 * max(1.0, abs(score)):
         print(f"note: {m.name} recomputed from the predictions is {score:.6f}, not {passed}; "
               "logging the recomputed score")
-    kw = dict(notes=" ".join(a.args[2:]), parent=a.parent, tags=a.tag or (), metric=m.name, fold_scores=fold_scores,
+    kw = dict(notes=_add_notes(a), parent=a.parent, tags=a.tag or (), metric=m.name, fold_scores=fold_scores,
               **extra)
     r = led.log(a.args[0], score, holdout_pred=p, **kw) if holdout else led.log(a.args[0], score, oof=p, **kw)
     where = "holdout" if holdout else "OOF"
@@ -614,10 +627,6 @@ def _ledger_compare(led, a):
     from . import state as S
     from .compare import compare_folds, describe, estimate, format_comparison, verdict
 
-    if len(a.args) < 1:
-        raise SystemExit("usage: ledger compare <new> [baseline] [--truth FILE:COL] [--folds FILE:COL] "
-                         "[--fold K] [--groups FILE:COL] [--public-n ROWS]   (baseline defaults to the accepted "
-                         "baseline)")
     st = S.load()
     holdout = st is not None and st.holdout
     if len(a.args) > 1:
@@ -759,8 +768,6 @@ def _ledger_noise(led, a):
     from . import state as S
     from .compare import describe, estimate
 
-    if len(a.args) < 1:
-        raise SystemExit("usage: ledger noise <exp_id> [--public-n ROWS] [--truth FILE:COLS] [--groups FILE:COL]")
     st = S.load()
     truth_spec = a.truth or (st.eval_truth if st else "")
     metric_name = a.metric or (st.metric if st else None)
@@ -891,9 +898,6 @@ def cmd_backlog(a):
 
     bl = Backlog()
     if a.action == "add":
-        if not a.args:
-            raise SystemExit('usage: backlog add "<idea>" --gain 1-5 --prob 0-1 --cost HOURS [--gpu-hours H] '
-                             '[--evidence ..] [--source ..] [--status ..] [--result ..]')
         i = bl.add(" ".join(a.args), gain=a.gain or 2, prob=a.prob if a.prob is not None else 0.3,
                    cost=a.cost if a.cost is not None else (0 if a.gpu_hours else 1), evidence=a.evidence or "",
                    source=a.source or "", first_experiment=a.first_experiment or "", gpu_hours=a.gpu_hours or 0,
@@ -905,8 +909,6 @@ def cmd_backlog(a):
     elif a.action == "list":
         print(bl.table(include_closed=a.all, n=a.n))
     elif a.action == "set":
-        if not a.args:
-            raise SystemExit("usage: backlog set <id> [--status ..] [--exp ID] [--result ..] [--screen-gain X] [--full-gain Y]")
         i = bl.set(int(a.args[0]), exp=a.exp, status=a.status, result=a.result, gain=a.gain, prob=a.prob,
                    cost=a.cost, gpu_hours=a.gpu_hours, evidence=a.evidence, screen_gain=a.screen_gain,
                    full_gain=a.full_gain)
@@ -1265,6 +1267,123 @@ def _validation_args(s) -> None:
     s.add_argument("--public-lb-n", type=int, help="rows in the public LB split (noise projected to its size)")
 
 
+class _CollectArgs(argparse.Action):
+    """Appends an action's positionals, in order, to ``a.args``: the list the command bodies read."""
+
+    def __call__(self, parser, namespace, values, option_string=None):
+        vals = values if isinstance(values, list) else [values]
+        namespace.args = [*getattr(namespace, "args", []), *(v for v in vals if v is not None)]
+
+
+def _action_parsers(p, actions: dict, options: list) -> None:
+    """`<cmd> <action> [args...]` as one subparser per action, so `<cmd> <action> --help` shows that action's
+    arguments and only the options it takes. ``actions``: {name: (help, [(metavar, nargs, help)], "flags it
+    takes")}; ``options``: [(flag, add_argument kwargs)]. The command still reads ``a.action`` and the positionals
+    as the list ``a.args``; options an action does not take keep their defaults on the namespace."""
+    common = argparse.ArgumentParser(add_help=False)
+    for flag, kw in options:
+        common.add_argument(flag, **kw)
+    defaults = vars(common.parse_args([]))
+    sub = p.add_subparsers(dest="action", required=True, metavar="ACTION")
+    fmt = {None: "<{}>", "?": "[{}]", "*": "[{} ...]", "+": "<{} ...>"}
+    for name, (text, positionals, takes) in actions.items():
+        sig = " ".join(fmt[nargs].format(m) for m, nargs, _ in positionals)
+        s = sub.add_parser(name, help=f"{sig} - {text}" if sig else text, description=text)
+        for i, (metavar, nargs, h) in enumerate(positionals):
+            s.add_argument(f"_arg{i}", metavar=metavar, help=h, action=_CollectArgs, default=argparse.SUPPRESS,
+                           **({"nargs": nargs} if nargs else {}))
+        added = {s.add_argument(flag, **kw).dest for flag, kw in options if flag in takes.split()}
+        s.set_defaults(args=[], **{k: v for k, v in defaults.items() if k not in added})
+
+
+_LEDGER_OPTIONS = [
+    ("-n", dict(type=int, default=15, help="rows to show")),
+    ("--parent", dict(help="the baseline experiment this one was compared against")),
+    ("--truth", dict(help="FILE:COL[,COL...] target, one column per label of a multilabel target (default: "
+                          "eval_truth); compare/noise: scored on the stored predictions; import/add --pred: the "
+                          "score")),
+    ("--folds", dict(help="FILE:COLUMN fold ids (per-fold paired scores; import: fold scores)")),
+    ("--fold", dict(type=int, help="restrict to one fold (1-fold screens)")),
+    ("--groups", dict(help="FILE:COLUMN groups to resample whole (patients, sessions; default eval_groups)")),
+    ("--boot", dict(type=int, help="bootstrap resamples (default 1000, 300 above 20k rows)")),
+    ("--method", dict(default="auto", choices=["auto", "bootstrap", "bayes", "clt"],
+                      help="bootstrap; bayes (Bayesian bootstrap, weighted metrics); clt (the metric's influence "
+                           "function, instant); auto: clt from 1000 units when available, else bootstrap")),
+    ("--rope", dict(type=float, help="gains within +/- this are practically equivalent (default: rope in "
+                                     "competition.json)")),
+    ("--public-n", dict(type=int, help="rows in the public LB (default public_lb_n): noise projected to the LB's "
+                                       "sample size")),
+    ("--metric", dict(help="kgkit metric name or alias (default: competition.json)")),
+    ("--test", dict(help="test predictions (.npy or FILE:COLUMN)")),
+    ("--cv", dict(type=float, help="reported CV when no --truth is given")),
+    ("--source", dict(default="external", help="teammate | notebook | external")),
+    ("--notes", dict(help="free text (add: appended to the notes words)")),
+    ("--tag", dict(action="append", help="tag the record; repeatable. lb-blend: blended with public files (K-fold: "
+                                         "its CV is borrowed, kept out of best CV and the CV-LB correlation; "
+                                         "holdout+lb: its holdout score still counts)")),
+    ("--pred", dict(help="FILE:COL[,COL...] or .npy predictions on the evaluation set (holdout+lb: the holdout; else "
+                         "OOF); the score is recomputed, the predictions stored and compared with the baseline")),
+    ("--variant", dict(help="name shared by re-runs of one pipeline with other seeds (seed noise)")),
+]
+_EXP = ("exp_id", None, "ledger id (e.g. 0012) or name")
+_PAIRED = "--truth --folds --fold --groups --boot --method --rope --public-n --metric"
+_LEDGER_ACTIONS = {
+    "list": ("recent experiments, newest last", [], "-n"),
+    "best": ("experiments by CV, best first", [], "-n"),
+    "show": ("one record as JSON", [_EXP], ""),
+    "lb": ("attach a submission's leaderboard score", [_EXP, ("public_score", None, "public LB score"),
+                                                      ("private_score", "?", "private LB score, once known")], ""),
+    "add": ("log an experiment", [("name", None, "experiment name (the id gets a number prefix)"),
+                                  ("cv|auto|lb-only", None, "its CV (holdout+lb: holdout) score; 'auto': recomputed from --pred; "
+                                               "'lb-only': no validation score (fork of public notebooks, blend "
+                                               "with public files)"),
+                                  ("notes", "*", "free text")],
+            "--parent --tag --variant --notes --pred " + _PAIRED),
+    "compare": ("paired comparison of two experiments (or artifacts/<name> folders of per-fold OOFs)",
+                [("new", None, "ledger id/name or artifacts folder"),
+                 ("baseline", "?", "default: the accepted baseline")], _PAIRED),
+    "noise": ("noise of one absolute score: bounds its CV-LB gap, not a difference between two models",
+              [_EXP], "--truth --groups --boot --method --public-n --metric"),
+    "decide": ("record the decision on a compared experiment",
+               [_EXP, ("baseline|keep|discard|inconclusive", None, "the decision"), ("note", "*", "why")],
+               "--parent"),
+    "baseline": ("the accepted baseline (the highest CV while nothing is accepted)", [], ""),
+    "lineage": ("the chain of decisions behind a record, for reverse ablation",
+                [("exp_id", "?", "default: the accepted baseline")], ""),
+    "import": ("import predictions made elsewhere (teammate, public notebook)",
+               [("name", None, "experiment name"), ("oof", None, "OOF predictions: .npy or FILE:COLUMN")],
+               "--test --truth --folds --cv --notes --source"),
+}
+
+_BACKLOG_OPTIONS = [
+    ("--gain", dict(type=float, help="expected gain 1-5 (1 = noise level, 5 = leak/new data scale)")),
+    ("--prob", dict(type=float, help="probability it works, 0-1")),
+    ("--cost", dict(type=float, help="hours of hands-on work (incl. local runs you wait for)")),
+    ("--gpu-hours", dict(type=float, help="unattended Kaggle GPU hours (ranked against the quota left before the "
+                                          "deadline, not as human time)")),
+    ("--evidence", dict()),
+    ("--source", dict(help="error-analysis | eda | forum | notebook | prior-art | brainstorm | domain")),
+    ("--first-experiment", dict()),
+    ("--status", dict(choices=["todo", "running", "done", "dropped"])),
+    ("--exp", dict(help="ledger id of an experiment testing this idea")),
+    ("--result", dict()),
+    ("--screen-gain", dict(type=float, help="gain measured by the cheap screen")),
+    ("--full-gain", dict(type=float, help="gain measured by the full CV run")),
+    ("--all", dict(action="store_true", help="include done/dropped")),
+    ("-n", dict(type=int, default=30)),
+    ("--out", dict(help="output path (default reports/backlog.md)")),
+]
+_BACKLOG_ACTIONS = {
+    "add": ("add an idea", [("idea", "+", "the idea, in words")],
+            "--gain --prob --cost --gpu-hours --evidence --source --first-experiment --status --exp --result"),
+    "list": ("open ideas, best expected value per hour first", [], "--all -n"),
+    "set": ("update an idea", [("id", None, "backlog id")],
+            "--status --exp --result --gain --prob --cost --gpu-hours --evidence --screen-gain --full-gain"),
+    "render": ("write the backlog as markdown", [], "--out"),
+    "fidelity": ("do the cheap screens predict the full-CV gains?", [], ""),
+}
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="kgkit", description="Kaggle Grandmaster toolkit")
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -1352,58 +1471,14 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("metrics", help="list metrics")
     s.set_defaults(fn=cmd_metrics)
 
-    s = sub.add_parser("ledger", help="experiment ledger")
-    s.add_argument("action", choices=["list", "best", "show", "lb", "add", "compare", "noise", "decide", "baseline",
-                                      "lineage", "import"])
-    s.add_argument("args", nargs="*")
-    s.add_argument("-n", type=int, default=15)
-    s.add_argument("--parent", help="baseline experiment this one was compared against")
-    s.add_argument("--truth", help="FILE:COL[,COL...] target (default: eval_truth; compare: paired bootstrap on the "
-                                   "stored predictions; import/add --pred: the score)")
-    s.add_argument("--folds", help="FILE:COLUMN fold ids (per-fold paired scores; import: fold scores)")
-    s.add_argument("--fold", type=int, help="compare: restrict to one fold (1-fold screens)")
-    s.add_argument("--groups", help="compare: FILE:COLUMN groups to resample whole (patients, sessions; default "
-                                    "eval_groups)")
-    s.add_argument("--boot", type=int, help="compare/noise: bootstrap resamples (default 1000, 300 above 20k rows)")
-    s.add_argument("--method", default="auto", choices=["auto", "bootstrap", "bayes", "clt"],
-                   help="compare/noise: bootstrap; bayes (Bayesian bootstrap, weighted metrics); clt (the metric's "
-                        "influence function, instant); auto: clt from 1000 units when available, else bootstrap")
-    s.add_argument("--rope", type=float, help="compare: gains within +/- this are practically equivalent "
-                                              "(default: rope in competition.json)")
-    s.add_argument("--public-n", type=int, help="compare/noise: rows in the public LB (default public_lb_n): noise "
-                                                "projected to the LB's sample size")
-    s.add_argument("--metric")
-    s.add_argument("--test", help="import: test predictions (.npy or FILE:COLUMN)")
-    s.add_argument("--cv", type=float, help="import: reported CV when no --truth is given")
-    s.add_argument("--source", default="external", help="import: teammate | notebook | external")
-    s.add_argument("--notes")
-    s.add_argument("--tag", action="append", help="add: tag the record; repeatable. lb-blend: blended with public "
-                                                  "files (K-fold: its CV is borrowed, kept out of best CV and the "
-                                                  "CV-LB correlation; holdout+lb: its holdout score still counts)")
-    s.add_argument("--pred", help="add: FILE:COL[,COL...] or .npy predictions on the evaluation set (holdout+lb: "
-                                  "the holdout; else OOF); the score is recomputed and the predictions stored")
-    s.add_argument("--variant", help="add: name shared by re-runs of one pipeline with other seeds (seed noise)")
+    s = sub.add_parser("ledger", help="experiment ledger",
+                       epilog="`kgkit ledger <action> --help` shows one action's arguments and options")
+    _action_parsers(s, _LEDGER_ACTIONS, _LEDGER_OPTIONS)
     s.set_defaults(fn=cmd_ledger)
 
-    s = sub.add_parser("backlog", help="ranked idea backlog")
-    s.add_argument("action", choices=["add", "list", "set", "render", "fidelity"])
-    s.add_argument("args", nargs="*")
-    s.add_argument("--gain", type=float, help="expected gain 1-5 (1 = noise level, 5 = leak/new data scale)")
-    s.add_argument("--prob", type=float, help="probability it works, 0-1")
-    s.add_argument("--cost", type=float, help="hours of hands-on work (incl. local runs you wait for)")
-    s.add_argument("--gpu-hours", type=float, help="unattended Kaggle GPU hours (ranked against the quota left "
-                                                   "before the deadline, not as human time)")
-    s.add_argument("--evidence")
-    s.add_argument("--source", help="error-analysis | eda | forum | notebook | prior-art | brainstorm | domain")
-    s.add_argument("--first-experiment")
-    s.add_argument("--status", choices=["todo", "running", "done", "dropped"])
-    s.add_argument("--exp", help="ledger id of an experiment testing this idea")
-    s.add_argument("--result")
-    s.add_argument("--screen-gain", type=float, help="gain measured by the cheap screen")
-    s.add_argument("--full-gain", type=float, help="gain measured by the full CV run")
-    s.add_argument("--all", action="store_true", help="list: include done/dropped")
-    s.add_argument("-n", type=int, default=30)
-    s.add_argument("--out", help="render: output path (default reports/backlog.md)")
+    s = sub.add_parser("backlog", help="ranked idea backlog",
+                       epilog="`kgkit backlog <action> --help` shows one action's arguments and options")
+    _action_parsers(s, _BACKLOG_ACTIONS, _BACKLOG_OPTIONS)
     s.set_defaults(fn=cmd_backlog)
 
     s = sub.add_parser("features", help="automated feature search")
@@ -1596,7 +1671,14 @@ def main(argv=None):
         except (AttributeError, ValueError):
             pass
     args = build_parser().parse_args(argv)
-    args.fn(args)
+    try:
+        args.fn(args)
+    except KeyError as e:
+        from . import metrics as M
+
+        if isinstance(e, M.UnknownMetric):  # any command given a wrong metric name: the hint, no traceback
+            raise SystemExit(e.args[0])
+        raise
 
 
 if __name__ == "__main__":

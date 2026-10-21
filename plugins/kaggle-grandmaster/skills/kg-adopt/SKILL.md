@@ -31,6 +31,8 @@ does around the existing work: submission logging and the daily budget, the sess
    `data/folds.csv` will be asked for); `--eval-truth` names the holdout labels (one column per label of a
    multilabel target) so candidates logged with `ledger add <name> auto --pred <FILE>:<cols>` are compared
    paired on them. Add `--public-lb-n <rows>` when the public split's size is known.
+   `--metric` takes a name or alias from `python -m kgkit metrics` (e.g. `macro_auc` is recorded as
+   `mean_col_auc`); an unknown name is kept as given, with the closest registered metrics suggested.
    Fields can be changed later with `python -m kgkit config key=value`.
    It writes only `.kaggle-gm/competition.json` (no folders, `.gitignore` or `CLAUDE.md`) and imports
    the history from `kaggle competitions submissions <slug>` into `.kaggle-gm/submissions.jsonl`, so
@@ -57,6 +59,6 @@ does around the existing work: submission logging and the daily budget, the sess
    `${CLAUDE_PLUGIN_ROOT}/templates/CLAUDE.competition.md`, adapted to the repo's real paths.
 6. **Commit** `.kaggle-gm/` (it is the experiment memory) once the user agrees.
 
-Finish with `python -m kgkit status`: facts, submissions today vs the daily limit, the accepted
-baseline and best public LB, what could not be imported, and the next step (usually `/kg-ideas` or
+Finish with `python -m kgkit status`: facts, days left and phase, submissions today vs the daily limit,
+the accepted baseline and best public LB, what could not be imported, and the next step (usually `/kg-ideas` or
 `/kg-experiment`). Do not submit or push kernels from this command.
