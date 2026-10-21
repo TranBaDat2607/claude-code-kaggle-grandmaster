@@ -81,7 +81,7 @@ def gpu_line(root: Path) -> str:
 
 
 def _own_cv(r: dict) -> bool:
-    return isinstance(r.get("cv"), (int, float)) and not set(r.get("tags") or ()) & {"lb-only", "lb-blend"}
+    return C.EV.own_score(r)
 
 
 def brief(root: Path) -> str:

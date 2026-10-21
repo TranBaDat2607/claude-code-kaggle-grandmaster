@@ -917,7 +917,7 @@ def import_ledger(root: Path, out: Path, report: dict, kernel: str, version: int
         src_art = out / "artifacts" / old_id
         if src_art.is_dir():
             _merge_tree(src_art, root / "artifacts" / new_id)
-        for k in ("oof_path", "test_path"):
+        for k in ("oof_path", "test_path", "holdout_path"):
             if rec.get(k):
                 rec[k] = rec[k].replace(f"artifacts/{old_id}/", f"artifacts/{new_id}/")
         if rec.get("submission"):

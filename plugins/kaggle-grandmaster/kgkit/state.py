@@ -39,7 +39,13 @@ class CompetitionState:
     # e.g. a small expert-labelled set) plus the public LB; there are no OOF files to blend or compare.
     validation: str = "kfold"
     holdout_n: int | None = None
-    holdout_se: float | None = None   # standard error of the holdout score, if measured (bootstrap)
+    holdout_se: float | None = None   # legacy, hand-set: SE of one absolute holdout score, never of a difference
+    # The evaluation set comparisons are measured on (kgkit.evalset): its labels as FILE:COL[,COL...] (holdout
+    # labels, or the training target in kfold mode) and the unit rows are resampled by (patient, study, query).
+    eval_truth: str = ""
+    eval_groups: str = ""
+    public_lb_n: int | None = None    # rows in the public LB split: projects noise to the LB's sample size
+    rope: float | None = None         # gains within +/- rope are "practically equivalent"
     notes: list[str] = field(default_factory=list)
 
     @property

@@ -55,17 +55,68 @@ def _col(spec: str):
     return _read(path)[col]
 
 
+def _cols(spec: str) -> tuple[str, list[str]]:
+    """'file.csv:a,b' -> ('file.csv', ['a', 'b'])."""
+    from .evalset import split_spec
+
+    try:
+        return split_spec(spec)
+    except ValueError as e:
+        raise SystemExit(str(e))
+
+
+def _frame(spec: str):
+    """'file.csv:a,b' -> the file and its requested columns, checked to exist."""
+    path, cols = _cols(spec)
+    df = _read(path)
+    missing = [c for c in cols if c not in df.columns]
+    if missing:
+        raise SystemExit(f"{path} has no column(s) {', '.join(missing)}")
+    return df, cols
+
+
 def _truth(spec: str):
-    """Training target as a numpy array; string/bool labels become sorted-class codes (the template encoding)."""
+    """Training target as a numpy array; string/bool labels become sorted-class codes (the template encoding).
+    Several columns (``FILE:a,b,c``, e.g. one per label of a multilabel target) give a 2-D numeric array."""
     import numpy as np
     import pandas as pd
 
-    y_raw = _col(spec)
+    df, cols = _frame(spec)
+    if len(cols) > 1:
+        bad = [c for c in cols if not pd.api.types.is_numeric_dtype(df[c]) or df[c].isna().any()]
+        if bad:
+            raise SystemExit(f"multi-column truth must be numeric without gaps (0/1 per label); not: {', '.join(bad)}")
+        return df[cols].to_numpy()
+    y_raw = df[cols[0]]
     if pd.api.types.is_numeric_dtype(y_raw) and not pd.api.types.is_bool_dtype(y_raw):
         return y_raw.to_numpy()
     classes, y = np.unique(y_raw.astype(str).to_numpy(), return_inverse=True)
     print("encoded truth labels: " + ", ".join(f"{c}={i}" for i, c in enumerate(classes)))
     return y
+
+
+def _preds(spec: str, truth_spec: str | None = None, id_col: str = ""):
+    """Predictions as a numpy array: a ``.npy`` file, or ``FILE:COL[,COL...]``. When the prediction file and the
+    truth file both have ``id_col``, rows are put in the truth's order; otherwise they must already match it."""
+    import numpy as np
+
+    if spec.endswith(".npy"):
+        return np.load(spec)
+    df, cols = _frame(spec)
+    if truth_spec and id_col and id_col in df.columns:
+        tdf, _ = _frame(truth_spec)
+        if id_col in tdf.columns:
+            import pandas as pd
+
+            ids = pd.Index(df[id_col])
+            if not ids.is_unique:
+                raise SystemExit(f"{spec}: {id_col} has duplicate values, cannot align to the truth rows")
+            pos = ids.get_indexer(tdf[id_col])
+            if (pos < 0).any():
+                raise SystemExit(f"{spec}: {(pos < 0).sum()} {id_col} value(s) of the truth file have no prediction")
+            df = df.iloc[pos]
+    out = df[cols].to_numpy()
+    return out[:, 0] if len(cols) == 1 else out
 
 
 def _load_pred(led, ref: str, n: int | None):
@@ -85,7 +136,10 @@ def _load_pred(led, ref: str, n: int | None):
                 out = np.full((n, *p.shape[1:]), np.nan)
             out[idx] = p
         return out, ref
-    return led.load_oof(ref), led.get(ref)["id"]
+    try:
+        return led.load_eval_pred(ref), led.get(ref)["id"]
+    except ValueError as e:
+        raise SystemExit(str(e))
 
 
 # ---------------------------------------------------------------------------- commands
@@ -96,7 +150,8 @@ def _state_from_args(a):
         slug=a.slug, metric=a.metric or "", task=a.task or "", target=a.target or "", id_col=a.id_col or "",
         code_competition=a.code_competition, runtime_limit_hours=a.runtime_hours, internet_allowed=not a.no_internet,
         daily_submissions=a.daily_subs, deadline=a.deadline or "",
-        validation=a.validation, holdout_n=a.holdout_n,
+        validation=a.validation, holdout_n=a.holdout_n, eval_truth=a.eval_truth or "",
+        eval_groups=a.eval_groups or "", public_lb_n=a.public_lb_n,
     )
     if a.metric:
         from . import metrics as M
@@ -232,12 +287,12 @@ def cmd_config(a):
             raise SystemExit(f"expected KEY=VALUE with KEY one of {', '.join(fields)}; got {kv!r}")
         cur = getattr(st, k)
         if v.strip().lower() in ("", "none", "null"):
-            val = None if k in ("runtime_limit_hours", "holdout_n", "holdout_se") else ""
+            val = None if k in ("runtime_limit_hours", "holdout_n", "holdout_se", "public_lb_n", "rope") else ""
         elif isinstance(cur, bool):
             val = v.strip().lower() in ("1", "true", "yes", "on")
-        elif k in ("daily_submissions", "final_submissions", "holdout_n"):
+        elif k in ("daily_submissions", "final_submissions", "holdout_n", "public_lb_n"):
             val = int(v)
-        elif k in ("runtime_limit_hours", "holdout_se"):
+        elif k in ("runtime_limit_hours", "holdout_se", "rope"):
             val = float(v)
         elif isinstance(cur, list):
             val = [x.strip() for x in v.split(",") if x.strip()]
@@ -366,9 +421,13 @@ def cmd_adv(a):
 
 def cmd_score(a):
     from . import metrics as M
+    from . import state as S
 
-    y, p = _col(a.truth), _col(a.pred)
-    print(f"{a.metric}: {M.score(a.metric, y.to_numpy(), p.to_numpy()):.6f}")
+    st = S.load()
+    tdf, tcols = _frame(a.truth)
+    y = tdf[tcols].to_numpy()
+    p = _preds(a.pred, a.truth, st.id_col if st else "")
+    print(f"{a.metric}: {M.score(a.metric, y[:, 0] if len(tcols) == 1 else y, p):.6f}")
 
 
 def cmd_metrics(a):
@@ -409,8 +468,16 @@ def cmd_ledger(a):
             print(agreement)
     elif a.action == "add":
         if len(a.args) < 2:
-            raise SystemExit("usage: ledger add <name> <cv|lb-only> [notes] [--tag lb-blend]")
-        r = led.log(a.args[0], _cv_arg(a.args[1]), notes=" ".join(a.args[2:]), parent=a.parent, tags=a.tag or ())
+            raise SystemExit("usage: ledger add <name> <cv|auto|lb-only> [notes] [--pred FILE:COLS|preds.npy] "
+                             "[--tag lb-blend] [--variant V]")
+        extra = {"variant": a.variant} if a.variant else {}
+        if a.pred:
+            _ledger_add_preds(led, a, extra)
+            return
+        if a.args[1].lower() == "auto":
+            raise SystemExit("'auto' recomputes the score from predictions: pass --pred FILE:COLS (or preds.npy)")
+        r = led.log(a.args[0], _cv_arg(a.args[1]), notes=" ".join(a.args[2:]), parent=a.parent, tags=a.tag or (),
+                    **extra)
         print(f"logged {r['id']}" + ("" if r["cv"] is not None else " (LB-only: attach its score with "
                                      f"`ledger lb {r['id']} <score>`; it stays out of the CV-LB correlation)"))
     elif a.action == "compare":
@@ -458,6 +525,48 @@ def cmd_ledger(a):
               + f" [{a.source}]")
 
 
+def _ledger_add_preds(led, a, extra: dict) -> dict:
+    """`ledger add <name> <cv|auto> --pred ...`: the score is recomputed from predictions on the evaluation set,
+    and they are stored (holdout predictions in a holdout+lb workspace, OOF otherwise) so that later records can
+    be compared with this one, paired, on the same rows."""
+    from . import metrics as M
+    from . import state as S
+    from .experiment import score_preds
+
+    st = S.load()
+    truth_spec = a.truth or (st.eval_truth if st else "")
+    if not truth_spec:
+        raise SystemExit("--pred needs the evaluation labels: `kgkit config eval_truth=FILE:COL[,COL...]` (one column "
+                         "per label of a multilabel target) or --truth FILE:COLS")
+    metric = a.metric or (st.metric if st else None)
+    if not metric:
+        raise SystemExit("--metric required (no competition state found)")
+    try:
+        m = M.get(metric)
+    except KeyError as e:
+        raise SystemExit(e.args[0])
+    auto = a.args[1].lower() == "auto"
+    passed = None if auto else _cv_arg(a.args[1])
+    if not auto and passed is None:
+        raise SystemExit("an LB-only record has no score to recompute: drop --pred, or pass 'auto'")
+    y = _truth(truth_spec)
+    p = _preds(a.pred, truth_spec, st.id_col if st else "")
+    if len(p) != len(y):
+        raise SystemExit(f"{a.pred} has {len(p)} rows but {truth_spec} has {len(y)}")
+    holdout = st is not None and st.holdout
+    folds = _col(a.folds).to_numpy() if a.folds and not holdout else None
+    score, fold_scores = score_preds(m.name, y, p, folds)
+    if passed is not None and abs(passed - score) > 1e-6 * max(1.0, abs(score)):
+        print(f"note: {m.name} recomputed from the predictions is {score:.6f}, not {passed}; logging the recomputed score")
+    kw = dict(notes=" ".join(a.args[2:]), parent=a.parent, tags=a.tag or (), metric=m.name, fold_scores=fold_scores,
+              **extra)
+    r = led.log(a.args[0], score, holdout_pred=p, **kw) if holdout else led.log(a.args[0], score, oof=p, **kw)
+    where = "holdout" if holdout else "OOF"
+    blend = "; tagged lb-blend, its own holdout score still counts" if holdout and "lb-blend" in (a.tag or ()) else ""
+    print(f"logged {r['id']}: {where} {m.name} {score:.5f} recomputed from {len(y)} rows, predictions stored{blend}")
+    return r
+
+
 def _ledger_compare(led, a):
     import numpy as np
 
@@ -469,6 +578,7 @@ def _ledger_compare(led, a):
         raise SystemExit("usage: ledger compare <new> [baseline] [--truth FILE:COL] [--folds FILE:COL] "
                          "[--fold K] [--groups FILE:COL]   (baseline defaults to the accepted baseline)")
     st = S.load()
+    holdout = st is not None and st.holdout
     if len(a.args) > 1:
         base_ref = a.args[1]
     else:
@@ -480,14 +590,22 @@ def _ledger_compare(led, a):
         if not Path(ref).is_dir():
             led.get(ref)  # fail early on a typo
     if not Path(a.args[0]).is_dir() and not Path(base_ref).is_dir():
-        ha, hb = led.get(a.args[0]).get("folds_hash"), led.get(base_ref).get("folds_hash")
+        ha, hb = (led.eval_record_key(led.get(r)) for r in (a.args[0], base_ref))
         if led.get(a.args[0])["id"] == led.get(base_ref)["id"]:
             raise SystemExit(f"{base_ref} is both the new experiment and the baseline (no accepted baseline yet? "
                              "pass the baseline explicitly, or `ledger decide <id> baseline`)")
         if ha and hb and ha != hb:
-            print("WARNING: the two experiments used different fold splits - the per-fold pairing is not valid; "
+            print("WARNING: the two experiments were scored on different holdout labels (eval_hash differs) - they "
+                  "are not comparable" if holdout else
+                  "WARNING: the two experiments used different fold splits - the per-fold pairing is not valid; "
                   "only the OOF bootstrap (with --truth) is meaningful")
-    y = _truth(a.truth) if a.truth else None
+    if holdout and (a.folds or a.fold is not None):
+        raise SystemExit("holdout+lb workspace: there are no folds; the holdout predictions are compared as a whole")
+    truth_spec = a.truth or (st.eval_truth if st else "")
+    if holdout and not truth_spec:
+        raise SystemExit("holdout+lb: set the holdout labels (`kgkit config eval_truth=FILE:COL[,COL...]`) or pass "
+                         "--truth; the stored holdout predictions are then compared paired")
+    y = _truth(truth_spec) if truth_spec else None
     n = len(y) if y is not None else None
     metric_name = a.metric or (st.metric if st else None)
     gib = st.greater_is_better if st else True
@@ -522,7 +640,8 @@ def _ledger_compare(led, a):
         if m.kind == "label":
             print(f"note: {m.name} scores labels; OOFs are compared as stored (decode them first if they are "
                   "probabilities)")
-        groups = _col(a.groups).to_numpy() if a.groups else None
+        groups_spec = a.groups or (st.eval_groups if st else "")
+        groups = _col(groups_spec).to_numpy() if groups_spec else None
         boot = paired_bootstrap(y, pa, pb, m.name, n_boot=a.boot, groups=groups, mask=ok)
     print(format_comparison(new_id, base_id, verdict(folds_res, boot)))
     print(f"\nrecord it: python -m kgkit ledger decide {new_id} keep|discard|inconclusive \"<why>\" --parent {base_id}")
@@ -997,6 +1116,10 @@ def _validation_args(s) -> None:
                    help="kfold: OOF over data/folds.csv; holdout+lb: a fixed labelled holdout plus the public LB "
                         "(no OOF files, e.g. a small expert-labelled set in a code competition)")
     s.add_argument("--holdout-n", type=int, help="holdout+lb: rows in the labelled holdout")
+    s.add_argument("--eval-truth", help="FILE:COL[,COL...] labels of the evaluation set (holdout+lb: the holdout "
+                                        "labels, one column per label of a multilabel target)")
+    s.add_argument("--eval-groups", help="FILE:COL unit resampled whole when measuring noise (patient, study, query)")
+    s.add_argument("--public-lb-n", type=int, help="rows in the public LB split (noise projected to its size)")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -1079,8 +1202,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     s = sub.add_parser("score", help="score predictions")
     s.add_argument("metric")
-    s.add_argument("truth", help="FILE:COLUMN")
-    s.add_argument("pred", help="FILE:COLUMN")
+    s.add_argument("truth", help="FILE:COLUMN[,COLUMN...]")
+    s.add_argument("pred", help="FILE:COLUMN[,COLUMN...] or .npy")
     s.set_defaults(fn=cmd_score)
 
     s = sub.add_parser("metrics", help="list metrics")
@@ -1092,10 +1215,12 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("args", nargs="*")
     s.add_argument("-n", type=int, default=15)
     s.add_argument("--parent", help="baseline experiment this one was compared against")
-    s.add_argument("--truth", help="FILE:COLUMN training target (compare: paired bootstrap on OOFs; import: CV)")
+    s.add_argument("--truth", help="FILE:COL[,COL...] target (default: eval_truth; compare: paired bootstrap on the "
+                                   "stored predictions; import/add --pred: the score)")
     s.add_argument("--folds", help="FILE:COLUMN fold ids (per-fold paired scores; import: fold scores)")
     s.add_argument("--fold", type=int, help="compare: restrict to one fold (1-fold screens)")
-    s.add_argument("--groups", help="compare: FILE:COLUMN groups to resample whole (patients, sessions)")
+    s.add_argument("--groups", help="compare: FILE:COLUMN groups to resample whole (patients, sessions; default "
+                                    "eval_groups)")
     s.add_argument("--boot", type=int, default=300, help="compare: bootstrap resamples")
     s.add_argument("--metric")
     s.add_argument("--test", help="import: test predictions (.npy or FILE:COLUMN)")
@@ -1104,6 +1229,9 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--notes")
     s.add_argument("--tag", action="append", help="add: tag the record (lb-blend: blended with public files, "
                                                   "kept out of the CV-LB correlation); repeatable")
+    s.add_argument("--pred", help="add: FILE:COL[,COL...] or .npy predictions on the evaluation set (holdout+lb: "
+                                  "the holdout; else OOF); the score is recomputed and the predictions stored")
+    s.add_argument("--variant", help="add: name shared by re-runs of one pipeline with other seeds (seed noise)")
     s.set_defaults(fn=cmd_ledger)
 
     s = sub.add_parser("backlog", help="ranked idea backlog")

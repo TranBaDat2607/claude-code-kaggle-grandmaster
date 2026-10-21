@@ -37,6 +37,7 @@ from typing import Any, Sequence
 
 import numpy as np
 
+from . import evalset as E
 from . import state as S
 
 
@@ -69,14 +70,27 @@ def _git_info(cwd: Path) -> dict[str, Any]:
 
 DECISIONS = ("baseline", "keep", "discard", "inconclusive")
 ACCEPTED = ("baseline", "keep")
-# Records without a cross-validated score of their own: blends with public submission files, forks of
-# public inference notebooks. They carry an LB score only and never enter the CV-LB correlation.
-LB_ONLY_TAGS = ("lb-only", "lb-blend")
+LB_ONLY_TAGS = E.LB_ONLY_TAGS  # LB score only: blends with public files, forks of public inference notebooks
 MIN_DISTINCT_CV = 4
 
 
 def has_own_cv(r: dict) -> bool:
-    return isinstance(r.get("cv"), (int, float)) and not set(r.get("tags") or ()) & set(LB_ONLY_TAGS)
+    """A score of its own on the evaluation set (see ``kgkit.evalset.own_score``)."""
+    return E.own_score(r)
+
+
+def score_preds(metric: str, y_true, pred, folds=None) -> tuple[float, list[float] | None]:
+    """(score, per-fold scores) of predictions on the evaluation set, with the registered metric."""
+    from . import metrics as M
+
+    m = M.get(metric)
+    y, pred = np.asarray(y_true), np.asarray(pred)
+    if len(y) != len(pred):
+        raise ValueError(f"predictions have {len(pred)} rows but the target has {len(y)}")
+    if folds is None:
+        return m(y, pred), None
+    f = np.asarray(folds)
+    return m(y[f >= 0], pred[f >= 0]), [m(y[f == k], pred[f == k]) for k in sorted(set(f[f >= 0].tolist()))]
 
 
 def fmt_cv(r: dict, digits: int = 5) -> str:
@@ -161,12 +175,15 @@ class Ledger:
         folds: Sequence[int] | None = None,
         parent: str | None = None,
         decision: str | None = None,
+        holdout_pred: np.ndarray | None = None,
         **extra,
     ) -> dict:
         """Append an experiment. ``folds_hash`` fingerprints the CV split (from ``folds`` if given,
         else the bytes of ``data/folds.csv``) so blends can detect members trained on different splits.
         ``cv=None`` logs an LB-only record (tagged ``lb-only``): something that cannot be cross-validated,
-        such as a blend with public submission files."""
+        such as a blend with public submission files. ``holdout_pred`` stores per-row predictions on the
+        workspace's labelled holdout (``eval_truth``), fingerprinted by ``eval_hash``, so two records can be
+        compared paired on it."""
         recs = self.records()
         if cv is None and not set(tags) & set(LB_ONLY_TAGS):
             tags = [*tags, "lb-only"]
@@ -197,15 +214,16 @@ class Ledger:
             **_git_info(self.root),
             **_jsonable(extra),
         }
-        if oof is not None or test_pred is not None:
+        arrays = {"oof": oof, "test": test_pred, "holdout": holdout_pred}
+        if any(v is not None for v in arrays.values()):
             d = self.artifacts / exp_id
             d.mkdir(parents=True, exist_ok=True)
-            if oof is not None:
-                np.save(d / "oof.npy", np.asarray(oof))
-                rec["oof_path"] = str((d / "oof.npy").relative_to(self.root)).replace("\\", "/")
-            if test_pred is not None:
-                np.save(d / "test.npy", np.asarray(test_pred))
-                rec["test_path"] = str((d / "test.npy").relative_to(self.root)).replace("\\", "/")
+            for kind, arr in arrays.items():
+                if arr is not None:
+                    np.save(d / f"{kind}.npy", np.asarray(arr))
+                    rec[f"{kind}_path"] = str((d / f"{kind}.npy").relative_to(self.root)).replace("\\", "/")
+        if holdout_pred is not None:
+            rec["eval_hash"] = E.spec_hash(self.root, st.eval_truth) if st is not None and st.eval_truth else None
         self.dir.mkdir(parents=True, exist_ok=True)
         with self.path.open("a", encoding="utf-8") as f:
             f.write(json.dumps(rec) + "\n")
@@ -222,11 +240,7 @@ class Ledger:
     def _folds_hash(self, folds: Sequence[int] | None) -> str | None:
         if folds is not None:
             return hashlib.sha1(np.asarray(folds, dtype=np.int64).tobytes()).hexdigest()[:12]
-        f = Path(os.environ.get("KG_FOLDS_FILE") or "data/folds.csv")  # recheck runs use a re-drawn split
-        f = f if f.is_absolute() else self.root / f
-        if f.is_file():
-            return hashlib.sha1(f.read_bytes()).hexdigest()[:12]
-        return None
+        return E.folds_file_hash(self.root)  # recheck runs use a re-drawn split (KG_FOLDS_FILE)
 
     def update(self, exp_id: str, **fields) -> dict:
         recs = self.records()
@@ -260,7 +274,7 @@ class Ledger:
 
     def import_preds(self, name: str, oof: np.ndarray, test_pred: np.ndarray | None, y_true=None,
                      folds: Sequence[int] | None = None, metric: str | None = None, cv: float | None = None,
-                     notes: str = "", source: str = "external") -> dict:
+                     notes: str = "", source: str = "external", **extra) -> dict:
         """Log predictions produced elsewhere (a teammate, a reproduced public notebook) so they can be
         compared and blended like any other experiment. With ``y_true`` and ``folds`` the CV and fold
         scores are recomputed here, on *our* folds, instead of trusting a reported number."""
@@ -269,22 +283,13 @@ class Ledger:
         fold_scores = None
         oof = np.asarray(oof)
         if y_true is not None and metric:
-            from . import metrics as M
-
-            m = M.get(metric)
-            y = np.asarray(y_true)
-            if len(y) != len(oof):
-                raise ValueError(f"OOF has {len(oof)} rows but the target has {len(y)}")
-            if folds is not None:
-                f = np.asarray(folds)
-                fold_scores = [m(y[f == k], oof[f == k]) for k in sorted(set(f[f >= 0].tolist()))]
-                cv = m(y[f >= 0], oof[f >= 0])
-            else:
-                cv = m(y, oof)
+            if len(y_true) != len(oof):
+                raise ValueError(f"OOF has {len(oof)} rows but the target has {len(y_true)}")
+            cv, fold_scores = score_preds(metric, y_true, oof, folds)
         if cv is None:
             raise ValueError("pass cv, or y_true (+ folds) so it can be computed")
         return self.log(name, cv, fold_scores=fold_scores, oof=oof, test_pred=test_pred, notes=notes,
-                        tags=[source], metric=metric, model=source)
+                        tags=[source], metric=metric, model=source, **extra)
 
     # ------------------------------------------------------------------ read
     def baseline(self, fallback: bool = True) -> dict | None:
@@ -316,11 +321,35 @@ class Ledger:
     def decisions_on_folds(self, folds_hash: str | None) -> int:
         """How many keep/discard decisions were taken on one fold split — every decision spends a
         little of the split's ability to give unbiased estimates."""
-        return sum(1 for r in self.records() if r.get("decision") in ("keep", "discard", "inconclusive")
-                   and r.get("folds_hash") == folds_hash)
+        return E.decisions_on(self.records(), folds_hash, holdout=False)
+
+    def _holdout(self) -> bool:
+        st = S.load(self.root)
+        return st is not None and st.holdout
+
+    def eval_key(self) -> str | None:
+        """Fingerprint of the evaluation set scores are compared on (the holdout labels or the fold split)."""
+        return E.current_key(self.root, S.load(self.root))
+
+    def decisions_on_evalset(self) -> int:
+        return E.decisions_on(self.records(), self.eval_key(), self._holdout())
 
     def load_oof(self, exp_id: str) -> np.ndarray:
         return np.load(self.root / self.get(exp_id)["oof_path"])
+
+    def load_eval_pred(self, exp_id: str) -> np.ndarray:
+        """Per-row predictions on the evaluation set: the holdout predictions in a ``holdout+lb`` workspace, the
+        OOF otherwise."""
+        r = self.get(exp_id)
+        key = "holdout_path" if self._holdout() else "oof_path"
+        if not r.get(key):
+            what = "holdout predictions" if key == "holdout_path" else "OOF predictions"
+            raise ValueError(f"{r['id']} has no {what} on file: log them with "
+                             f"`kgkit ledger add <name> auto --pred FILE:COLS` (or `ledger import`)")
+        return np.load(self.root / r[key])
+
+    def eval_record_key(self, r: dict) -> str | None:
+        return E.record_key(r, self._holdout())
 
     def load_test(self, exp_id: str) -> np.ndarray:
         return np.load(self.root / self.get(exp_id)["test_path"])
