@@ -88,7 +88,8 @@ To *study* a public notebook, prefer `python -m kgkit kernels pull <owner>/<slug
 notebook with its metadata into `ref/<slug>/`, writes a `REVIEW.md` (CV scheme, model families, printed
 scores, external inputs, with `--check-access` testing that attached datasets are reachable) and a
 local script with Kaggle paths mapped to the workspace. `kgkit kernels top` lists the competition's top
-notebooks.
+notebooks with their public score on record: `kaggle kernels list` has no score field, so kgkit reads
+`best_public_score` from Kaggle's search API (`--no-score` skips it).
 
 ## Discussions
 

@@ -42,8 +42,9 @@ submissions and experiments, leaving your layout alone.
     the gain survive a re-drawn fold split?)
   - modelling: `features search` (thousands of generated features, batch-screened), `blend` with hill
     climbing, multi-level and residual stacking, `--prune`
-  - prior art: `pages` (the competition's pages as text), `kernels top / pull` (notebook review with the
-    lines to read before running it + local script), `discussions sync / top / search / solutions / read`
+  - prior art: `pages` (the competition's pages as text), `kernels top / pull` (public scores on record,
+    titles' self-reported scores checked; notebook review with the lines to read before running it + local
+    script), `discussions sync / top / search / solutions / read`
     (forum, live via the Kaggle CLI)
   - `gpu` for quota-aware training on Kaggle GPUs and TPUs (reservations released when runs finish,
     any kernel folder pushable with a cap, busy-session and input checks); `datasets pull` (per-file

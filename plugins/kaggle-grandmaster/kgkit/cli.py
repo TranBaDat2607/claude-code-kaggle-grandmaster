@@ -990,20 +990,24 @@ def cmd_kernels(a):
         if not slug:
             raise SystemExit("--competition required (no competition state found)")
         rows = K.top(slug, a.n, a.sort_by)
-        table = "\n".join(f"{r.get('totalVotes', ''):>5}  {r.get('ref', '')}  |  {r.get('title', '')}  "
-                          f"({r.get('lastRunTime', '')})" for r in rows)
+        err = None if a.no_score else K.add_public_scores(rows, slug)
+        if a.sort_by == "scoreDescending" and not a.no_score:
+            rows = K.sort_by_score(rows, st.greater_is_better if st and st.slug == slug else True)
         print(SF.UNTRUSTED_NOTE)
-        print(SF.wrap(table, "kaggle-cli", competition=slug, view="top kernels"))
+        print(SF.wrap(K.format_top(rows, scores=not a.no_score), "kaggle-cli", competition=slug, view="top kernels"))
+        if not a.no_score:
+            print(K.TOP_LEGEND + (f"\npublic scores unknown: {err}" if err else ""))
         print("\nnext: python -m kgkit kernels pull <ref>   (review + local script under ref/)")
     elif a.action in ("pull", "review"):
         if not a.ref:
             raise SystemExit(f"usage: kernels {a.action} <owner/slug>")
         holdout = bool(st and st.holdout)
         if a.action == "pull":
-            rev = K.pull(a.ref, a.dest, slug, check_access=a.check_access, holdout=holdout)
+            rev = K.pull(a.ref, a.dest, slug, check_access=a.check_access, holdout=holdout,
+                         score_lookup=not a.no_score)
         else:
             rev = K.analyse_dir(Path(a.dest) / a.ref.split("/")[-1], a.ref, slug, check_access=a.check_access,
-                                holdout=holdout)
+                                holdout=holdout, score_lookup=not a.no_score)
         print((Path(rev["dir"]) / "REVIEW.md").read_text(encoding="utf-8"))
         print(f"local script: {rev['dir']}/{a.ref.split('/')[-1]}_local.py")
 
@@ -1474,9 +1478,11 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("ref", nargs="?", help="owner/slug (pull, review)")
     s.add_argument("--competition", help="default: competition.json slug")
     s.add_argument("-n", type=int, default=20)
-    s.add_argument("--sort-by", default="voteCount", help="voteCount | scoreDescending | dateRun | hotness")
+    s.add_argument("--sort-by", default="voteCount",
+                   help="voteCount | scoreDescending (best public score on record first) | dateRun | hotness")
     s.add_argument("--dest", default="ref")
     s.add_argument("--check-access", action="store_true", help="check attached datasets are accessible")
+    s.add_argument("--no-score", action="store_true", help="skip the public-score lookup (Kaggle search API)")
     s.set_defaults(fn=cmd_kernels)
 
     s = sub.add_parser("blend", help="blend ledger experiments")

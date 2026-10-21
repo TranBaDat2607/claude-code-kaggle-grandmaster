@@ -1,6 +1,6 @@
-"""Regression tests for the UAT reports #15-#26: backlog costs, GPU reservations and TPU support, pushes of
-any kernel folder, holdout+LB workspaces, LB-only ledger records, dataset downloads, the GBDT template and
-the credential guard."""
+"""Regression tests for the UAT reports #15-#26 and #30: backlog costs, GPU reservations and TPU support, pushes
+of any kernel folder, holdout+LB workspaces, LB-only ledger records, dataset downloads, the GBDT template, the
+credential guard and public notebooks' scores on record."""
 
 import ast
 import datetime as dt
@@ -508,3 +508,165 @@ def test_compound_command_checks_every_push(plugin_root, tmp_path):
     assert "me/r6 v5 logged" in r.stdout
     run = G.runs(tmp_path)[-1]
     assert run["kernel"] == "me/r6" and run["version"] == 5 and run["hours"] == 0.75
+
+
+# ----------------------------------------------------------------------------- #30 public scores of notebooks
+from types import SimpleNamespace  # noqa: E402
+
+from kgkit import kaggle_search as KS  # noqa: E402
+
+
+def _doc(ref, score):
+    owner, slug = ref.split("/")
+    return SimpleNamespace(owner_user=SimpleNamespace(user_name=owner), owner_organization=None, slug=slug,
+                           kernel_document=SimpleNamespace(best_public_score=score))
+
+
+def test_search_lookup_matches_owner_and_slug():
+    calls = []
+
+    def search(query, pages, by_votes):
+        calls.append((query, pages, by_votes))
+        if query == "my comp":
+            return [_doc("A/one", 0.958), _doc("x/two", 0.99), _doc("c/none", 0.0)]  # x/two: same slug, other owner
+        if query == "Two title":
+            return [_doc("b/two", 0.957)]
+        raise RuntimeError("HTTP 429")
+
+    items = [("a/one", "One"), ("b/two", "Two title"), ("c/none", "None"), ("d/gone", "Gone")]
+    res = KS.lookup(search, items, "my comp", 2)
+    assert res["found"] == {"a/one": 0.958, "b/two": 0.957, "c/none": None}  # 0.0: none on record
+    assert res["error"] == "RuntimeError: HTTP 429"  # d/gone failed: absent, i.e. unknown
+    assert calls == [("my comp", 2, True), ("Two title", 1, False), ("Gone", 1, False)]
+    assert KS.lookup(search, items, "my comp", budget=0)["found"].keys() == {"a/one", "c/none"}
+
+
+def _fake_kaggle_sdk(root):
+    """Just enough of the kaggle and kagglesdk packages for the search child, with a chatty authenticate()."""
+    files = {
+        "kaggle/__init__.py": "",
+        "kaggle/api/__init__.py": "",
+        "kaggle/api/kaggle_api_extended.py": (
+            "from types import SimpleNamespace as N\n"
+            "DOCS = {'demo comp': [('a', 'one', 0.958)], 'Two': [('b', 'two', 0.0)]}\n"
+            "class Client:\n"
+            "    def __enter__(self): return self\n"
+            "    def __exit__(self, *a): return False\n"
+            "    def list_entities(self, r):\n"
+            "        docs = [N(owner_user=N(user_name=o), slug=s, kernel_document=N(best_public_score=v))\n"
+            "                for o, s, v in DOCS.get(r.filters.query, [])]\n"
+            "        return N(documents=docs, next_page_token='')\n"
+            "    @property\n"
+            "    def search(self): return N(search_api_client=self)\n"
+            "class KaggleApi:\n"
+            "    def authenticate(self): print('Warning: outdated API version')\n"
+            "    def build_kaggle_client(self): return Client()\n"),
+        "kagglesdk/__init__.py": "",
+        "kagglesdk/search/__init__.py": "",
+        "kagglesdk/search/types/__init__.py": "",
+        "kagglesdk/search/types/search_api_service.py": (
+            "class ListEntitiesFilters: pass\nclass ListEntitiesRequest: pass\n"),
+        "kagglesdk/search/types/search_enums.py": (
+            "class DocumentType: KERNEL = 5\n"
+            "class ListSearchContentOrderBy: LIST_SEARCH_CONTENT_ORDER_BY_VOTES = 6\n"),
+    }
+    for rel, text in files.items():
+        (root / rel).parent.mkdir(parents=True, exist_ok=True)
+        (root / rel).write_text(text)
+
+
+def test_public_scores_runs_the_search_child(tmp_path, monkeypatch):
+    _fake_kaggle_sdk(tmp_path)
+    monkeypatch.setenv("PYTHONPATH", str(tmp_path))
+    monkeypatch.setenv("VERBOSE", "1")
+    monkeypatch.setattr(K, "_search_python", lambda: sys.executable)
+    found, err = K.public_scores([("a/one", "One"), ("b/two", "Two"), ("c/gone", "Gone")], "demo-comp")
+    assert found == {"a/one": 0.958, "b/two": None} and err is None  # the SDK's print did not break the JSON line
+
+    seen = {}
+
+    def fake_run(cmd, **kw):
+        seen.update(kw)
+        return subprocess.CompletedProcess(cmd, 1, "", "Traceback ...\nModuleNotFoundError: no module kgkit\n")
+    monkeypatch.setattr(K.subprocess, "run", fake_run)
+    assert K.public_scores([("a/b", "t")]) == ({}, "the search lookup failed: ModuleNotFoundError: no module kgkit")
+    assert "VERBOSE" not in seen["env"] and seen["encoding"] == "utf-8"
+
+    def timeout(cmd, **kw):
+        raise subprocess.TimeoutExpired(cmd, kw["timeout"])
+    monkeypatch.setattr(K.subprocess, "run", timeout)
+    assert K.public_scores([("a/b", "t")]) == ({}, "the search lookup timed out")
+
+
+def test_search_child_reports_missing_sdk(tmp_path):
+    (tmp_path / "kaggle").mkdir()
+    (tmp_path / "kaggle" / "__init__.py").write_text("raise ImportError('no kaggle here')\n")
+    env = {**os.environ, "PYTHONPATH": str(tmp_path)}
+    r = subprocess.run([sys.executable, "-m", "kgkit.kaggle_search"], input='{"items": [["a/b", "t"]]}',
+                       capture_output=True, encoding="utf-8", cwd=str(Path(K.__file__).resolve().parents[1]), env=env)
+    res = json.loads(r.stdout)
+    assert r.returncode == 0 and res["found"] == {} and "no Kaggle search API" in res["error"]
+
+
+@pytest.mark.parametrize("title,score,flag", [
+    ("RSNA Knee | CoAtNet + R6 + 2.5D MIL | LB 0.958", 0.958, None),
+    ("This is best public dataset new version =0.9586", 0.958, None),        # rounded to the LB's 3 decimals
+    ("≈0.957 | Latest dataset| score in one click!", 0.956, None),          # one unit of rounding
+    ("RSNA Knee public pipeline slice (measured 0.943, not 0.946)", 0.943, None),
+    ("RSNA Knee  CoAtNet + ConvNeXt MIL | LB 0.950", 0.95, None),            # the float drops the trailing 0
+    ("R6 2.5D v1.25 blend", 0.957, None),                                    # version numbers are not claims
+    ("RSNA Knee 0.956+:Micro-Boost & Clinical Tri-Reader", 0.95, "title claims 0.956; best public score on record 0.95"),
+    ("RSNA Knee Fast Parent 0.957 v2", 0.939, "title claims 0.957; best public score on record 0.939"),
+    ("[LB 0.94650] EV Purchase GM Ensemble", 0.94638, "title claims 0.94650; best public score on record 0.94638"),
+    ("Magic LB 0.960", None, "title claims 0.960; no public score on record"),
+    ("Plain title", None, None),
+])
+def test_title_claims_checked_against_the_record(title, score, flag):
+    assert K.claim_note(title, score) == flag
+
+
+def test_top_table_scores_flags_and_order(monkeypatch):
+    rows = [{"ref": "a/x", "title": "LB 0.960", "totalVotes": "500", "lastRunTime": "t"},
+            {"ref": "b/y", "title": "Y", "totalVotes": "3", "lastRunTime": "t"},
+            {"ref": "c/z", "title": "Z", "totalVotes": "40", "lastRunTime": "t"},
+            {"ref": "d/w", "title": "W", "totalVotes": "1", "lastRunTime": "t"},
+            {"ref": "e/v", "title": "V", "totalVotes": "9", "lastRunTime": "t"}]
+    monkeypatch.setattr(K, "public_scores", lambda items, comp: (
+        {"a/x": None, "b/y": 0.957, "c/z": 0.958, "e/v": 0.957}, None))
+    assert K.add_public_scores(rows, "comp") is None
+    best = [r["ref"] for r in K.sort_by_score(rows)]
+    assert best == ["c/z", "b/y", "e/v", "a/x", "d/w"]  # ties keep Kaggle's order; none on record, then unknown
+    assert [r["ref"] for r in K.sort_by_score(rows, greater_is_better=False)][:3] == ["b/y", "e/v", "c/z"]
+    lines = K.format_top(K.sort_by_score(rows)).splitlines()
+    assert lines[0].startswith("score  votes  ref")
+    assert lines[1].startswith("0.958     40  c/z")
+    assert lines[4].startswith("    -    500  a/x") and lines[4].endswith("<- title claims 0.960; no public score on record")
+    assert lines[5].startswith("    ?      1  d/w")
+    assert K.format_top(rows, scores=False).splitlines()[1].startswith("  500  a/x")
+
+
+def test_review_shows_the_public_score_on_record(tmp_path, monkeypatch):
+    d = tmp_path / "nb"
+    d.mkdir()
+    (d / "nb.py").write_text("import lightgbm as lgb\n")
+    (d / "kernel-metadata.json").write_text(json.dumps({"title": "Best LB 0.960"}))
+    monkeypatch.setattr(K, "public_scores", lambda items, comp: pytest.fail("looked up without score_lookup"))
+    K.analyse_dir(d, "a/nb", "comp")
+    assert "Public score: unknown (not looked up)" in (d / "REVIEW.md").read_text()
+
+    monkeypatch.setattr(K, "public_scores", lambda items, comp: ({"a/nb": 0.957}, None))
+    rev = K.analyse_dir(d, "a/nb", "comp", score_lookup=True)
+    text = (d / "REVIEW.md").read_text()
+    assert rev["public"]["score"] == 0.957 and "Public score on record: 0.957" in text
+    assert "**Title check**: title claims 0.960; best public score on record 0.957" in text
+    assert "kaggle.com/code/a/nb" in text
+
+    monkeypatch.setattr(K, "public_scores", lambda items, comp: ({"a/nb": None}, None))
+    K.analyse_dir(d, "a/nb", "comp", score_lookup=True)
+    text = (d / "REVIEW.md").read_text()
+    assert "Public score on record: none" in text and "no public score on record" in text
+
+    monkeypatch.setattr(K, "public_scores", lambda items, comp: ({}, "the search lookup timed out"))
+    K.analyse_dir(d, "a/nb", "comp", score_lookup=True)
+    text = (d / "REVIEW.md").read_text()
+    assert "Public score: unknown (the search lookup timed out)" in text and "Title check" not in text

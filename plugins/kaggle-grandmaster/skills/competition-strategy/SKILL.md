@@ -46,7 +46,8 @@ A shake-up-heavy competition is fine for a team medal hedge and wrong for a plan
 
 ## 4. Joining late (last 3-5 weeks)
 
-1. Recon in a day: `kgkit kernels top`, then `kgkit kernels pull` the 3-5 best notebooks; read
+1. Recon in a day: `kgkit kernels top --sort-by scoreDescending`, then `kgkit kernels pull` the 3-5 best
+   notebooks by the public score on record (not by the score in their titles, which is self-reported); read
    `REVIEW.md` for their CV schemes and external inputs; skim discussion threads by votes.
 2. Build your folds first. Re-run the best public pipelines on *your* folds and import their OOFs
    (`kgkit ledger import --source notebook`); public LB numbers are not your CV.
