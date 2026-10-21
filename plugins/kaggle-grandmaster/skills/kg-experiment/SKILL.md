@@ -25,9 +25,12 @@ Follow the experiment protocol (`grandmaster-playbook` §2):
 4. Log to the ledger with OOF/test preds and `parent=<baseline id>` (notes: hypothesis).
 5. Decide with numbers:
    `python -m kgkit ledger compare <new> --truth data/train.csv:<target> --folds data/folds.csv:fold`
-   (add `--groups data/train.csv:<group>` when rows are clustered). KEEP / DISCARD / INCONCLUSIVE:
-   INCONCLUSIVE → second seed (or keep only if it adds no complexity/runtime); a flagged huge jump →
-   `validation-auditor` before accepting.
+   (add `--groups data/train.csv:<group>` when rows are clustered). In a `holdout+lb` workspace log the
+   run with its holdout predictions instead, `python -m kgkit ledger add <new> auto --pred <FILE>:<cols>`:
+   the score is recomputed and compared, paired, with the accepted baseline right away (no folds).
+   KEEP / DISCARD / INCONCLUSIVE: INCONCLUSIVE → second seed, logged with the same `--variant` so its
+   spread counts as seed noise (or keep only if it adds no complexity/runtime); `--rope <gain>` marks
+   changes too small to matter; a flagged huge jump → `validation-auditor` before accepting.
 6. Record it: `python -m kgkit ledger decide <new> keep|discard|inconclusive "<gain, folds k/K>"
    --parent <baseline>`; KEEP makes it the new baseline. `python -m kgkit backlog set <n> --status done
    --exp <new> --result "<decision + gain>"`. Add one line of learning to the CLAUDE.md notes. Commit code.
