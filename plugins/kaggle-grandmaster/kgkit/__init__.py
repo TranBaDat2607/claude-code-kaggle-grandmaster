@@ -19,7 +19,8 @@ parts of a competition that are easy to get subtly wrong:
                         projected to the public LB's size), seed noise from re-runs, ROPE
 - ``kgkit.evalset``     the evaluation set's fingerprint and the paired noise measured on it
 - ``kgkit.backlog``     the ranked idea backlog and screen-vs-full fidelity
-- ``kgkit.kernels``     study and reproduce public notebooks
+- ``kgkit.kernels``     study and reproduce public notebooks; their public score on record and title claims
+- ``kgkit.kaggle_search`` notebooks' best public scores from Kaggle's search API (run in a child process)
 - ``kgkit.discussions`` competition forums (topics, search, write-ups, threads), live or from Meta Kaggle
 - ``kgkit.datasets``    dataset download with a per-file fallback when the whole-dataset archive 404s
 - ``kgkit.pages``       a competition's own pages (evaluation, rules, data description) as text

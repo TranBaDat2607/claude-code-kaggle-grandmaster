@@ -1,7 +1,13 @@
 """Study and reproduce public notebooks — the fastest prior art in any competition.
 
     python -m kgkit kernels top -n 20                 # top-voted notebooks of this competition
+    python -m kgkit kernels top --sort-by scoreDescending   # best public score first
     python -m kgkit kernels pull <owner>/<slug>       # pull + review + local script, under ref/<slug>/
+
+``top`` and the review show each notebook's public score as Kaggle records it: the best public score across its
+versions, from Kaggle's search API (``kgkit.kaggle_search``; ``kaggle kernels list`` has no score field). A score
+in a title is the author's claim; one that Kaggle's record does not back up is flagged. ``--no-score`` skips
+the lookup.
 
 ``pull`` writes ``ref/<slug>/REVIEW.md``: the CV scheme the notebook uses, libraries / model
 families, scores printed in its outputs, every input it reads and which of those are *not* the
@@ -29,6 +35,7 @@ import json
 import re
 import shutil
 import subprocess
+import sys
 import tokenize
 from pathlib import Path
 
@@ -77,6 +84,11 @@ RISK_PATTERNS = {
     "runs dynamically built code": r"(?<![.\w])(?:exec|eval|compile)\s*\(|\b__import__\s*\(|\bmarshal\.loads\s*\(",
     "deletes folders": r"\bshutil\.rmtree\s*\(|\bos\.removedirs\s*\(",
 }
+# A score claimed in a title: 0.958, LB 0.9586, =0.957+ (not version numbers such as v1.25 or 2.5D).
+CLAIM_RX = re.compile(r"(?<![\d.])(0\.\d{2,}|[1-9]\d*\.\d{3,})(?!\d)")
+SEARCH_GRACE = 20  # seconds the search child gets beyond its budget (start, imports, authentication)
+TOP_LEGEND = ("score: Kaggle's best public score across the notebook's versions (search API); '-' none on record, "
+              "'?' not found. A score in a title is the author's claim.")
 
 
 def _kaggle(args: list[str], timeout: int = 300) -> subprocess.CompletedProcess:
@@ -97,6 +109,111 @@ def top(slug: str, n: int = 20, sort_by: str = "voteCount") -> list[dict]:
 def parse_list_csv(text: str) -> list[dict]:
     lines = [l for l in text.splitlines() if l.strip() and not l.startswith("Warning")]
     return list(csv.DictReader(io.StringIO("\n".join(lines))))
+
+
+def _search_python() -> str:
+    """The interpreter the kaggle CLI runs on (its script's #! line), so the search child finds kagglesdk when the
+    CLI lives in another environment (pipx); this interpreter otherwise (and for Windows .exe launchers)."""
+    exe = shutil.which("kaggle")
+    try:
+        first = Path(exe).read_bytes()[:512].split(b"\n", 1)[0] if exe else b""
+    except OSError:
+        first = b""
+    if first.startswith(b"#!"):
+        cand = first[2:].decode("utf-8", "replace").strip()
+        if cand and Path(cand).is_file():
+            return cand
+    return sys.executable
+
+
+def public_scores(items: list[tuple[str, str]], competition: str | None = None) -> tuple[dict, str | None]:
+    """Kaggle's best public score of each ``(ref, title)``, via the search API in a child process
+    (``kgkit.kaggle_search``). Returns ``({ref: score, or None when none is on record}, error)``: refs the lookup
+    did not find are absent; ``error`` says why scores are unknown. Never raises."""
+    items = [(str(r), str(t or "")) for r, t in items]
+    # Several notebooks: one query on the competition's name first finds most of them (a title query each otherwise).
+    req = {"items": items, "bulk_query": (competition or "").replace("-", " ") if len(items) > 1 else "",
+           "bulk_pages": min(4, 1 + len(items) // 50), "budget": min(90, 15 + len(items))}
+    try:
+        r = subprocess.run([_search_python(), "-m", "kgkit.kaggle_search"], input=json.dumps(req),
+                           capture_output=True, encoding="utf-8", errors="replace",
+                           timeout=req["budget"] + SEARCH_GRACE, cwd=str(Path(__file__).resolve().parents[1]),
+                           env=safety.kaggle_env())
+    except subprocess.TimeoutExpired:
+        return {}, "the search lookup timed out"
+    except OSError as e:
+        return {}, f"the search lookup did not start: {e}"
+    try:
+        res = json.loads((r.stdout or "").strip().splitlines()[-1])
+        found = {ref: (float(s) if s is not None else None) for ref, s in dict(res.get("found") or {}).items()}
+        error = res.get("error")
+    except (ValueError, IndexError, TypeError, AttributeError):
+        tail = (r.stderr or r.stdout or "").strip().splitlines()
+        return {}, "the search lookup failed" + (f": {safety.clean(tail[-1])[:300]}" if tail
+                                                 else f" (exit {r.returncode})")
+    return found, (safety.clean(error)[:300] if error and len(found) < len(items) else None)
+
+
+def _decimals(num: str) -> int:
+    return len(num.split(".", 1)[1]) if "." in num else 0
+
+
+def fmt_score(score: float) -> str:
+    return format(score, ".10g")
+
+
+def title_claims(title: str) -> list[str]:
+    return list(dict.fromkeys(CLAIM_RX.findall(title or "")))
+
+
+def claim_note(title: str, score: float | None) -> str | None:
+    """A warning when the title claims a score Kaggle's record does not back up, for a notebook the lookup found
+    (``score`` None: none on record). A claim agrees with the record to one unit of the coarser precision of the
+    two; the record's precision counts as at least 3 decimals (the float drops trailing zeros: 0.95 for 0.950)."""
+    claims = title_claims(title)
+    if not claims:
+        return None
+    if score is None:
+        return f"title claims {' / '.join(claims)}; no public score on record"
+    sd = _decimals(fmt_score(score))
+    if any(abs(float(c) - score) <= 10 ** -min(_decimals(c), max(3, sd)) + 1e-9 for c in claims):
+        return None
+    return f"title claims {' / '.join(claims)}; best public score on record {fmt_score(score)}"
+
+
+def add_public_scores(rows: list[dict], competition: str | None) -> str | None:
+    """Sets ``row["score"]`` (None: none on record; key absent: unknown) and ``row["claim"]`` on rows of ``top``.
+    Returns the lookup's error, if any."""
+    found, error = public_scores([(r.get("ref", ""), r.get("title", "")) for r in rows], competition)
+    for r in rows:
+        if r.get("ref") in found:
+            r["score"] = found[r["ref"]]
+            r["claim"] = claim_note(r.get("title", ""), r["score"])
+    return error
+
+
+def sort_by_score(rows: list[dict], greater_is_better: bool = True) -> list[dict]:
+    """Best public score first (stable), then notebooks with none on record, then those not looked up/found."""
+    def key(r):
+        if "score" not in r:
+            return (2, 0.0)
+        if r["score"] is None:
+            return (1, 0.0)
+        return (0, -r["score"] if greater_is_better else r["score"])
+    return sorted(rows, key=key)
+
+
+def format_top(rows: list[dict], scores: bool = True) -> str:
+    """The ``top`` table: public score on record (``scores``), votes, ref, title, last run; a flag on title claims
+    the record does not back up."""
+    cells = [("?" if "score" not in r else "-" if r["score"] is None else fmt_score(r["score"])) for r in rows]
+    w = max([5] + [len(c) for c in cells])
+    lines = [(f"{'score':>{w}}  " if scores else "") + "votes  ref  |  title  (last run)"]
+    for c, r in zip(cells, rows):
+        lines.append((f"{c:>{w}}  " if scores else "") + f"{r.get('totalVotes', ''):>5}  {r.get('ref', '')}  |  "
+                     f"{r.get('title', '')}  ({r.get('lastRunTime', '')})"
+                     + (f"  <- {r['claim']}" if r.get("claim") else ""))
+    return "\n".join(lines)
 
 
 def code_cells(path: Path) -> list[str]:
@@ -222,8 +339,7 @@ def format_review(ref: str, rev: dict, holdout: bool = False) -> str:
     else:
         lines.append("- No shell, network, credential-path, dynamic-code or folder-deleting lines found (a pattern scan, "
                      "not a guarantee).")
-    lines += ["", f"Public score: the Kaggle API does not expose it; read it on https://www.kaggle.com/code/{ref} "
-              "(the version that produced the submission).", "", "## Checklist", "",
+    lines += ["", public_line(ref, rev.get("public")), "", "## Checklist", "",
               "- [ ] Read the lines above before running the local script",
               "- [ ] External inputs are public, allowed by the rules, and accessible (private/deleted ones block reproduction)"]
     if infer:
@@ -243,19 +359,36 @@ def format_review(ref: str, rev: dict, holdout: bool = False) -> str:
     return "\n".join(lines) + "\n"
 
 
+def public_line(ref: str, pub: dict | None) -> str:
+    """REVIEW.md's public-score line: Kaggle's record (``rev["public"]``), or where to read it."""
+    url = f"https://www.kaggle.com/code/{ref}"
+    pub = pub or {}
+    if pub.get("found") and pub.get("score") is not None:
+        line = (f"Public score on record: {fmt_score(pub['score'])} (Kaggle's best public score across its versions; "
+                f"the version you fork may score differently: {url}).")
+    elif pub.get("found"):
+        line = f"Public score on record: none (no version of it has a public score): {url}."
+    else:
+        why = pub.get("error") or ("not found by the search lookup" if pub else "not looked up")
+        line = f"Public score: unknown ({why}); read it on {url} (the version that produced the submission)."
+    if pub.get("claim"):
+        line += f"\n\n**Title check**: {pub['claim']}. The title's number is the author's claim, not Kaggle's record."
+    return line
+
+
 def pull(ref: str, dest_root: str | Path = "ref", competition: str | None = None, check_access: bool = False,
-         holdout: bool = False) -> dict:
+         holdout: bool = False, score_lookup: bool = False) -> dict:
     slug = ref.split("/")[-1]
     dest = Path(dest_root) / slug
     dest.mkdir(parents=True, exist_ok=True)
     r = _kaggle(["kernels", "pull", ref, "-p", str(dest), "-m"])
     if r.returncode != 0:
         raise SystemExit(f"kaggle kernels pull failed: {r.stderr.strip() or r.stdout.strip()}")
-    return analyse_dir(dest, ref, competition, check_access, holdout)
+    return analyse_dir(dest, ref, competition, check_access, holdout, score_lookup)
 
 
 def analyse_dir(dest: Path, ref: str, competition: str | None = None, check_access: bool = False,
-                holdout: bool = False) -> dict:
+                holdout: bool = False, score_lookup: bool = False) -> dict:
     slug = ref.split("/")[-1]
     meta_p = dest / "kernel-metadata.json"
     meta = json.loads(meta_p.read_text(encoding="utf-8")) if meta_p.is_file() else {}
@@ -270,6 +403,12 @@ def analyse_dir(dest: Path, ref: str, competition: str | None = None, check_acce
     if check_access:
         rev["inaccessible"] = [d for d in rev["external"]["datasets"]
                                if _kaggle(["datasets", "files", d], timeout=60).returncode != 0]
+    if score_lookup:
+        title = str(meta.get("title") or "")
+        found, error = public_scores([(ref, title)], competition)
+        score = found.get(ref)
+        rev["public"] = {"found": ref in found, "score": score, "error": error,
+                         "claim": claim_note(title, score) if ref in found else None}
     text = format_review(ref, rev, holdout)
     if rev.get("inaccessible"):
         text += ("\n**Inaccessible datasets** (private or deleted):\n"
