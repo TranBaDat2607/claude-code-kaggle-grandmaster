@@ -21,8 +21,11 @@ Weight public LB by its statistical reliability:
 - Public set small (a few thousand rows or fewer), noisy metric, or adversarial AUC high → trust CV.
 - Public set large and drawn like private, CV-LB correlation strong → LB and CV mostly agree; use both.
 - Private is a *future* period → favour robustness (simpler, ensemble-heavy, less feature drift).
-Formalise: bootstrap the metric at the public set size (see `cv-lb-debugging`) to get the LB noise
-std; treat LB gaps below ~2 std as ties broken by CV.
+Formalise per pair of candidates: `python -m kgkit ledger compare <a> <b> --public-n <rows>` gives the
+paired SE of their gap at the public-set size (both are scored on the same public rows, so this is far
+smaller than the SE of one score); treat LB gaps below ~2 paired SE as ties broken by CV. The SE of one
+absolute score (`kgkit ledger noise <id> --public-n <rows>`) is for judging one candidate's CV-LB gap,
+not the gap between two candidates. See `cv-lb-debugging`.
 
 ## 3. Default selection policy
 

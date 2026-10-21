@@ -46,8 +46,11 @@ patient-visit. Look for them (hash images, cluster texts, group by obvious IDs) 
 2. `kgkit status` shows CV-LB Pearson/Spearman. Good: strong positive monotone relation.
 3. If they disagree, diagnose (see `cv-lb-debugging`): leakage in CV, distribution shift,
    a tiny/noisy public split, different preprocessing at inference, or a metric bug.
-4. Public LB noise: with n public samples, the binomial std of accuracy ≈ sqrt(p(1-p)/n).
-   E.g. accuracy 0.9 on 2,000 rows → ±0.0067; differences below that are noise.
+4. Noise has to match the question. The SE of one score (e.g. binomial sqrt(p(1-p)/n), valid for
+   accuracy only) bounds a single score's CV-LB gap. The gap *between two models* scored on the same
+   rows has a paired SE that is usually several times smaller, because the shared difficulty of the rows
+   cancels. Measure it on stored predictions, with the exact metric:
+   `kgkit ledger compare <a> <b> [--public-n <rows>]` (paired bootstrap; groups resampled whole).
 
 ## 4. Adversarial validation
 

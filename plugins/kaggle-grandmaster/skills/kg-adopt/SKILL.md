@@ -26,8 +26,11 @@ does around the existing work: submission logging and the daily budget, the sess
 2. **Workspace.** Run from the repo root:
    `python -m kgkit adopt <slug> --metric <m> --task <t> --target <col> --id-col <id>
    [--code-competition --runtime-hours H --no-internet] [--daily-subs N] --deadline <YYYY-MM-DD>
-   [--validation holdout+lb --holdout-n <rows>]`. Use `holdout+lb` when the repo decides on a fixed
-   labelled holdout plus the public LB rather than K-fold OOF (no `data/folds.csv` will be asked for).
+   [--validation holdout+lb --holdout-n <rows> --eval-truth <FILE>:<label cols>]`. Use `holdout+lb` when
+   the repo decides on a fixed labelled holdout plus the public LB rather than K-fold OOF (no
+   `data/folds.csv` will be asked for); `--eval-truth` names the holdout labels (one column per label of a
+   multilabel target) so candidates logged with `ledger add <name> auto --pred <FILE>:<cols>` are compared
+   paired on them. Add `--public-lb-n <rows>` when the public split's size is known.
    Fields can be changed later with `python -m kgkit config key=value`.
    It writes only `.kaggle-gm/competition.json` (no folders, `.gitignore` or `CLAUDE.md`) and imports
    the history from `kaggle competitions submissions <slug>` into `.kaggle-gm/submissions.jsonl`, so

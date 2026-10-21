@@ -63,7 +63,9 @@ backlog top idea → hypothesis → smallest change that tests it → run on fro
   amount = real, even if far below the fold std) and/or a paired bootstrap on the OOFs:
   `kgkit ledger compare <new> --truth data/train.csv:<target> --folds data/folds.csv:fold`
   (add `--groups` when rows are clustered, e.g. images per patient). Positive but within ~2 paired
-  standard errors = INCONCLUSIVE: run a second seed, or keep it only if it costs nothing.
+  standard errors = INCONCLUSIVE: run a second seed, or keep it only if it costs nothing. The same holds
+  on a fixed holdout and on the public LB: two models scored on the same rows differ far less by chance
+  than one score varies, so never judge a gap by the SE of one score (or a binomial formula of n).
   A gain several times the fold std is a leak suspect: run `validation-auditor` first.
 - **The backlog is data.** `kgkit backlog add/list/set` keeps ideas ranked by
   (gain × probability) / cost with their evidence and outcome, so failed ideas are not retried.

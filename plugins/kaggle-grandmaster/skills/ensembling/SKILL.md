@@ -103,7 +103,9 @@ without OOF predictions. Such a blend cannot be cross-validated:
 - Log it as **LB-only**: `kgkit ledger add <name> lb-only "<members and weights>"`, then
   `kgkit ledger lb <id> <score>`. Do not log it with its base stack's CV (or tag such a record
   `--tag lb-blend`): CV-LB correlation is computed only over records with their own CV and at least 4
-  distinct CVs, so borrowed CVs cannot make it look like CV tracks the LB.
+  distinct CVs, so borrowed CVs cannot make it look like CV tracks the LB. In a `holdout+lb` workspace the
+  blend itself is scored on the holdout, so log that score (better: `--pred` with its holdout predictions);
+  `lb-blend` then only marks it as using public files, and its holdout score counts.
 - Its weights are a bet on the public LB, fitted on ~20-30 % of the test. Keep them few and round
   (e.g. 0.5/0.3/0.2) rather than tuned to the 5th decimal by LB probing.
 - Keep an honest CV-only candidate (your nested-validated stack) as one of the two finals

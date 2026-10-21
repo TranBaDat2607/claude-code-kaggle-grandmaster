@@ -10,9 +10,10 @@ Follow the `final-submission-selection` skill.
 
 1. Evidence table from `python -m kgkit ledger best -n 20` + all submissions with LB scores:
    id, CV ± std, honest blend CV, public LB, risk elements, correlation with the top candidate.
-2. Estimate public-LB noise (bootstrap the metric on OOF at the public-set size; see
-   `cv-lb-debugging`) and the CV-LB correlation. LB-only records (blends with public files) are left out of
-   that correlation; in a `holdout+lb` workspace weigh the "CV" by the holdout size (`kgkit status` prints it).
+2. Estimate public-LB noise per pair of candidates (`python -m kgkit ledger compare <a> <b> --public-n <rows>`:
+   paired SE of their LB gap; not the SE of one score, see `cv-lb-debugging`) and the CV-LB correlation.
+   LB-only records (blends with public files) are left out of that correlation; in a `holdout+lb` workspace
+   compare candidates on their stored holdout predictions (`kgkit status` prints the measured paired noise).
 3. Recommend pick 1 (best honest CV) and pick 2 (credible hedge on a different risk axis), with a
    short argument for each and what scenario each protects against. An LB-only blend can only be the hedge.
 4. Robustness checks: reproduce the chosen files from code (or confirm the kernel versions ran on

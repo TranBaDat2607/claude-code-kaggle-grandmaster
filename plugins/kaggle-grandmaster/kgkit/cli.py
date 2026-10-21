@@ -10,7 +10,7 @@ Commands
   adv         adversarial validation (train vs test)
   score       score a prediction column against a truth column with a registered metric
   metrics     list registered metrics
-  ledger      list | best | show | lb | add | compare | decide | baseline | lineage | import
+  ledger      list | best | show | lb | add | compare | noise | decide | baseline | lineage | import
   backlog     add | list | set | render | fidelity  — the ranked idea backlog (human vs GPU hours)
   features    search  — generate and screen thousands of candidate features on the frozen folds
   kernels     top | pull | review  — study and reproduce public notebooks
@@ -55,17 +55,68 @@ def _col(spec: str):
     return _read(path)[col]
 
 
+def _cols(spec: str) -> tuple[str, list[str]]:
+    """'file.csv:a,b' -> ('file.csv', ['a', 'b'])."""
+    from .evalset import split_spec
+
+    try:
+        return split_spec(spec)
+    except ValueError as e:
+        raise SystemExit(str(e))
+
+
+def _frame(spec: str):
+    """'file.csv:a,b' -> the file and its requested columns, checked to exist."""
+    path, cols = _cols(spec)
+    df = _read(path)
+    missing = [c for c in cols if c not in df.columns]
+    if missing:
+        raise SystemExit(f"{path} has no column(s) {', '.join(missing)}")
+    return df, cols
+
+
 def _truth(spec: str):
-    """Training target as a numpy array; string/bool labels become sorted-class codes (the template encoding)."""
+    """Training target as a numpy array; string/bool labels become sorted-class codes (the template encoding).
+    Several columns (``FILE:a,b,c``, e.g. one per label of a multilabel target) give a 2-D numeric array."""
     import numpy as np
     import pandas as pd
 
-    y_raw = _col(spec)
+    df, cols = _frame(spec)
+    if len(cols) > 1:
+        bad = [c for c in cols if not pd.api.types.is_numeric_dtype(df[c]) or df[c].isna().any()]
+        if bad:
+            raise SystemExit(f"multi-column truth must be numeric without gaps (0/1 per label); not: {', '.join(bad)}")
+        return df[cols].to_numpy()
+    y_raw = df[cols[0]]
     if pd.api.types.is_numeric_dtype(y_raw) and not pd.api.types.is_bool_dtype(y_raw):
         return y_raw.to_numpy()
     classes, y = np.unique(y_raw.astype(str).to_numpy(), return_inverse=True)
     print("encoded truth labels: " + ", ".join(f"{c}={i}" for i, c in enumerate(classes)))
     return y
+
+
+def _preds(spec: str, truth_spec: str | None = None, id_col: str = ""):
+    """Predictions as a numpy array: a ``.npy`` file, or ``FILE:COL[,COL...]``. When the prediction file and the
+    truth file both have ``id_col``, rows are put in the truth's order; otherwise they must already match it."""
+    import numpy as np
+
+    if spec.endswith(".npy"):
+        return np.load(spec)
+    df, cols = _frame(spec)
+    if truth_spec and id_col and id_col in df.columns:
+        tdf, _ = _frame(truth_spec)
+        if id_col in tdf.columns:
+            import pandas as pd
+
+            ids = pd.Index(df[id_col])
+            if not ids.is_unique:
+                raise SystemExit(f"{spec}: {id_col} has duplicate values, cannot align to the truth rows")
+            pos = ids.get_indexer(tdf[id_col])
+            if (pos < 0).any():
+                raise SystemExit(f"{spec}: {(pos < 0).sum()} {id_col} value(s) of the truth file have no prediction")
+            df = df.iloc[pos]
+    out = df[cols].to_numpy()
+    return out[:, 0] if len(cols) == 1 else out
 
 
 def _load_pred(led, ref: str, n: int | None):
@@ -85,7 +136,10 @@ def _load_pred(led, ref: str, n: int | None):
                 out = np.full((n, *p.shape[1:]), np.nan)
             out[idx] = p
         return out, ref
-    return led.load_oof(ref), led.get(ref)["id"]
+    try:
+        return led.load_eval_pred(ref), led.get(ref)["id"]
+    except ValueError as e:
+        raise SystemExit(str(e))
 
 
 # ---------------------------------------------------------------------------- commands
@@ -96,7 +150,8 @@ def _state_from_args(a):
         slug=a.slug, metric=a.metric or "", task=a.task or "", target=a.target or "", id_col=a.id_col or "",
         code_competition=a.code_competition, runtime_limit_hours=a.runtime_hours, internet_allowed=not a.no_internet,
         daily_submissions=a.daily_subs, deadline=a.deadline or "",
-        validation=a.validation, holdout_n=a.holdout_n,
+        validation=a.validation, holdout_n=a.holdout_n, eval_truth=a.eval_truth or "",
+        eval_groups=a.eval_groups or "", public_lb_n=a.public_lb_n,
     )
     if a.metric:
         from . import metrics as M
@@ -232,12 +287,12 @@ def cmd_config(a):
             raise SystemExit(f"expected KEY=VALUE with KEY one of {', '.join(fields)}; got {kv!r}")
         cur = getattr(st, k)
         if v.strip().lower() in ("", "none", "null"):
-            val = None if k in ("runtime_limit_hours", "holdout_n", "holdout_se") else ""
+            val = None if k in ("runtime_limit_hours", "holdout_n", "holdout_se", "public_lb_n", "rope") else ""
         elif isinstance(cur, bool):
             val = v.strip().lower() in ("1", "true", "yes", "on")
-        elif k in ("daily_submissions", "final_submissions", "holdout_n"):
+        elif k in ("daily_submissions", "final_submissions", "holdout_n", "public_lb_n"):
             val = int(v)
-        elif k in ("runtime_limit_hours", "holdout_se"):
+        elif k in ("runtime_limit_hours", "holdout_se", "rope"):
             val = float(v)
         elif isinstance(cur, list):
             val = [x.strip() for x in v.split(",") if x.strip()]
@@ -284,23 +339,33 @@ def cmd_status(a):
     print(f"experiments logged: {len(recs)}")
     if recs:
         best = led.best(1)
+        borrowed = led.borrowed_scores()
+        tags = sorted({t for r in borrowed for t in r.get("tags") or () if t in ("lb-only", "lb-blend")})
+        left_out = (f"; {len(borrowed)} record(s) with a CV that is not their own left out ({', '.join(tags)})"
+                    if borrowed else "")
         if best:
-            print(f"best CV: {best[0]['cv']:.5f} ({best[0]['id']})")
+            print(f"best CV: {best[0]['cv']:.5f} ({best[0]['id']}{left_out})")
+        elif borrowed:
+            print(f"best CV: none of its own{left_out}")
         base = led.baseline(fallback=False)
         if base is not None:
             print(f"accepted baseline: {fmt_cv(base)} ({base['id']}, {base.get('decision')}) - new ideas are "
                   f"compared against this, not against the best CV")
         else:
             print("no accepted baseline yet: mark one with `kgkit ledger decide <id> baseline`")
-        n_dec = led.decisions_on_folds(led._folds_hash(None))
-        if n_dec >= 20:
+        n_dec = led.decisions_on_evalset()
+        if st.holdout and n_dec >= 10:
+            print(f"{n_dec} keep/discard decisions taken on this fixed holdout: each one spends a little of it, and "
+                  "there is no fresh split to re-check on. Settle close calls on the public LB as well, and treat "
+                  "marginal KEEPs as provisional (`kgkit ledger lineage`).")
+        elif not st.holdout and n_dec >= 20:
             print(f"{n_dec} keep/discard decisions taken on the current folds: the CV is getting optimistic. "
                   "Re-check on a fresh fold seed: `kgkit recheck --seed 7 --run <old> --run <current> --exp <root> <baseline>`")
         with_lb = [r for r in recs if r.get("lb_public") is not None]
         if with_lb:
             bl = sorted(with_lb, key=lambda r: r["lb_public"], reverse=st.greater_is_better)[0]
             print(f"best public LB: {bl['lb_public']:.5f} ({bl['id']}, CV {fmt_cv(bl)})")
-        agreement = led.cv_lb_summary()
+        agreement = led.cv_lb_summary() or led.noise_note()  # the noise line rides on the CV-LB line when there is one
         if agreement:
             print(agreement)
         print()
@@ -366,9 +431,13 @@ def cmd_adv(a):
 
 def cmd_score(a):
     from . import metrics as M
+    from . import state as S
 
-    y, p = _col(a.truth), _col(a.pred)
-    print(f"{a.metric}: {M.score(a.metric, y.to_numpy(), p.to_numpy()):.6f}")
+    st = S.load()
+    tdf, tcols = _frame(a.truth)
+    y = tdf[tcols].to_numpy()
+    p = _preds(a.pred, a.truth, st.id_col if st else "")
+    print(f"{a.metric}: {M.score(a.metric, y[:, 0] if len(tcols) == 1 else y, p):.6f}")
 
 
 def cmd_metrics(a):
@@ -409,12 +478,29 @@ def cmd_ledger(a):
             print(agreement)
     elif a.action == "add":
         if len(a.args) < 2:
-            raise SystemExit("usage: ledger add <name> <cv|lb-only> [notes] [--tag lb-blend]")
-        r = led.log(a.args[0], _cv_arg(a.args[1]), notes=" ".join(a.args[2:]), parent=a.parent, tags=a.tag or ())
-        print(f"logged {r['id']}" + ("" if r["cv"] is not None else " (LB-only: attach its score with "
-                                     f"`ledger lb {r['id']} <score>`; it stays out of the CV-LB correlation)"))
+            raise SystemExit("usage: ledger add <name> <cv|auto|lb-only> [notes] [--pred FILE:COLS|preds.npy] "
+                             "[--tag lb-blend] [--variant V]")
+        extra = {"variant": a.variant} if a.variant else {}
+        if a.pred:
+            r = _ledger_add_preds(led, a, extra)
+            _auto_compare(led, a, r)
+            return
+        if a.args[1].lower() == "auto":
+            raise SystemExit("'auto' recomputes the score from predictions: pass --pred FILE:COLS (or preds.npy)")
+        r = led.log(a.args[0], _cv_arg(a.args[1]), notes=" ".join(a.args[2:]), parent=a.parent, tags=a.tag or (),
+                    **extra)
+        note = ""
+        if r["cv"] is None:
+            note = (f" (LB-only: attach its score with `ledger lb {r['id']} <score>`; it stays out of the CV-LB "
+                    "correlation)")
+        elif "lb-blend" in r["tags"]:
+            note = (" (lb-blend on a fixed holdout: the blend's holdout score is its own and counts)" if led._holdout()
+                    else " (lb-blend: this CV is not the blend's own; kept out of best CV and the CV-LB correlation)")
+        print(f"logged {r['id']}{note}")
     elif a.action == "compare":
         _ledger_compare(led, a)
+    elif a.action == "noise":
+        _ledger_noise(led, a)
     elif a.action == "decide":
         if len(a.args) < 2:
             raise SystemExit("usage: ledger decide <exp_id> baseline|keep|discard|inconclusive [note] [--parent ID]")
@@ -458,17 +544,82 @@ def cmd_ledger(a):
               + f" [{a.source}]")
 
 
+def _ledger_add_preds(led, a, extra: dict) -> dict:
+    """`ledger add <name> <cv|auto> --pred ...`: the score is recomputed from predictions on the evaluation set,
+    and they are stored (holdout predictions in a holdout+lb workspace, OOF otherwise) so that later records can
+    be compared with this one, paired, on the same rows."""
+    from . import metrics as M
+    from . import state as S
+    from .experiment import score_preds
+
+    st = S.load()
+    truth_spec = a.truth or (st.eval_truth if st else "")
+    if not truth_spec:
+        raise SystemExit("--pred needs the evaluation labels: `kgkit config eval_truth=FILE:COL[,COL...]` (one column "
+                         "per label of a multilabel target) or --truth FILE:COLS")
+    metric = a.metric or (st.metric if st else None)
+    if not metric:
+        raise SystemExit("--metric required (no competition state found)")
+    try:
+        m = M.get(metric)
+    except KeyError as e:
+        raise SystemExit(e.args[0])
+    auto = a.args[1].lower() == "auto"
+    passed = None if auto else _cv_arg(a.args[1])
+    if not auto and passed is None:
+        raise SystemExit("an LB-only record has no score to recompute: drop --pred, or pass 'auto'")
+    y = _truth(truth_spec)
+    p = _preds(a.pred, truth_spec, st.id_col if st else "")
+    if len(p) != len(y):
+        raise SystemExit(f"{a.pred} has {len(p)} rows but {truth_spec} has {len(y)}")
+    holdout = st is not None and st.holdout
+    folds = _col(a.folds).to_numpy() if a.folds and not holdout else None
+    score, fold_scores = score_preds(m.name, y, p, folds)
+    if passed is not None and abs(passed - score) > 1e-6 * max(1.0, abs(score)):
+        print(f"note: {m.name} recomputed from the predictions is {score:.6f}, not {passed}; "
+              "logging the recomputed score")
+    kw = dict(notes=" ".join(a.args[2:]), parent=a.parent, tags=a.tag or (), metric=m.name, fold_scores=fold_scores,
+              **extra)
+    r = led.log(a.args[0], score, holdout_pred=p, **kw) if holdout else led.log(a.args[0], score, oof=p, **kw)
+    where = "holdout" if holdout else "OOF"
+    blend = "; tagged lb-blend, its own holdout score still counts" if holdout and "lb-blend" in (a.tag or ()) else ""
+    print(f"logged {r['id']}: {where} {m.name} {score:.5f} recomputed from {len(y)} rows, predictions stored{blend}")
+    return r
+
+
+def _auto_compare(led, a, r: dict) -> None:
+    """After `ledger add --pred`: compare the new record, paired, with the accepted baseline when that baseline
+    has predictions on the same evaluation set."""
+    import argparse
+
+    base = led.baseline(fallback=False)
+    path = "holdout_path" if led._holdout() else "oof_path"
+    if base is None or base["id"] == r["id"] or not base.get(path):
+        if base is None:
+            print("no accepted baseline yet: `kgkit ledger decide <id> baseline`, then later records are compared "
+                  "with it automatically")
+        return
+    if led.eval_record_key(base) != led.eval_record_key(r):
+        print(f"not compared with the baseline {base['id']}: its predictions are on a different evaluation set")
+        return
+    print()
+    folds = {"folds": None, "fold": None} if led._holdout() else {}  # a fixed holdout has no folds to pair
+    _ledger_compare(led, argparse.Namespace(**{**vars(a), "args": [r["id"], base["id"]], **folds}))
+
+
 def _ledger_compare(led, a):
     import numpy as np
 
     from . import metrics as M
     from . import state as S
-    from .compare import compare_folds, format_comparison, paired_bootstrap, verdict
+    from .compare import compare_folds, describe, estimate, format_comparison, verdict
 
     if len(a.args) < 1:
         raise SystemExit("usage: ledger compare <new> [baseline] [--truth FILE:COL] [--folds FILE:COL] "
-                         "[--fold K] [--groups FILE:COL]   (baseline defaults to the accepted baseline)")
+                         "[--fold K] [--groups FILE:COL] [--public-n ROWS]   (baseline defaults to the accepted "
+                         "baseline)")
     st = S.load()
+    holdout = st is not None and st.holdout
     if len(a.args) > 1:
         base_ref = a.args[1]
     else:
@@ -480,14 +631,25 @@ def _ledger_compare(led, a):
         if not Path(ref).is_dir():
             led.get(ref)  # fail early on a typo
     if not Path(a.args[0]).is_dir() and not Path(base_ref).is_dir():
-        ha, hb = led.get(a.args[0]).get("folds_hash"), led.get(base_ref).get("folds_hash")
+        ha, hb = (led.eval_record_key(led.get(r)) for r in (a.args[0], base_ref))
         if led.get(a.args[0])["id"] == led.get(base_ref)["id"]:
             raise SystemExit(f"{base_ref} is both the new experiment and the baseline (no accepted baseline yet? "
                              "pass the baseline explicitly, or `ledger decide <id> baseline`)")
         if ha and hb and ha != hb:
-            print("WARNING: the two experiments used different fold splits - the per-fold pairing is not valid; "
+            print("WARNING: the two experiments were scored on different holdout labels (eval_hash differs) - they "
+                  "are not comparable" if holdout else
+                  "WARNING: the two experiments used different fold splits - the per-fold pairing is not valid; "
                   "only the OOF bootstrap (with --truth) is meaningful")
-    y = _truth(a.truth) if a.truth else None
+    if holdout and (a.folds or a.fold is not None):
+        raise SystemExit("holdout+lb workspace: there are no folds; the holdout predictions are compared as a whole")
+    truth_spec = a.truth
+    if not truth_spec and st is not None and st.eval_truth:  # K-fold records without OOF: fold scores only
+        if holdout or all(Path(r).is_dir() or led.get(r).get("oof_path") for r in (a.args[0], base_ref)):
+            truth_spec = st.eval_truth
+    if holdout and not truth_spec:
+        raise SystemExit("holdout+lb: set the holdout labels (`kgkit config eval_truth=FILE:COL[,COL...]`) or pass "
+                         "--truth; the stored holdout predictions are then compared paired")
+    y = _truth(truth_spec) if truth_spec else None
     n = len(y) if y is not None else None
     metric_name = a.metric or (st.metric if st else None)
     gib = st.greater_is_better if st else True
@@ -522,10 +684,106 @@ def _ledger_compare(led, a):
         if m.kind == "label":
             print(f"note: {m.name} scores labels; OOFs are compared as stored (decode them first if they are "
                   "probabilities)")
-        groups = _col(a.groups).to_numpy() if a.groups else None
-        boot = paired_bootstrap(y, pa, pb, m.name, n_boot=a.boot, groups=groups, mask=ok)
-    print(format_comparison(new_id, base_id, verdict(folds_res, boot)))
+        groups_spec = a.groups or (st.eval_groups if st else "")
+        groups = _col(groups_spec).to_numpy() if groups_spec else None
+        rope = a.rope if a.rope is not None else (st.rope if st else None)
+        boot = estimate(y, pa, pb, m.name, method=_method(a), n_boot=a.boot, groups=groups, mask=ok, rope=rope)
+        boot = _add_seed_noise(led, boot, a.args[0], base_ref)
+    v = verdict(folds_res, boot)
+    print(format_comparison(new_id, base_id, v))
+    lb = None
+    if boot is not None:
+        print(f"  {describe(boot)}")
+        for c in boot["caveats"]:
+            print(f"  note: {c}")
+        public_n = a.public_n or (st.public_lb_n if st else None)
+        if public_n:
+            lb = estimate(y, pa, pb, m.name, method=_method(a), n_boot=a.boot, groups=groups, mask=ok, size=public_n)
+            print(f"  public LB (n={public_n}): {describe(lb)}: LB gaps between these two under ~{2 * lb['se']:.5f} "
+                  "are noise (assumes the public rows look like the evaluation rows)")
+    _log_comparison(led, new_id, base_id, folds_res, boot, lb, v["decision"])
     print(f"\nrecord it: python -m kgkit ledger decide {new_id} keep|discard|inconclusive \"<why>\" --parent {base_id}")
+
+
+def _method(a) -> str:
+    """--method, where an explicit --boot asks for the bootstrap."""
+    return "bootstrap" if a.method == "auto" and a.boot else a.method
+
+
+def _add_seed_noise(led, res: dict, new_ref: str, base_ref: str) -> dict:
+    """Training noise from re-runs on file (same pipeline, other seeds): added to the resampling SE, which only
+    sees the rows. Without re-runs, a close call says so."""
+    from .compare import n_seeds, seed_variance, with_seed_noise
+
+    seed = seed_variance(led.records(), led.eval_record_key)
+    recs = [led.get(r) if not Path(r).is_dir() else {} for r in (new_ref, base_ref)]
+    if seed is not None:
+        return with_seed_noise(res, seed, n_seeds(recs[0]), n_seeds(recs[1]))
+    if not abs(res.get("z", 0)) >= 4:
+        res["caveats"].append("seed noise not included: re-run one pipeline with another seed and log it with the "
+                              "same --variant (or the same params on a clean commit) to measure it")
+    return res
+
+
+def _log_comparison(led, new_id: str, base_id: str, folds_res: dict | None, boot: dict | None, lb: dict | None,
+                    decision: str) -> None:
+    """Append the measured paired noise to .kaggle-gm/comparisons.jsonl: `status` and the session hook read it
+    there instead of re-running a bootstrap (or guessing from the size of the evaluation set)."""
+    import math
+
+    from . import evalset as EV
+
+    src = boot if boot is not None else folds_res
+    if src is None or not (isinstance(src.get("se"), float) and math.isfinite(src["se"]) and src["se"] > 0):
+        return
+    try:
+        key = led.eval_record_key(led.get(new_id))
+    except KeyError:  # an artefact folder
+        key = None
+    entry = {"new": new_id, "base": base_id, "eval": key or led.eval_key(), "question": "paired",
+             "gain": src["gain"], "se": src["se"], "decision": decision,
+             "method": boot["method"] if boot is not None else "fold-paired t",
+             "unit": boot["unit"] if boot is not None else "folds",
+             "n_units": boot["n_units"] if boot is not None else folds_res["k"]}
+    if lb is not None:
+        entry.update(public_n=lb["size"], se_public=lb["se"])
+    EV.log_comparison(led.root, entry)
+
+
+def _ledger_noise(led, a):
+    """`ledger noise <id>`: the noise of one absolute score. It bounds that record's CV-LB gap; it is not the
+    noise of a difference between two models (that is `ledger compare`, paired)."""
+    import math
+
+    from . import metrics as M
+    from . import state as S
+    from .compare import describe, estimate
+
+    if len(a.args) < 1:
+        raise SystemExit("usage: ledger noise <exp_id> [--public-n ROWS] [--truth FILE:COLS] [--groups FILE:COL]")
+    st = S.load()
+    truth_spec = a.truth or (st.eval_truth if st else "")
+    metric_name = a.metric or (st.metric if st else None)
+    if not truth_spec or not metric_name:
+        raise SystemExit("needs the evaluation labels (`kgkit config eval_truth=FILE:COLS` or --truth) and a metric")
+    m = M.get(metric_name)
+    y = _truth(truth_spec)
+    p, rid = _load_pred(led, a.args[0], len(y))
+    groups_spec = a.groups or (st.eval_groups if st else "")
+    groups = _col(groups_spec).to_numpy() if groups_spec else None
+    res = estimate(y, p, None, m.name, method=_method(a), n_boot=a.boot, groups=groups)
+    print(f"{rid}: {m.name} {res['value']:.5f}; {describe(res)}")
+    for c in res["caveats"]:
+        print(f"  note: {c}")
+    public_n = a.public_n or (st.public_lb_n if st else None)
+    if public_n:
+        lb = estimate(y, p, None, m.name, method=_method(a), n_boot=a.boot, groups=groups, size=public_n)
+        gap = math.hypot(res["se"], lb["se"])
+        print(f"public LB (n={public_n}): {describe(lb)}; a CV-LB gap within ~{2 * gap:.5f} (2 x sqrt(SE_eval^2 + "
+              "SE_LB^2)) is sampling noise, not a validation problem (assumes the public rows look like the "
+              "evaluation rows)")
+    print("this is the noise of one absolute score: judge a difference between two models with `kgkit ledger "
+          "compare` (paired), not with this")
 
 
 def cmd_blend(a):
@@ -997,6 +1255,10 @@ def _validation_args(s) -> None:
                    help="kfold: OOF over data/folds.csv; holdout+lb: a fixed labelled holdout plus the public LB "
                         "(no OOF files, e.g. a small expert-labelled set in a code competition)")
     s.add_argument("--holdout-n", type=int, help="holdout+lb: rows in the labelled holdout")
+    s.add_argument("--eval-truth", help="FILE:COL[,COL...] labels of the evaluation set (holdout+lb: the holdout "
+                                        "labels, one column per label of a multilabel target)")
+    s.add_argument("--eval-groups", help="FILE:COL unit resampled whole when measuring noise (patient, study, query)")
+    s.add_argument("--public-lb-n", type=int, help="rows in the public LB split (noise projected to its size)")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -1079,31 +1341,44 @@ def build_parser() -> argparse.ArgumentParser:
 
     s = sub.add_parser("score", help="score predictions")
     s.add_argument("metric")
-    s.add_argument("truth", help="FILE:COLUMN")
-    s.add_argument("pred", help="FILE:COLUMN")
+    s.add_argument("truth", help="FILE:COLUMN[,COLUMN...]")
+    s.add_argument("pred", help="FILE:COLUMN[,COLUMN...] or .npy")
     s.set_defaults(fn=cmd_score)
 
     s = sub.add_parser("metrics", help="list metrics")
     s.set_defaults(fn=cmd_metrics)
 
     s = sub.add_parser("ledger", help="experiment ledger")
-    s.add_argument("action", choices=["list", "best", "show", "lb", "add", "compare", "decide", "baseline", "lineage",
-                                      "import"])
+    s.add_argument("action", choices=["list", "best", "show", "lb", "add", "compare", "noise", "decide", "baseline",
+                                      "lineage", "import"])
     s.add_argument("args", nargs="*")
     s.add_argument("-n", type=int, default=15)
     s.add_argument("--parent", help="baseline experiment this one was compared against")
-    s.add_argument("--truth", help="FILE:COLUMN training target (compare: paired bootstrap on OOFs; import: CV)")
+    s.add_argument("--truth", help="FILE:COL[,COL...] target (default: eval_truth; compare: paired bootstrap on the "
+                                   "stored predictions; import/add --pred: the score)")
     s.add_argument("--folds", help="FILE:COLUMN fold ids (per-fold paired scores; import: fold scores)")
     s.add_argument("--fold", type=int, help="compare: restrict to one fold (1-fold screens)")
-    s.add_argument("--groups", help="compare: FILE:COLUMN groups to resample whole (patients, sessions)")
-    s.add_argument("--boot", type=int, default=300, help="compare: bootstrap resamples")
+    s.add_argument("--groups", help="compare: FILE:COLUMN groups to resample whole (patients, sessions; default "
+                                    "eval_groups)")
+    s.add_argument("--boot", type=int, help="compare/noise: bootstrap resamples (default 1000, 300 above 20k rows)")
+    s.add_argument("--method", default="auto", choices=["auto", "bootstrap", "bayes", "clt"],
+                   help="compare/noise: bootstrap; bayes (Bayesian bootstrap, weighted metrics); clt (the metric's "
+                        "influence function, instant); auto: clt from 1000 units when available, else bootstrap")
+    s.add_argument("--rope", type=float, help="compare: gains within +/- this are practically equivalent "
+                                              "(default: rope in competition.json)")
+    s.add_argument("--public-n", type=int, help="compare/noise: rows in the public LB (default public_lb_n): noise "
+                                                "projected to the LB's sample size")
     s.add_argument("--metric")
     s.add_argument("--test", help="import: test predictions (.npy or FILE:COLUMN)")
     s.add_argument("--cv", type=float, help="import: reported CV when no --truth is given")
     s.add_argument("--source", default="external", help="import: teammate | notebook | external")
     s.add_argument("--notes")
-    s.add_argument("--tag", action="append", help="add: tag the record (lb-blend: blended with public files, "
-                                                  "kept out of the CV-LB correlation); repeatable")
+    s.add_argument("--tag", action="append", help="add: tag the record; repeatable. lb-blend: blended with public "
+                                                  "files (K-fold: its CV is borrowed, kept out of best CV and the "
+                                                  "CV-LB correlation; holdout+lb: its holdout score still counts)")
+    s.add_argument("--pred", help="add: FILE:COL[,COL...] or .npy predictions on the evaluation set (holdout+lb: "
+                                  "the holdout; else OOF); the score is recomputed and the predictions stored")
+    s.add_argument("--variant", help="add: name shared by re-runs of one pipeline with other seeds (seed noise)")
     s.set_defaults(fn=cmd_ledger)
 
     s = sub.add_parser("backlog", help="ranked idea backlog")

@@ -311,7 +311,9 @@ def test_config_sets_validation_and_status_shows_holdout(ws, monkeypatch, capsys
     cli.main(["status"])
     out = capsys.readouterr().out
     assert "validation: holdout+lb (holdout n=58)" in out
-    assert "fixed holdout (n=58, SE ~0.0" in out and "CV-LB correlation over 4 subs" in out
+    assert "fixed holdout (n=58" in out and "CV-LB correlation over 4 subs" in out
+    # #32: no threshold for differences derived from n and the score (a binomial SE of an accuracy)
+    assert "not measured yet" in out and "SE ~" not in out and "are noise" not in out
 
 
 def test_kernel_review_inference_only(tmp_path):

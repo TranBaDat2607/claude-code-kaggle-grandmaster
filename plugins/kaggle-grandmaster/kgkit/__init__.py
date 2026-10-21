@@ -14,7 +14,10 @@ parts of a competition that are easy to get subtly wrong:
 - ``kgkit.featsearch``  brute-force feature generation + batch screening on the frozen folds
 - ``kgkit.eda``         a fast markdown EDA report focused on competition pitfalls
 - ``kgkit.experiment``  the experiment ledger (CV, LB, artefacts, git commit, decisions, lineage) + seeding
-- ``kgkit.compare``     paired fold test + paired bootstrap: is the new experiment really better?
+- ``kgkit.compare``     is the new experiment really better? Paired fold test, and the noise of a score or
+                        a paired difference on any metric (bootstrap, Bayesian bootstrap, influence CLT,
+                        projected to the public LB's size), seed noise from re-runs, ROPE
+- ``kgkit.evalset``     the evaluation set's fingerprint and the paired noise measured on it
 - ``kgkit.backlog``     the ranked idea backlog and screen-vs-full fidelity
 - ``kgkit.kernels``     study and reproduce public notebooks
 - ``kgkit.discussions`` competition forums (topics, search, write-ups, threads), live or from Meta Kaggle

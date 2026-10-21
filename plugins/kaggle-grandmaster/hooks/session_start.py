@@ -80,8 +80,8 @@ def gpu_line(root: Path) -> str:
     return s.strip()
 
 
-def _own_cv(r: dict) -> bool:
-    return isinstance(r.get("cv"), (int, float)) and not set(r.get("tags") or ()) & {"lb-only", "lb-blend"}
+def _own_cv(r: dict, holdout: bool = False) -> bool:
+    return C.EV.own_score(r, holdout)
 
 
 def brief(root: Path) -> str:
@@ -97,12 +97,16 @@ def brief(root: Path) -> str:
                      f"{'allowed' if st.internet_allowed else 'OFF'} — budget inference early.")
     holdout = getattr(st, "holdout", False)
     if holdout:
+        noise = C.EV.recent_noise(root, C.EV.current_key(root, st))
+        judge = (f"measured {C.EV.format_noise(noise)} (`kgkit ledger compare`)" if noise else
+                 "judge differences with `kgkit ledger compare` on stored holdout predictions (paired), not by the "
+                 "holdout size")
         lines.append(f"Validation: fixed holdout" + (f" (n={st.holdout_n})" if st.holdout_n else "")
-                     + " + public LB, no OOF/K-fold: small CV differences are noise; error analysis runs on the "
-                       "holdout predictions; public notebooks are judged on inputs and public score.")
+                     + f" + public LB, no OOF/K-fold: {judge}; error analysis runs on the holdout predictions; "
+                       "public notebooks are judged on inputs and public score.")
     recs = C.ledger_records(root)
     if recs:
-        scored = [r for r in recs if _own_cv(r) and not r.get("recheck")]
+        scored = [r for r in recs if _own_cv(r, holdout) and not r.get("recheck")]
         best = sorted(scored, key=lambda r: r["cv"], reverse=st.greater_is_better)[:1]
         with_lb = [r for r in recs if isinstance(r.get("lb_public"), (int, float))]
         s = f"Ledger: {len(recs)} experiments"
@@ -111,7 +115,7 @@ def brief(root: Path) -> str:
         if with_lb:
             bl = sorted(with_lb, key=lambda r: r["lb_public"], reverse=st.greater_is_better)[0]
             s += f"; best public LB {bl['lb_public']:.5f} ({bl['id']})"
-            pairs = [r for r in with_lb if _own_cv(r) and not r.get("recheck")]
+            pairs = [r for r in with_lb if _own_cv(r, holdout) and not r.get("recheck")]
             corr = _pearson([r["cv"] for r in pairs], [r["lb_public"] for r in pairs])
             if corr is not None and len({round(r["cv"], 12) for r in pairs}) >= 4:
                 s += (f"; CV-LB pearson {corr:.2f} over {len(pairs)} subs"

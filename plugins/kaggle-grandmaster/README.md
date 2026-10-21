@@ -35,8 +35,11 @@ submissions and experiments, leaving your layout alone.
   GPU-quota + upload guard (credentials never printed or uploaded, repeated files caught), submission /
   GPU-run logger
 - `kgkit/`: Python toolkit (`python -m kgkit --help`):
-  - experiment loop: `ledger compare` (paired per-fold test + OOF bootstrap), `ledger decide / baseline /
-    lineage / import`, `backlog`, `recheck` (does the gain survive a re-drawn fold split?)
+  - experiment loop: `ledger compare` (paired per-fold test + paired noise on stored OOF or holdout
+    predictions for any metric, projected to the public LB with `--public-n`), `ledger noise` (one score's
+    SE and the CV-LB gap it explains), `ledger add --pred` (score recomputed from predictions, compared
+    with the baseline at once), `ledger decide / baseline / lineage / import`, `backlog`, `recheck` (does
+    the gain survive a re-drawn fold split?)
   - modelling: `features search` (thousands of generated features, batch-screened), `blend` with hill
     climbing, multi-level and residual stacking, `--prune`
   - prior art: `pages` (the competition's pages as text), `kernels top / pull` (notebook review with the
@@ -44,10 +47,11 @@ submissions and experiments, leaving your layout alone.
     (forum, live via the Kaggle CLI)
   - `gpu` for quota-aware training on Kaggle GPUs and TPUs (reservations released when runs finish,
     any kernel folder pushable with a cap, busy-session and input checks); `datasets pull` (per-file
-    fallback when a dataset archive 404s); `whoami`; `config` (e.g. `validation=holdout+lb`)
+    fallback when a dataset archive 404s); `whoami`; `config` (e.g. `validation=holdout+lb
+    eval_truth=data/holdout.csv:a,b,c`)
 - `templates/`: tabular (GBDTs + linear / kNN / SVM / MLP), image and transformer training, remote GPU
   training runner, offline inference kernel, workspace CLAUDE.md
-- `evals/`: `claude plugin eval` suite (15 cases)
+- `evals/`: `claude plugin eval` suite (16 cases)
 
 ## Data and network access
 
