@@ -131,3 +131,102 @@ def test_evalset_keys_and_decision_counts(tmp_path):
     recs = [{"decision": "keep", "eval_hash": k}, {"decision": "discard"}, {"decision": "keep", "eval_hash": "zz"},
             {"decision": "baseline", "eval_hash": k}]
     assert EV.decisions_on(recs, k, holdout=True) == 2
+
+
+# ----------------------------------------------------------------------------- phase 2: one estimator, cached noise
+def test_paired_noise_is_far_below_the_noise_of_one_score():
+    from kgkit.compare import estimate
+
+    y, a, b, _ = _multilabel(np.random.default_rng(0))
+    paired = estimate(y, a, b, "mean_col_auc", n_boot=300)
+    single = estimate(y, a, None, "mean_col_auc", n_boot=300)
+    assert paired["question"] == "paired" and single["question"] == "absolute" and "gain" not in single
+    assert paired["se"] < single["se"] / 2  # the 58-study case of #32: ~0.003 vs ~0.013
+    p = single["value"]
+    assert single["se"] < (p * (1 - p) / N) ** 0.5 / 2  # and the binomial formula overstates even one score
+    assert any("small evaluation set" in c for c in paired["caveats"])
+
+
+def test_every_resample_keeps_the_label_set_of_the_full_set():
+    from kgkit.compare import estimate
+
+    rng = np.random.default_rng(1)
+    y = (rng.random((N, 3)) < [0.5, 0.4, 0.05]).astype(int)
+    y[:2, 2] = 1  # a rare label: 2-4 positives
+    seen = []
+
+    def strict(yy, pp):
+        seen.append(int((yy.min(0) != yy.max(0)).sum()))
+        return float(np.mean(pp[yy == 1]) - np.mean(pp[yy == 0]))
+
+    res = estimate(y, rng.random((N, 3)), None, strict, greater_is_better=True, n_boot=200)
+    full = int((y.min(0) != y.max(0)).sum())
+    assert res["n_redrawn"] > 0 and res["n_boot"] == 200 and set(seen) == {full}
+
+
+def test_projection_to_another_sample_size():
+    from kgkit.compare import describe, estimate
+
+    rng = np.random.default_rng(2)
+    n = 2000
+    y = rng.integers(0, 2, n)
+    a = y + rng.normal(0, 1.0, n)
+    b = a + rng.normal(0, 0.3, n)
+    here = estimate(y, a, b, "auc", n_boot=300)
+    lb = estimate(y, a, b, "auc", n_boot=300, size=4 * n)
+    assert 0.35 < lb["se"] / here["se"] < 0.7  # ~ sqrt(1/4)
+    assert "at n=8000" in describe(lb) and any("projected to 8000 rows" in c for c in lb["caveats"])
+
+
+def test_groups_are_resampled_whole():
+    from kgkit.compare import estimate
+
+    rng = np.random.default_rng(4)
+    g = np.repeat(np.arange(300), 4)  # 4 images per patient, patient-level effects
+    eff = rng.normal(0, 1, 300)[g]
+    y = (eff + rng.normal(0, 0.5, len(g)) > 0).astype(int)
+    a = eff + rng.normal(0, 1, len(g))
+    rows = estimate(y, a, None, "auc", n_boot=300)
+    grouped = estimate(y, a, None, "auc", n_boot=300, groups=g)
+    assert grouped["unit"] == "groups" and grouped["n_units"] == 300 and grouped["se"] > rows["se"]
+
+
+def test_status_and_hook_read_the_measured_paired_noise(hws, capsys, plugin_root):
+    import shutil
+
+    cols = ",".join(COLS)
+    _cli("ledger", "add", "a", "auto", "--pred", f"pred_a.csv:{cols}")
+    _cli("ledger", "decide", "1", "baseline")
+    _cli("status")
+    assert "not measured yet" in capsys.readouterr().out
+    _cli("ledger", "add", "b", "auto", "--pred", f"pred_b.csv:{cols}", "--boot", "200", "--public-n", "600")
+    out = capsys.readouterr().out
+    assert "0002_b vs 0001_a" in out and "paired SE of the difference" in out and "public LB (n=600)" in out
+    entry = EV.comparisons(hws)[-1]
+    assert entry["new"] == "0002_b" and entry["eval"] == EV.spec_hash(hws, SPEC) and entry["se_public"] < entry["se"]
+    _cli("status")
+    out = capsys.readouterr().out
+    assert f"paired SE of differences ~{entry['se']:.4f}" in out and "not measured yet" not in out
+    _cli("ledger", "noise", "1", "--boot", "200", "--public-n", "600")
+    out = capsys.readouterr().out
+    assert "SE of the score" in out and "CV-LB gap within" in out and "(paired), not with this" in out
+    sh = shutil.which("sh")
+    if sh is None:
+        return
+    r = subprocess.run([sh, str(plugin_root / "hooks" / "run.sh"), "session_start.py"],
+                       input=json.dumps({"hook_event_name": "SessionStart", "cwd": str(hws)}),
+                       capture_output=True, text=True, timeout=60)
+    ctx = json.loads(r.stdout)["hookSpecificOutput"]["additionalContext"]
+    assert "measured paired SE of differences" in ctx
+
+
+def test_kfold_compare_without_oof_still_uses_fold_scores(tmp_path, monkeypatch, capsys):
+    pd.DataFrame({"y": [0, 1] * 10}).to_csv(tmp_path / "train.csv", index=False)
+    S.CompetitionState(slug="x", metric="auc", eval_truth="train.csv:y").save(tmp_path)
+    led = Ledger(tmp_path)
+    led.log("base", 0.80, fold_scores=[0.80, 0.84, 0.78, 0.83, 0.81], decision="baseline")
+    led.log("new", 0.803, fold_scores=[0.803, 0.843, 0.783, 0.833, 0.813])
+    monkeypatch.chdir(tmp_path)
+    _cli("ledger", "compare", "2")
+    assert "KEEP" in capsys.readouterr().out
+    assert EV.comparisons(tmp_path)[-1]["method"] == "fold-paired t"

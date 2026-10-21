@@ -383,22 +383,29 @@ class Ledger:
 
         return {"n": len(pairs), "pearson": float(pearsonr(cv, lb)[0]), "spearman": float(spearmanr(cv, lb)[0])}
 
-    def holdout_note(self) -> str:
-        """For a holdout+lb workspace: what is known about the noise of the 'CV' column.
+    def noise_note(self) -> str:
+        """What is known about the noise of differences between scores on the evaluation set: the paired SE
+        measured by recent `ledger compare` runs (read from .kaggle-gm/comparisons.jsonl, never re-computed here).
 
         Never a formula of n and the score: two models scored on the same rows are strongly correlated, so the
         noise of their *difference* is far below the SE of one absolute score, and only a paired comparison on
         stored predictions measures it."""
         st = S.load(self.root)
-        if st is None or not st.holdout:
+        if st is None:
             return ""
-        size = f"n={st.holdout_n}" if st.holdout_n else "size unknown"
-        noise = ("; noise of differences not measured yet: store holdout predictions and run `kgkit ledger compare` "
-                 "(paired)")
+        noise = E.recent_noise(self.root, self.eval_key())
+        measured = f"{E.format_noise(noise)}: gains under ~{2 * noise['se']:.4f} are within noise" if noise else ""
+        if not st.holdout:
+            return f"noise: {measured}" if noise else ""
+        n = st.holdout_n or (noise or {}).get("n_units")
+        body = f"; {measured}" if noise else ("; noise of differences not measured yet: store holdout predictions "
+                                              "(`kgkit ledger add <name> auto --pred FILE:COLS`) and run "
+                                              "`kgkit ledger compare` (paired)")
         if st.holdout_se:
-            noise += (f"; holdout_se {st.holdout_se:.4f} is the SE of one absolute score, not a threshold for "
-                      "differences between models")
-        return f"CV here is a fixed holdout ({size}{noise}); the public LB is the second opinion"
+            body += (f"; holdout_se {st.holdout_se:.4f} is the SE of one absolute score, not a threshold for "
+                     "differences between models")
+        size = f"n={n}" if n else "size unknown"
+        return f"CV here is a fixed holdout ({size}{body}); the public LB is the second opinion"
 
     def cv_lb_summary(self) -> str:
         """One line on CV-LB agreement, or why it is not reported."""
@@ -414,7 +421,7 @@ class Ledger:
                     f"{len({round(c, 12) for c, _ in pairs})} distinct CVs; needs >= {MIN_DISTINCT_CV}){skipped}")
         else:
             return ""
-        note = self.holdout_note()
+        note = self.noise_note()
         return line + (f"\n  {note}" if note else "")
 
     def table(self, n: int = 15, sort: str = "time") -> str:

@@ -97,10 +97,13 @@ def brief(root: Path) -> str:
                      f"{'allowed' if st.internet_allowed else 'OFF'} — budget inference early.")
     holdout = getattr(st, "holdout", False)
     if holdout:
+        noise = C.EV.recent_noise(root, C.EV.current_key(root, st))
+        judge = (f"measured {C.EV.format_noise(noise)} (`kgkit ledger compare`)" if noise else
+                 "judge differences with `kgkit ledger compare` on stored holdout predictions (paired), not by the "
+                 "holdout size")
         lines.append(f"Validation: fixed holdout" + (f" (n={st.holdout_n})" if st.holdout_n else "")
-                     + " + public LB, no OOF/K-fold: judge differences with `kgkit ledger compare` on stored "
-                       "holdout predictions (paired), not by the holdout size; error analysis runs on the "
-                       "holdout predictions; public notebooks are judged on inputs and public score.")
+                     + f" + public LB, no OOF/K-fold: {judge}; error analysis runs on the holdout predictions; "
+                       "public notebooks are judged on inputs and public score.")
     recs = C.ledger_records(root)
     if recs:
         scored = [r for r in recs if _own_cv(r) and not r.get("recheck")]
