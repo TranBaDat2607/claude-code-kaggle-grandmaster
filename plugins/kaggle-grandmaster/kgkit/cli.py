@@ -1229,11 +1229,22 @@ def cmd_gpu(a):
               + (", then gpu collect" if built else "; `kaggle kernels output` for its files"))
     elif a.gpu_cmd == "status":
         root = G._root(None)
-        kernels = a.kernel or list(dict.fromkeys(r["kernel"] for r in G.runs(root) if r.get("status") in G.ACTIVE))
+        confirmed = {r["kernel"] for r in G.confirm_pending(root, a.kernel or None)}
+        recs = G.runs(root)
+        pending = {r["kernel"]: r for r in recs if r.get("status") == G.PENDING}
+        kernels = a.kernel or list(dict.fromkeys(r["kernel"] for r in recs if r.get("status") in G.ACTIVE))
         for k in kernels:
+            if k in pending:
+                p = pending[k]
+                held = "its reservation has lapsed" if G._stale(p, G._now()) else "its cap stays reserved"
+                print(f"{k}: pending (pushed from a background command at {p.get('pushed_at')}; no version has run "
+                      f"on Kaggle since, so {held}. If that command ended without 'successfully pushed': "
+                      f"`kgkit gpu release {k}`)")
+                continue
             s, text = G.kernel_status(k)
             G.note_status(root, k, s)
-            print(f"{k}: {s}" + (f"  ({text})" if s == "unknown" else ""))
+            print(f"{k}: {s}" + (f"  ({text})" if s == "unknown" else "")
+                  + ("  (its push from a background command went through)" if k in confirmed else ""))
         if not kernels:
             print("no active remote runs")
     elif a.gpu_cmd == "release":
