@@ -789,3 +789,123 @@ def test_status_shows_submissions_deadline_and_gpu_like_the_brief(plugin_root, w
     st = S.load(ws)
     for line in (S.deadline_line(st), S.submissions_line(ws, st), G.quota_line(ws)):
         assert line and line in ctx and line in out
+
+
+# ----------------------------------------------------------------------------- #37 relative paths after cd
+def _hook(plugin_root, script, cmd, cwd, stdout=None):
+    payload = {"hook_event_name": "PostToolUse" if stdout is not None else "PreToolUse", "tool_name": "Bash",
+               "tool_input": {"command": cmd}, "cwd": str(cwd)}
+    if stdout is not None:
+        payload["tool_response"] = {"stdout": stdout}
+    r = subprocess.run([sys.executable, str(plugin_root / "hooks" / script)], input=json.dumps(payload),
+                       capture_output=True, text=True, timeout=60)
+    assert r.returncode == 0, r.stderr
+    return json.loads(r.stdout)["hookSpecificOutput"] if r.stdout.strip() else None
+
+
+def _two_gpu_kernels(ws):
+    base = ws / "experiments" / "phase4" / "kernels"
+    for name in ("vj-gold58", "oai-a18"):
+        (base / name).mkdir(parents=True)
+        (base / name / "kernel-metadata.json").write_text(json.dumps(
+            {"id": f"me/rsna-knee-{name}", "enable_gpu": True, "machine_shape": "NvidiaTeslaT4"}))
+    return base
+
+
+PUSHED_BOTH = "".join(f"Kernel version 2 successfully pushed.  Please check progress at "
+                      f"https://www.kaggle.com/code/me/rsna-knee-{n}\n" for n in ("vj-gold58", "oai-a18"))
+
+
+def test_each_push_is_read_from_the_folder_its_cd_left(plugin_root, ws):
+    base = _two_gpu_kernels(ws)
+    cmd = ("cd experiments/phase4/kernels/vj-gold58 && kaggle kernels push -p . -t 3600 && "
+           "cd ../oai-a18 && kaggle kernels push -p . -t 3600")
+    _quota(ws, gpu_left=0.5)
+    out = _hook(plugin_root, "pre_tool.py", cmd, ws)  # before the command: cwd is where it starts
+    assert out["permissionDecision"] == "ask" and "me/rsna-knee-vj-gold58 is capped" in out["permissionDecisionReason"]
+
+    ended = base / "oai-a18"  # after the command: cwd is where it left the shell
+    ctx = _hook(plugin_root, "post_tool.py", cmd, ended, PUSHED_BOTH)["additionalContext"]
+    assert "me/rsna-knee-vj-gold58 v2 logged" in ctx and "me/rsna-knee-oai-a18 v2 logged" in ctx
+    runs = [(r["kernel"], r["version"], r["name"], r["status"], r["hours"]) for r in G.runs(ws)]
+    assert runs == [("me/rsna-knee-vj-gold58", 2, "vj-gold58", "pushed", 1.0),
+                    ("me/rsna-knee-oai-a18", 2, "oai-a18", "pushed", 1.0)]
+    assert _hook(plugin_root, "post_tool.py", cmd, ended, PUSHED_BOTH) is None  # each version is logged once
+    assert len(G.runs(ws)) == 2
+
+
+def test_push_after_a_cd_the_hook_cannot_follow_is_reported_not_guessed(plugin_root, ws):
+    _two_gpu_kernels(ws)
+    cmd = "for k in vj-gold58 oai-a18; do (cd experiments/phase4/kernels/$k && kaggle kernels push -p .); done"
+    ctx = _hook(plugin_root, "post_tool.py", cmd, ws, PUSHED_BOTH)["additionalContext"]
+    assert "me/rsna-knee-vj-gold58 v2, me/rsna-knee-oai-a18 v2 pushed, but the hook could not tell" in ctx
+    assert "absolute `-p` path" in ctx and G.runs(ws) == []
+
+
+@pytest.mark.parametrize("cmd, ended_in, want", [
+    ("(cd A && kaggle kernels push -p .) && (cd B && kaggle kernels push -p .)", "", ["A", "B"]),
+    ("pushd A && kaggle kernels push -p . && popd && kaggle kernels push -p B", "", ["A", "B"]),
+    ("Set-Location kernels\\A; kaggle kernels push -p .; Set-Location ..\\B; kaggle kernels push -p .", "kernels/B",
+     ["kernels/A", "kernels/B"]),
+    ("cd A 2>/dev/null \\\n  && kaggle kernels push -p . 2>&1 | tail -3 && cd -", "", ["A"]),
+    ('bash -c "cd A && kaggle kernels push -p ." && cd B', "B", ["A"]),
+    ("git commit -m 'cd x' && kaggle kernels push -p A && cd A/sub", "A/sub", ["A"]),
+    ("cd $KDIR && kaggle kernels push -p .", "A", [None]),
+    ("if [ -d A ]; then cd A; fi; kaggle kernels push -p .", "A", [None]),
+    ("cd A | cat; kaggle kernels push -p .", "", [None]),
+])
+def test_push_folder_follows_the_cd_steps_before_it(plugin_root, tmp_path, monkeypatch, cmd, ended_in, want):
+    monkeypatch.delenv("CLAUDE_BASH_MAINTAIN_PROJECT_WORKING_DIR", raising=False)
+    start = tmp_path / "ws"
+    expected = [None if w is None else start / w for w in want]
+    assert _push_dirs(plugin_root, cmd, start) == expected  # PreToolUse: cwd is where the command starts
+    assert _push_dirs(plugin_root, cmd, start / ended_in, ran=True) == expected  # PostToolUse: where it ended
+
+
+def _push_dirs(plugin_root, cmd, cwd, ran=False):
+    sys.path.insert(0, str(plugin_root / "hooks"))
+    import _common as C
+
+    return [C.path_at({"tool_input": {"command": cmd}, "cwd": str(cwd)}, p["path"], p["at"], ran)
+            for p in C.parse_pushes(cmd)]
+
+
+def test_post_hook_undoes_only_the_cd_steps_it_can(plugin_root, tmp_path, monkeypatch):
+    monkeypatch.delenv("CLAUDE_BASH_MAINTAIN_PROJECT_WORKING_DIR", raising=False)
+    start = tmp_path / "ws"
+    cmd = "kaggle kernels push -p . && cd .."
+    assert _push_dirs(plugin_root, cmd, start) == [start]
+    assert _push_dirs(plugin_root, cmd, tmp_path, ran=True) == [None]  # which child of tmp_path it left is lost
+    # Claude Code can be set to return to the start directory after every command
+    monkeypatch.setenv("CLAUDE_BASH_MAINTAIN_PROJECT_WORKING_DIR", "1")
+    cmd = "cd A && kaggle kernels push -p . && cd ../B && kaggle kernels push -p ."
+    assert _push_dirs(plugin_root, cmd, start, ran=True) == [start / "A", start / "B"]
+
+
+def test_submit_and_upload_paths_follow_the_cd_before_them(plugin_root, ws):
+    (ws / "subs").mkdir()
+    (ws / "subs" / "good.csv").write_text("id,target\n1,0.1\n")
+    cmd = 'cd subs && kaggle competitions submit demo -f good.csv -m "0001_x"'
+    assert _hook(plugin_root, "pre_tool.py", cmd, ws) is None  # was denied: "not found: <ws>/good.csv"
+    out = _hook(plugin_root, "pre_tool.py", cmd.replace("good", "missing"), ws)
+    assert out["permissionDecision"] == "deny" and str(ws / "subs" / "missing.csv") in out["permissionDecisionReason"]
+    _hook(plugin_root, "post_tool.py", cmd, ws / "subs", "Successfully submitted to Demo")
+    logged = json.loads(S.submissions_log(ws).read_text().splitlines()[-1])
+    assert logged["size"] == (ws / "subs" / "good.csv").stat().st_size and len(logged["sha256"]) == 64
+    out = _hook(plugin_root, "pre_tool.py", cmd.replace("0001_x", "0002_again"), ws)
+    assert out["permissionDecision"] == "ask" and "already submitted" in out["permissionDecisionReason"]
+
+    up = ws / "kernels" / "w"
+    up.mkdir(parents=True)
+    (up / ".env").write_text("KAGGLE_KEY=1")
+    out = _hook(plugin_root, "pre_tool.py", "cd kernels/w && kaggle datasets create -p .", ws)
+    assert out["permissionDecision"] == "deny" and ".env" in out["permissionDecisionReason"]
+
+
+def test_record_push_logs_a_kernel_version_once(ws):
+    now = G._iso(G._now())
+    first = G.record_push(ws, {"kernel": "u/a", "version": 2, "hours": 1.0, "pushed_at": now, "status": "pushed"})
+    again = G.record_push(ws, {"kernel": "u/a", "version": 2, "hours": 9.0, "pushed_at": now, "status": "pushed"})
+    assert again == first and G.runs(ws) == [first]
+    G.record_push(ws, {"kernel": "u/a", "version": 3, "hours": 2.0, "pushed_at": now, "status": "pushed"})
+    assert [(r["version"], r["status"]) for r in G.runs(ws)] == [(2, "superseded"), (3, "pushed")]

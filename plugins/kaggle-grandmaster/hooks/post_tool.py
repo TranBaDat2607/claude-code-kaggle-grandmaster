@@ -1,8 +1,10 @@
 """PostToolUse: after `kaggle competitions submit`, log the submission locally (with the file's SHA-256 and
 what Kaggle says is left today) and remind Claude to fetch the public score and attach it to the
 experiment ledger. After each GPU or TPU `kaggle kernels push` in the command (`--help` calls aside),
-record the run in the GPU-hour log; a re-push of a kernel replaces its earlier reservation. The Kaggle CLI
-exits 0 after several failed writes; say so when one shows up in the output."""
+record the run in the GPU-hour log; a re-push of a kernel replaces its earlier reservation. `cwd` here is
+where the command left the shell: relative paths are read from where its `cd` steps were at that point, and
+a push whose folder cannot be told is reported, not logged. The Kaggle CLI exits 0 after several failed
+writes; say so when one shows up in the output."""
 
 from __future__ import annotations
 
@@ -76,39 +78,58 @@ def _poll_hint(root, sub: dict, st, slug: str) -> str:
 PUSHED_RE = re.compile(r"version\s+(\d+)\s+successfully pushed(?:[^\n]*?/code/([\w.-]+/[\w.-]+))?", re.IGNORECASE)
 
 
-def _pushed_version(text: str, kernel: str, n_pushes: int) -> int | None:
-    """The version Kaggle reported for ``kernel``: matched on the progress URL when the command pushed several
-    kernels, else the only success line."""
-    hits = [(int(m.group(1)), (m.group(2) or "").lower()) for m in PUSHED_RE.finditer(text)]
+def _take_version(hits: list, kernel: str, n_pushes: int) -> int | None:
+    """Take from ``hits`` [(version, kernel ref)] the version Kaggle reported for ``kernel``: matched on the
+    progress URL, else the only success line when the command pushed once."""
     slug = kernel.split("/")[-1].lower()
-    for v, ref in hits:
+    for i, (_, ref) in enumerate(hits):
         if ref and ref.split("/")[-1] == slug:
-            return v
+            return hits.pop(i)[0]
     if n_pushes == 1 and len(hits) == 1:
-        return hits[0][0]
+        return hits.pop()[0]
     return None
 
 
-def log_gpu_push(payload: dict, push: dict, n_pushes: int = 1) -> str | None:
-    """A raw GPU/TPU `kaggle kernels push` spends quota too: record it so budgets account for it."""
+def log_gpu_pushes(payload: dict, pushes: list[dict]) -> list[str]:
+    """Log each GPU/TPU push of the command that Kaggle accepted. A success line that no push accounts for
+    (its folder depends on a `cd` the hook cannot trace) is reported, not guessed: a guess logs another kernel."""
     root = C.workspace(payload)
-    target = C.push_target(payload, push)
-    res = C.push_resource(push, target[1]) if target is not None else None
-    if root is None or res is None:
+    if root is None or not pushes:
+        return []
+    hits = [(int(m.group(1)), (m.group(2) or "").lower()) for m in PUSHED_RE.finditer(_response_text(payload))]
+    notes = []
+    for push in pushes:
+        target = C.push_target(payload, push, ran=True)
+        version = _take_version(hits, target[1].get("id") or "?", len(pushes)) if target else None
+        if version is not None:
+            notes.append(log_gpu_push(root, push, target, version))
+    logged = {(str(r.get("kernel") or "").lower(), r.get("version")) for r in C.G.runs(root)}
+    missed = [f"{ref or 'a kernel'} v{v}" for v, ref in hits if (ref, v) not in logged]
+    if missed:
+        notes.append(f"kaggle-grandmaster: Kaggle reports {', '.join(missed)} pushed, but the hook could not tell "
+                     "which kernel folder the push used (typically after a `cd` with a variable, in a loop or in a "
+                     "pipe), so the run is not in the GPU-hour log and, if it runs on a GPU or TPU, quota checks "
+                     "do not reserve its hours. Push each kernel with an absolute `-p` path, or with `python -m "
+                     "kgkit gpu push <dir>`, so the run is logged.")
+    return [n for n in notes if n]
+
+
+def log_gpu_push(root: Path, push: dict, target: tuple, version: int) -> str | None:
+    """A raw GPU/TPU `kaggle kernels push` spends quota too: record it so budgets account for it."""
+    res = C.push_resource(push, target[1])
+    if res is None:
         return None
     kernel = target[1].get("id") or "?"
-    version = _pushed_version(_response_text(payload), kernel, n_pushes)
-    if version is None:
-        return None
     try:
         hours = round(float(push["timeout"]) / 3600, 3) if push.get("timeout") else C.G.session_limit(res)
     except ValueError:
         hours = C.G.session_limit(res)
     acc = push.get("accelerator") or C.G.kernel_meta_accelerator(target[1])
-    C.G.record_push(root, {"kernel": kernel, "version": version, "name": target[0].name, "accelerator": acc,
-                           "resource": res, "hours": hours,
-                           "pushed_at": dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-                           "status": "pushed", "via": "kaggle-cli"})
+    rec = {"kernel": kernel, "version": version, "name": target[0].name, "accelerator": acc, "resource": res,
+           "hours": hours, "pushed_at": dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+           "status": "pushed", "via": "kaggle-cli"}
+    if C.G.record_push(root, rec) is not rec:
+        return None  # this version is in the log already
     queue = (" TPU jobs usually wait 10-24h in the queue; `kaggle kernels logs` is empty until the session ends."
              if res == "TPU" else "")
     return (f"kaggle-grandmaster: {res} kernel {kernel} v{version} logged (cap {hours}h of weekly quota"
@@ -146,10 +167,10 @@ def log_submission(payload: dict, sub: dict) -> str | None:
     ok = SUBMIT_OK_RE.search(text) is not None and "could not submit" not in low
     status = "submitted" if ok else ("failed" if failed else "unknown")
     left = REMAINING_RE.search(text)
-    sha = size = None
+    sha = size = f = None
     if sub.get("file") and not sub.get("kernel"):
-        f = Path(sub["file"])
-        f = f if f.is_absolute() else Path(payload.get("cwd") or ".") / f
+        f = C.path_at(payload, sub["file"], sub.get("at", 0), ran=True)
+    if f is not None:
         sha = C.file_sha256(f)
         try:
             size = f.stat().st_size
@@ -193,10 +214,7 @@ def main() -> None:
     payload = C.read_input()
     cmd = C.command_of(payload)
     # One command can chain an upload, a push and a submit: report on each, in one message.
-    notes = [silent_failure_note(payload)]
-    pushes = C.parse_pushes(cmd)
-    for push in pushes:
-        notes.append(log_gpu_push(payload, push, len(pushes)))
+    notes = [silent_failure_note(payload), *log_gpu_pushes(payload, C.parse_pushes(cmd))]
     sub = C.parse_submit(cmd)
     if sub is not None:
         notes.append(log_submission(payload, sub))
