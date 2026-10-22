@@ -3,8 +3,10 @@ what Kaggle says is left today) and remind Claude to fetch the public score and 
 experiment ledger. After each GPU or TPU `kaggle kernels push` in the command (`--help` calls aside),
 record the run in the GPU-hour log; a re-push of a kernel replaces its earlier reservation. `cwd` here is
 where the command left the shell: relative paths are read from where its `cd` steps were at that point, and
-a push whose folder cannot be told is reported, not logged. The Kaggle CLI exits 0 after several failed
-writes; say so when one shows up in the output."""
+a push whose folder cannot be told is reported, not logged. A command that went on in the background has
+left `cwd` where it started, and Kaggle's reply comes after this hook: its pushes are logged as pending, their
+whole cap reserved, until `kgkit gpu status` / `gpu wait` see Kaggle run them. The Kaggle CLI exits 0 after
+several failed writes; say so when one shows up in the output."""
 
 from __future__ import annotations
 
@@ -25,6 +27,37 @@ def _response_text(payload: dict) -> str:
     if isinstance(r, dict):
         return " ".join(str(r.get(k, "")) for k in ("stdout", "stderr", "output", "error"))
     return str(r or "")
+
+
+# Claude Code's Bash and PowerShell results for a command that goes on in the background (asked for with
+# run_in_background, or moved there on its timeout or by the user): a task id and none of the output, which goes
+# to a file no hook reads. The text form is what the model sees.
+BACKGROUND_RE = re.compile(r"running in background with ID|moved to the background|backgrounded by user",
+                           re.IGNORECASE)
+
+
+def _backgrounded(payload: dict) -> bool:
+    if (payload.get("tool_input") or {}).get("run_in_background"):
+        return True
+    r = payload.get("tool_response")
+    if isinstance(r, dict):
+        return bool(r.get("backgroundTaskId"))
+    return BACKGROUND_RE.search(str(r or "")) is not None
+
+
+def _background_since(payload: dict) -> dt.datetime:
+    """When a backgrounded command started: now if it was asked to run in the background; one moved there
+    later ran in the foreground first, for its timeout at most (Claude Code's default: 2 minutes)."""
+    now = dt.datetime.now(dt.timezone.utc)
+    ti = payload.get("tool_input") or {}
+    if ti.get("run_in_background"):
+        return now
+    r = payload.get("tool_response")
+    ms = (r.get("timedOutAfterMs") if isinstance(r, dict) else None) or ti.get("timeout") or 120_000
+    try:
+        return now - dt.timedelta(milliseconds=float(ms))
+    except (TypeError, ValueError, OverflowError):
+        return now - dt.timedelta(minutes=2)
 
 
 # A successful `submit -k` (code competition) prints only "N submissions remaining today."
@@ -92,17 +125,23 @@ def _take_version(hits: list, kernel: str, n_pushes: int) -> int | None:
 
 def log_gpu_pushes(payload: dict, pushes: list[dict]) -> list[str]:
     """Log each GPU/TPU push of the command that Kaggle accepted. A success line that no push accounts for
-    (its folder depends on a `cd` the hook cannot trace) is reported, not guessed: a guess logs another kernel."""
+    (its folder depends on a `cd` the hook cannot trace) is reported, not guessed: a guess logs another kernel.
+    In a command that went on in the background Kaggle has not answered yet: its pushes are logged as pending."""
     root = C.workspace(payload)
     if root is None or not pushes:
         return []
+    since = _background_since(payload) if _backgrounded(payload) else None
     hits = [(int(m.group(1)), (m.group(2) or "").lower()) for m in PUSHED_RE.finditer(_response_text(payload))]
-    notes = []
+    notes, unplaced = [], False
     for push in pushes:
-        target = C.push_target(payload, push, ran=True)
+        target = C.push_target(payload, push, ran=since is None)  # in the background: cwd is where it started
         version = _take_version(hits, target[1].get("id") or "?", len(pushes)) if target else None
         if version is not None:
             notes.append(log_gpu_push(root, push, target, version))
+        elif since is not None and target is not None:
+            notes.append(log_pending_push(root, push, target, since))
+        elif since is not None:
+            unplaced = True
     logged = {(str(r.get("kernel") or "").lower(), r.get("version")) for r in C.G.runs(root)}
     missed = [f"{ref or 'a kernel'} v{v}" for v, ref in hits if (ref, v) not in logged]
     if missed:
@@ -111,7 +150,41 @@ def log_gpu_pushes(payload: dict, pushes: list[dict]) -> list[str]:
                      "pipe), so the run is not in the GPU-hour log and, if it runs on a GPU or TPU, quota checks "
                      "do not reserve its hours. Push each kernel with an absolute `-p` path, or with `python -m "
                      "kgkit gpu push <dir>`, so the run is logged.")
+    if unplaced:
+        notes.append("kaggle-grandmaster: this command runs in the background and pushes a kernel from a folder the "
+                     "hook cannot tell (typically after a `cd` with a variable, in a loop or in a pipe), so the run "
+                     "is not in the GPU-hour log and, if it runs on a GPU or TPU, quota checks do not reserve its "
+                     "hours. Push each kernel with an absolute `-p` path, or with `python -m kgkit gpu push <dir>`, "
+                     "so the run is logged.")
     return [n for n in notes if n]
+
+
+def _push_record(push: dict, target: tuple, res: str, version: int | None, status: str, at: dt.datetime) -> dict:
+    try:
+        hours = round(float(push["timeout"]) / 3600, 3) if push.get("timeout") else C.G.session_limit(res)
+    except ValueError:
+        hours = C.G.session_limit(res)
+    return {"kernel": target[1].get("id") or "?", "version": version, "name": target[0].name,
+            "accelerator": push.get("accelerator") or C.G.kernel_meta_accelerator(target[1]), "resource": res,
+            "hours": hours, "pushed_at": at.strftime("%Y-%m-%dT%H:%M:%SZ"), "status": status, "via": "kaggle-cli"}
+
+
+def log_pending_push(root: Path, push: dict, target: tuple, since: dt.datetime) -> str | None:
+    """A GPU/TPU push in a command that went on in the background: the run is logged as pending, its whole cap
+    reserved, until Kaggle lists a version of the kernel run after ``since`` (when the command started)."""
+    res = C.push_resource(push, target[1])
+    if res is None:
+        return None
+    rec = dict(_push_record(push, target, res, None, C.G.PENDING, since), background=True)
+    C.G.record_push(root, rec)
+    kernel, hours = rec["kernel"], rec["hours"]
+    return (f"kaggle-grandmaster: this command runs in the background, so Kaggle's reply to its {res} push of "
+            f"{kernel} (with the version) is not in this result. The run is logged as pending, with its cap of "
+            f"{hours}h of weekly quota reserved" + ("" if push.get("timeout") else " (no -t: the full session limit)")
+            + f", until Kaggle lists a version of it run after the command started. `python -m kgkit gpu wait "
+            f"{kernel}`, run in the background, waits for the push and then for the run (`gpu status` and `gpu "
+            f"quota` check it too). If the command ends without 'successfully pushed', run `python -m kgkit gpu "
+            f"release {kernel}`.")
 
 
 def log_gpu_push(root: Path, push: dict, target: tuple, version: int) -> str | None:
@@ -119,17 +192,10 @@ def log_gpu_push(root: Path, push: dict, target: tuple, version: int) -> str | N
     res = C.push_resource(push, target[1])
     if res is None:
         return None
-    kernel = target[1].get("id") or "?"
-    try:
-        hours = round(float(push["timeout"]) / 3600, 3) if push.get("timeout") else C.G.session_limit(res)
-    except ValueError:
-        hours = C.G.session_limit(res)
-    acc = push.get("accelerator") or C.G.kernel_meta_accelerator(target[1])
-    rec = {"kernel": kernel, "version": version, "name": target[0].name, "accelerator": acc, "resource": res,
-           "hours": hours, "pushed_at": dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-           "status": "pushed", "via": "kaggle-cli"}
+    rec = _push_record(push, target, res, version, "pushed", dt.datetime.now(dt.timezone.utc))
     if C.G.record_push(root, rec) is not rec:
         return None  # this version is in the log already
+    kernel, hours = rec["kernel"], rec["hours"]
     queue = (" TPU jobs usually wait 10-24h in the queue; `kaggle kernels logs` is empty until the session ends."
              if res == "TPU" else "")
     return (f"kaggle-grandmaster: {res} kernel {kernel} v{version} logged (cap {hours}h of weekly quota"

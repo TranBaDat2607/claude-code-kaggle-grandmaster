@@ -57,7 +57,10 @@ log                 ->  every remote run with its cost and result
 Raw `kaggle kernels push` calls are logged by the plugin's hook too (every push in a compound command,
 each from the folder its `cd` steps lead to), and a re-push of the same kernel replaces its older
 reservation. After a `cd` it cannot trace (a variable, a loop) the hook reports the push unlogged: give
-`-p` an absolute path there. Your username (for `"id"` in kernel-metadata.json): `python -m kgkit whoami`.
+`-p` an absolute path there. A push in a command that runs in the background (say, a loop that retries until
+a session slot frees up) is logged as pending: its whole cap stays reserved until Kaggle lists a version of
+the kernel run after it, which `gpu status` and `gpu wait <kernel>` check (`gpu release <kernel>` if the
+push never went through). Your username (for `"id"` in kernel-metadata.json): `python -m kgkit whoami`.
 
 The runner links every attached input into `./data` and points `./artifacts` and `./subs` into
 `/kaggle/working`. Your training command then runs unchanged, with the same relative paths and the same frozen

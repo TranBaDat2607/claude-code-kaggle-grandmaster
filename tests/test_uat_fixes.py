@@ -909,3 +909,133 @@ def test_record_push_logs_a_kernel_version_once(ws):
     assert again == first and G.runs(ws) == [first]
     G.record_push(ws, {"kernel": "u/a", "version": 3, "hours": 2.0, "pushed_at": now, "status": "pushed"})
     assert [(r["version"], r["status"]) for r in G.runs(ws)] == [(2, "superseded"), (3, "pushed")]
+
+
+# ----------------------------------------------------------------------------- #38 pushes from background commands
+def _post_bg(plugin_root, cmd, cwd, asked=True, **response):
+    """PostToolUse of a Bash call that went on in the background, as Claude Code sends it: the call returns
+    before the command ends, with a task id and none of its output, and the session's cwd is still where the
+    command started. ``asked``: run_in_background was set (else the call was moved there, e.g. on its timeout)."""
+    payload = {"hook_event_name": "PostToolUse", "tool_name": "Bash", "cwd": str(cwd),
+               "tool_input": {"command": cmd, **({"run_in_background": True} if asked else {})},
+               "tool_response": {"stdout": "", "stderr": "", "interrupted": False, "backgroundTaskId": "b7x2",
+                                 **response}}
+    r = subprocess.run([sys.executable, str(plugin_root / "hooks" / "post_tool.py")], input=json.dumps(payload),
+                       capture_output=True, text=True, timeout=60)
+    assert r.returncode == 0, r.stderr
+    return json.loads(r.stdout)["hookSpecificOutput"]["additionalContext"] if r.stdout.strip() else None
+
+
+def test_background_push_is_logged_pending_with_its_cap_reserved(plugin_root, ws):
+    base = _two_gpu_kernels(ws)
+    _quota(ws, gpu_left=1.5)
+    kdir = (base / "vj-gold58").as_posix()
+    cmd = (f"for i in $(seq 1 120); do out=$(kaggle kernels push -p {kdir} -t 3600 2>&1 | tail -1); "
+           'echo "$out" | grep -q "successfully pushed" && break; sleep 120; done')
+    ctx = _post_bg(plugin_root, cmd, ws)
+    assert "GPU push of me/rsna-knee-vj-gold58" in ctx and "logged as pending" in ctx
+    assert "gpu wait me/rsna-knee-vj-gold58" in ctx and "gpu release me/rsna-knee-vj-gold58" in ctx
+    run = G.runs(ws)[-1]
+    assert (run["kernel"], run["version"], run["status"], run["hours"]) == ("me/rsna-knee-vj-gold58", None,
+                                                                           "pending", 1.0)
+    assert G.available_hours(ws) == pytest.approx(0.5)  # the whole cap: the run may not even have started
+    assert ("me/rsna-knee-vj-gold58 [pending, cap 1h, via kaggle CLI]: ~1.00h reserved"
+            in G.quota_report(ws, refresh=False))
+    out = _hook(plugin_root, "pre_tool.py", f"kaggle kernels push -p {(base / 'oai-a18').as_posix()} -t 3600", ws)
+    assert out["permissionDecision"] == "ask" and "only 0.50h of GPU quota" in out["permissionDecisionReason"]
+    # a push of the same kernel that Kaggle confirms takes the reservation over
+    _hook(plugin_root, "post_tool.py", f"kaggle kernels push -p {kdir} -t 3600", ws,
+          "Kernel version 3 successfully pushed.  Please check progress at "
+          "https://www.kaggle.com/code/me/rsna-knee-vj-gold58")
+    assert [(r["version"], r["status"]) for r in G.runs(ws)] == [(None, "superseded"), (3, "pushed")]
+
+
+@pytest.mark.parametrize("asked, response, ran_s", [(True, {}, 0), (False, {"timedOutAfterMs": 120000}, 120)])
+def test_background_push_folder_is_read_from_where_the_command_started(plugin_root, ws, asked, response, ran_s):
+    _two_gpu_kernels(ws)
+    cmd = "cd experiments/phase4/kernels/oai-a18 && kaggle kernels push -p . -t 1800"
+    assert "me/rsna-knee-oai-a18" in _post_bg(plugin_root, cmd, ws, asked=asked, **response)
+    run = G.runs(ws)[-1]
+    assert (run["kernel"], run["status"], run["hours"]) == ("me/rsna-knee-oai-a18", "pending", 0.5)
+    # moved to the background on its timeout, the command had been running that long already
+    ago = (G._now() - G._parse_time(run["pushed_at"])).total_seconds()
+    assert ran_s <= ago < ran_s + 60
+
+
+def test_background_push_the_hook_cannot_place_is_reported_not_logged(plugin_root, ws):
+    _two_gpu_kernels(ws)
+    ctx = _post_bg(plugin_root, "cd $KDIR && kaggle kernels push -p .", ws)
+    assert "folder the hook cannot tell" in ctx and "absolute `-p` path" in ctx and G.runs(ws) == []
+
+
+def _pending(ws, since, kernel="me/k", hours=2.0):
+    return G.record_push(ws, {"kernel": kernel, "version": None, "name": kernel.split("/")[-1],
+                              "accelerator": "NvidiaTeslaT4", "resource": "GPU", "hours": hours,
+                              "pushed_at": G._iso(since), "status": G.PENDING, "via": "kaggle-cli",
+                              "background": True})
+
+
+def _kaggle_latest_run(latest):
+    """Kaggle for me/k, whose latest version ran at latest["at"] and has status latest["status"] (moved on by
+    the test): `kernels list -m` and `kernels status`."""
+    def listing(args):
+        return _cp(json.dumps([{"ref": "me/k", "lastRunTime": latest["at"].strftime("%Y-%m-%dT%H:%M:%S.%f")}]))
+
+    def status(args):
+        return _cp(f'me/k has status "KernelWorkerStatus.{latest["status"]}"')
+    return FakeKaggle([(["kernels", "list"], listing), (["kernels", "status"], status)])
+
+
+def test_pending_push_takes_no_status_until_kaggle_lists_a_run_after_it(ws, monkeypatch, capsys):
+    from kgkit import cli
+
+    _quota(ws, gpu_left=10.0)
+    t0 = G._now()
+    G.log_run(ws, {"kernel": "me/k", "version": 2, "hours": 1.0, "status": "complete",
+                   "pushed_at": G._iso(t0 - dt.timedelta(hours=6))})
+    _pending(ws, t0)
+    latest = {"at": t0 - dt.timedelta(hours=6), "status": "COMPLETE"}  # Kaggle still shows version 2
+    fake = _kaggle_latest_run(latest)
+    monkeypatch.setattr(G, "run_kaggle", fake)
+    assert G.refresh_runs(ws) == {"me/k": "pending"}
+    assert not [c for c in fake.calls if c[:2] == ["kernels", "status"]]  # version 2's status is not the push's
+    G.note_status(ws, "me/k", "complete")
+    G.update_run(ws, "me/k", status="collected")
+    assert [r["status"] for r in G.runs(ws)] == ["collected", "pending"]
+    assert G.available_hours(ws) == pytest.approx(8.0)
+    monkeypatch.chdir(ws)
+    cli.main(["gpu", "status"])
+    out = capsys.readouterr().out
+    assert "me/k: pending (pushed from a background command at" in out and "its cap stays reserved" in out
+    latest.update(at=t0 + dt.timedelta(minutes=4), status="RUNNING")  # the push went through
+    cli.main(["gpu", "status"])
+    assert "me/k: running  (its push from a background command went through)" in capsys.readouterr().out
+    run = G.runs(ws)[-1]
+    assert run["status"] == "running" and run["pushed_at"] == G._iso(latest["at"]) and run["started_at"]
+
+
+def test_wait_waits_for_a_pending_push_then_for_its_run(ws, monkeypatch, capsys):
+    t0 = G._now()
+    _pending(ws, t0)
+    latest = {"at": t0 - dt.timedelta(days=1), "status": "COMPLETE"}  # an earlier version
+    monkeypatch.setattr(G, "run_kaggle", _kaggle_latest_run(latest))
+    polls = iter([{"at": t0 + dt.timedelta(minutes=1), "status": "RUNNING"}, {"status": "COMPLETE"}])
+    monkeypatch.setattr(G, "time", SimpleNamespace(time=G.time.time, sleep=lambda s: latest.update(next(polls))))
+    assert G.wait(ws, "me/k") == "complete"
+    out = capsys.readouterr().out
+    assert "me/k: pending (waiting for its push from a background command" in out
+    assert "me/k: running" in out and "me/k: complete" in out and G.runs(ws)[-1]["status"] == "complete"
+
+
+def test_wait_stops_at_a_pending_push_kaggle_never_ran(ws, monkeypatch, capsys):
+    from kgkit import cli
+
+    t0 = G._now() - dt.timedelta(hours=4)  # longer ago than its 2h cap plus the hour a GPU job may queue
+    _pending(ws, t0)
+    monkeypatch.setattr(G, "run_kaggle", _kaggle_latest_run({"at": t0 - dt.timedelta(days=1), "status": "COMPLETE"}))
+    assert G.wait(ws, "me/k") == "pending"
+    assert "that push most likely failed" in capsys.readouterr().out
+    monkeypatch.chdir(ws)
+    cli.main(["gpu", "status"])
+    assert "its reservation has lapsed" in capsys.readouterr().out
+    assert G.active_runs(ws) == [] and G.release(ws, "me/k") == 1

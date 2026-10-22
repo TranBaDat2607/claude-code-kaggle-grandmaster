@@ -63,8 +63,13 @@ BUNDLE_EXCLUDE_DIRS = {"__pycache__", ".git", ".ipynb_checkpoints", "wandb", ".v
 BUNDLE_EXCLUDE_SUFFIXES = {".pyc", ".pt", ".pth", ".bin", ".ckpt", ".safetensors", ".npy", ".npz", ".pkl",
                            ".parquet", ".feather", ".zip", ".png", ".jpg", ".jpeg", ".dcm"}
 BUNDLE_WARN_MB, BUNDLE_MAX_MB = 2.0, 20.0
-ACTIVE = ("pushed", "queued", "running")
+# A push in a command that went on in the background: Kaggle's reply (and the version) came after the hook ran,
+# so the run may not have started. It reserves its whole cap and takes no status from Kaggle, which still reports
+# an earlier version, until Kaggle lists a version of the kernel run after it (`confirm_pending`).
+PENDING = "pending"
+ACTIVE = (PENDING, "pushed", "queued", "running")
 FINISHED = ("complete", "error", "cancelled")
+CLOCK_SKEW_S = 60  # this machine's clock vs Kaggle's, when a pending push is matched to the kernel's last run
 
 
 def _now() -> dt.datetime:
@@ -253,11 +258,12 @@ def run_label(r: dict) -> str:
 
 def reserved_hours(r: dict, fetched: dt.datetime | None = None) -> float:
     """Quota an active run may still spend after the quota snapshot taken at ``fetched``. A queued run
-    (TPU jobs wait for hours) reserves its whole cap; a running one its cap minus the time it has run."""
+    (TPU jobs wait for hours) or a pending push reserves its whole cap; a running one its cap minus the time it
+    has run."""
     res = run_resource(r)
     cap = float(r.get("hours") or session_limit(res))
     start = _parse_time(r.get("started_at"))
-    if start is None and res != "TPU" and r.get("status") != "queued":
+    if start is None and res != "TPU" and r.get("status") not in ("queued", PENDING):
         start = _parse_time(r.get("pushed_at"))  # GPU batch sessions usually start within minutes
     if start is None:
         return cap
@@ -417,10 +423,11 @@ def record_push(root: str | Path, rec: dict) -> dict:
 
 
 def update_run(root: str | Path, kernel: str, version: int | None = None, **fields) -> dict | None:
-    """Update the latest run of ``kernel`` (optionally a given version)."""
+    """Update the latest run of ``kernel`` (optionally a given version); a pending push is not a run yet."""
     recs = runs(root)
     for r in reversed(recs):
-        if r.get("kernel") == kernel and (version is None or r.get("version") in (None, version)):
+        if (r.get("kernel") == kernel and r.get("status") != PENDING
+                and (version is None or r.get("version") in (None, version))):
             r.update(fields)
             _write_runs(root, recs)
             return r
@@ -430,9 +437,10 @@ def update_run(root: str | Path, kernel: str, version: int | None = None, **fiel
 def note_status(root: str | Path, kernel: str, status: str) -> None:
     """Record a status read from Kaggle. A finished status closes every active entry of the kernel (Kaggle
     reports only the latest version, and earlier versions ended before it); a running one stamps
-    ``started_at`` the first time it is seen, so a queued TPU job is not charged for its queue time."""
+    ``started_at`` the first time it is seen, so a queued TPU job is not charged for its queue time. A pending
+    push takes neither: the status is still an earlier version's."""
     recs = runs(root)
-    mine = [r for r in recs if r.get("kernel") == kernel]
+    mine = [r for r in recs if r.get("kernel") == kernel and r.get("status") != PENDING]
     if not mine or status not in (*FINISHED, "queued", "running"):
         return
     now = _iso(_now())
@@ -462,11 +470,38 @@ def release(root: str | Path, kernel: str, status: str = "released") -> int:
     return n
 
 
+def confirm_pending(root: str | Path, kernels: list[str] | None = None) -> list[dict]:
+    """Pending pushes (of ``kernels``, default all) whose kernel Kaggle lists as run after the background command
+    started: the push went through, so each becomes an ordinary entry timed from that run, and Kaggle's status is
+    its own from then on. One listing call, made only when the log has a pending entry. Returns those confirmed."""
+    recs = runs(root)
+    pend = [r for r in recs if r.get("status") == PENDING and (kernels is None or r.get("kernel") in kernels)]
+    if not pend:
+        return []
+    ran = {ref.lower(): t for ref, t in recent_kernels(20) or [] if t is not None}
+    done = []
+    for r in pend:
+        t, since = ran.get(str(r.get("kernel")).lower()), _parse_time(r.get("pushed_at"))
+        if t is not None and since is not None and t >= since - dt.timedelta(seconds=CLOCK_SKEW_S):
+            r.update(status="pushed", pushed_at=_iso(t))
+            done.append(r)
+    if done:
+        _write_runs(root, recs)
+    return done
+
+
 def refresh_runs(root: str | Path) -> dict[str, str]:
-    """Ask Kaggle for the status of every kernel the log still has as active (one call per kernel)."""
-    kernels = list(dict.fromkeys(r["kernel"] for r in runs(root) if r.get("status") in ACTIVE and r.get("kernel")))
+    """Ask Kaggle for the status of every kernel the log still has as active (one call per kernel). Pending
+    pushes are looked up first (`confirm_pending`); one Kaggle has not run yet is reported as pending."""
+    confirm_pending(root)
+    recs = runs(root)
+    kernels = list(dict.fromkeys(r["kernel"] for r in recs if r.get("status") in ACTIVE and r.get("kernel")))
+    pending = {r.get("kernel") for r in recs if r.get("status") == PENDING}
     out = {}
     for k in kernels:
+        if k in pending:
+            out[k] = PENDING
+            continue
         try:
             s, _ = kernel_status(k)
         except (OSError, subprocess.SubprocessError):
@@ -749,9 +784,9 @@ def pending_sources(kdir: Path) -> list[tuple[str, str]]:
     return out
 
 
-def busy_sessions(max_kernels: int = 8, within_h: float = 48.0) -> list[tuple[str, str]] | None:
-    """(kernel, status) of the account's own kernels queued or running now, in any competition: the
-    most recently run ``max_kernels`` are checked. None when the listing fails."""
+def recent_kernels(max_kernels: int = 8) -> list[tuple[str, dt.datetime | None]] | None:
+    """(ref, lastRunTime) of the account's own ``max_kernels`` most recently run kernels, latest first;
+    lastRunTime is when Kaggle ran a kernel's latest version (UTC). None when the listing fails."""
     try:
         r = run_kaggle(["kernels", "list", "-m", "--sort-by", "dateRun", "--page-size", str(max_kernels),
                         "--format", "json"], timeout=120)
@@ -764,10 +799,19 @@ def busy_sessions(max_kernels: int = 8, within_h: float = 48.0) -> list[tuple[st
         rows = None
     if not isinstance(rows, list):
         return None
+    return [(row["ref"], _parse_time(row.get("lastRunTime"))) for row in rows
+            if isinstance(row, dict) and row.get("ref")]
+
+
+def busy_sessions(max_kernels: int = 8, within_h: float = 48.0) -> list[tuple[str, str]] | None:
+    """(kernel, status) of the account's own kernels queued or running now, in any competition: the
+    most recently run ``max_kernels`` are checked. None when the listing fails."""
+    recent = recent_kernels(max_kernels)
+    if recent is None:
+        return None
     out = []
-    for row in rows:
-        ref, t = row.get("ref"), _parse_time(row.get("lastRunTime"))
-        if not ref or t is None or (_now() - t).total_seconds() / 3600 > within_h:
+    for ref, t in recent:
+        if t is None or (_now() - t).total_seconds() / 3600 > within_h:
             continue
         try:
             s, _ = kernel_status(ref)
@@ -874,18 +918,32 @@ def cancel_advice(kernel: str, status: str) -> str:
 
 
 def wait(root: str | Path | None, kernel: str, interval: float = 60, max_hours: float = SESSION_LIMIT_H + 1) -> str:
+    """Poll ``kernel`` until its run ends. A pending push is waited for first: until Kaggle runs it, the status
+    Kaggle reports is an earlier version's."""
     root = _root(root)
     t_end = time.time() + max_hours * 3600
     last = None
     while True:
-        try:
-            s, text = kernel_status(kernel)
-        except (OSError, subprocess.SubprocessError) as e:
-            s, text = "unknown", str(e)
+        pend = next((r for r in runs(root) if r.get("kernel") == kernel and r.get("status") == PENDING), None)
+        if pend is not None and confirm_pending(root, [kernel]):
+            pend = None
+        if pend is not None:
+            s, text = PENDING, ""
+        else:
+            try:
+                s, text = kernel_status(kernel)
+            except (OSError, subprocess.SubprocessError) as e:
+                s, text = "unknown", str(e)
         if s != last:
-            print(f"{_iso(_now())} {kernel}: {s}", flush=True)
+            print(f"{_iso(_now())} {kernel}: {s}" + (" (waiting for its push from a background command to reach "
+                                                     "Kaggle)" if pend is not None else ""), flush=True)
             note_status(root, kernel, s)
             last = s
+        if pend is not None and _stale(pend, _now()):
+            print(f"no version of {kernel} has run on Kaggle since its push from a background command at "
+                  f"{pend.get('pushed_at')}: that push most likely failed (read that command's output). "
+                  f"`kgkit gpu release {kernel}` drops its reservation.")
+            return s
         if s in FINISHED:
             if s != "complete":
                 print(text)
@@ -1048,6 +1106,7 @@ def diagnose(report: dict) -> list[str]:
 def collect(root: str | Path | None, kernel: str, from_dir: str | Path | None = None, weights: bool = False,
             version: int | None = None) -> dict:
     root = _root(root)
+    confirm_pending(root, [kernel])  # a push from a background command that Kaggle ran is the run collected here
     kslug = kernel.split("/")[-1]
     if from_dir is None:
         out = root / S.STATE_DIR / "remote" / kslug
@@ -1075,7 +1134,8 @@ def collect(root: str | Path | None, kernel: str, from_dir: str | Path | None = 
         if (out / "artifacts" / j["name"]).is_dir():
             _merge_tree(out / "artifacts" / j["name"], root / "artifacts" / j["name"])
     note_status(root, kernel, "complete")  # older still-open entries of this kernel ended before this output
-    run = next((r for r in reversed(runs(root)) if r.get("kernel") == kernel), {})
+    # a push still pending is not on Kaggle yet: this output is an earlier version's
+    run = next((r for r in reversed(runs(root)) if r.get("kernel") == kernel and r.get("status") != PENDING), {})
     version = version or run.get("version")
     imported = import_ledger(root, out, report, kernel, version)
     gpu_h = round(report.get("elapsed_s", 0) / 3600, 3)
