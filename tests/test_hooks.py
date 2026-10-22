@@ -387,7 +387,8 @@ def test_stale_remaining_count_is_not_reused(plugin_root, ws, monkeypatch):
     S.CompetitionState(slug="demo", metric="auc", daily_submissions=5, deadline="2099-01-01").save(ws)
     cmd = 'kaggle competitions submit demo -f subs/good.csv -m "0001_lgbm"'
     hook(plugin_root, "post_tool.py", _post(cmd, "0 submissions remaining today.", ws))
-    hook(plugin_root, "post_tool.py", _post(cmd.replace("0001", "0002"), "", ws))  # no count printed
+    hook(plugin_root, "post_tool.py", _post(cmd.replace("0001", "0002"), "Successfully submitted to Demo",
+                                            ws))  # accepted, no count printed (-q)
     monkeypatch.syspath_prepend(str(plugin_root / "hooks"))
     import _common as C
 

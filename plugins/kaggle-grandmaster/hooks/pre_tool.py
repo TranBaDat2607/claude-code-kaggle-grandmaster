@@ -6,9 +6,11 @@
    for that call (the CLI then prints request headers, bearer token included). Text that only mentions the
    file (a heredoc saved with cat/tee, a commit message) passes; `python -m kgkit whoami` gives the username.
 2. Blocks a dataset or model upload whose folder holds credential-like files or links to files outside it.
-3. Before `kaggle competitions submit -f FILE`: validates FILE against sample_submission (deny with reasons
-   when invalid), and asks for confirmation when the same file was already submitted, when today's local
-   count has reached the daily limit, or when Kaggle reported no submissions left today for the team.
+3. Before each `kaggle competitions submit -f FILE` in the command: validates FILE against sample_submission
+   (deny with reasons when invalid), and asks for confirmation when the same file was already submitted, when
+   the command's submits would take today's local count past the daily limit, or when Kaggle reported fewer
+   submissions left today for the team than the command makes. A heredoc that is only text (an issue body
+   that cat saves, a commit message) is not read for submits.
 4. Before each GPU or TPU `kaggle kernels push` in the command: asks for confirmation when the cached
    weekly quota of that accelerator (minus kernels still running) is exhausted or smaller than the -t cap.
 Relative paths (-p, -f) are read from where the command's own `cd` steps put the shell at that point.
@@ -163,6 +165,30 @@ def gpu_push_guard(payload: dict, push: dict) -> bool:
     return False
 
 
+def submit_checks(payload: dict, root, records: list[dict], sub: dict) -> tuple[list, list, list]:
+    """(problems, notes, asks) for one parsed submit: its -f file against sample_submission and the log."""
+    problems, notes, asks = [], [], []
+    if sub.get("file") and not sub.get("kernel"):
+        f = C.path_at(payload, sub["file"], sub.get("at", 0))
+        if f is None:
+            notes.append("the -f file was not checked: the hook cannot tell which folder it is in (a `cd` with a "
+                         "variable, in a loop or in a pipe)")
+        elif not f.is_file():
+            problems.append(f"submission file not found: {f}")
+        elif root is not None and (prev := C.previous_submission(root, f, records)):
+            asks.append(f"this exact file was already submitted at {prev.get('time_utc')} "
+                        f"(message {prev.get('message')!r}); Kaggle would score it the same and it uses a daily slot")
+        if f is not None and f.is_file() and f.suffix.lower() == ".csv" and root is not None:
+            sample = C.find_sample(root)
+            if sample is not None:
+                errs, warns = C.validate_csv(f, sample)
+                problems += errs
+                notes += warns
+    if not sub.get("message"):
+        notes.append("no -m message: include the ledger experiment id and CV, e.g. -m \"0012_lgbm-te | CV 0.8123\"")
+    return problems, notes, asks
+
+
 def main() -> None:
     payload = C.read_input()
     cmd = C.command_of(payload)
@@ -183,31 +209,16 @@ def main() -> None:
         if gpu_push_guard(payload, push):
             return
 
-    sub = C.parse_submit(cmd)
-    if sub is None:
+    subs = C.parse_submits(cmd)
+    if not subs:
         return
     root = C.workspace(payload)
     records = C.submission_records(root) if root is not None else []
     problems, notes, asks = [], [], []
-
-    if sub.get("file") and not sub.get("kernel"):
-        f = C.path_at(payload, sub["file"], sub.get("at", 0))
-        if f is None:
-            notes.append("the -f file was not checked: the hook cannot tell which folder it is in (a `cd` with a "
-                         "variable, in a loop or in a pipe)")
-        elif not f.is_file():
-            problems.append(f"submission file not found: {f}")
-        elif root is not None and (prev := C.previous_submission(root, f, records)):
-            asks.append(f"this exact file was already submitted at {prev.get('time_utc')} "
-                        f"(message {prev.get('message')!r}); Kaggle would score it the same and it uses a daily slot")
-        if f is not None and f.is_file() and f.suffix.lower() == ".csv" and root is not None:
-            sample = C.find_sample(root)
-            if sample is not None:
-                errs, warns = C.validate_csv(f, sample)
-                problems += errs
-                notes += warns
-    if not sub.get("message"):
-        notes.append("no -m message: include the ledger experiment id and CV, e.g. -m \"0012_lgbm-te | CV 0.8123\"")
+    for n, sub in enumerate(subs, 1):
+        tag = f"submit {n} ({C.submit_label(sub)}): " if len(subs) > 1 else ""
+        for out, found in zip((problems, notes, asks), submit_checks(payload, root, records, sub)):
+            out += [tag + x for x in found]
 
     if problems:
         C.emit("PreToolUse", permissionDecision="deny",
@@ -220,12 +231,13 @@ def main() -> None:
         limit = st.daily_submissions if st else 5
         used = C.submissions_today(root, records)
         left = C.server_remaining_today(root, records)
-        if used >= limit:
-            asks.append(f"{used}/{limit} submissions already logged today (UTC); submitting may fail or spend "
+        more = f" and this command submits {len(subs)} times" if len(subs) > 1 else ""
+        if used + len(subs) > limit:
+            asks.append(f"{used}/{limit} submissions already logged today (UTC){more}; submitting may fail or spend "
                         "tomorrow's planning budget")
-        elif left == 0:
-            asks.append("after the last submit Kaggle reported 0 submissions left today for the team (teammates' and "
-                        "website submissions count too)")
+        elif left is not None and left < len(subs):
+            asks.append(f"after the last submit Kaggle reported {left} submission{'' if left == 1 else 's'} left "
+                        f"today for the team{more} (teammates' and website submissions count too)")
     if asks:
         C.emit("PreToolUse", permissionDecision="ask",
                permissionDecisionReason="kaggle-grandmaster: " + "; ".join(asks) + ". Submit anyway?")
