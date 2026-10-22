@@ -401,8 +401,13 @@ def log_run(root: str | Path, rec: dict) -> dict:
 
 def record_push(root: str | Path, rec: dict) -> dict:
     """Log a new push. Older still-active entries of the same kernel are marked superseded: Kaggle reports
-    only a kernel's latest version, and a re-push must not hold a second reservation."""
+    only a kernel's latest version, and a re-push must not hold a second reservation. A version already in
+    the log is the same run, logged once: its entry is returned and nothing is written."""
     recs = runs(root)
+    if rec.get("version") is not None:
+        for r in recs:
+            if r.get("kernel") == rec.get("kernel") and r.get("version") == rec.get("version"):
+                return r
     for r in recs:
         if r.get("kernel") == rec.get("kernel") and r.get("status") in ACTIVE:
             r.update(status="superseded", finished_at=r.get("finished_at") or _iso(_now()))

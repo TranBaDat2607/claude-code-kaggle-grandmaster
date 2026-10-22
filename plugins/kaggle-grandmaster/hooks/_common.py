@@ -62,8 +62,8 @@ def _tokens(rest: str) -> list[str]:
         lex = shlex.shlex(rest, posix=True, punctuation_chars=True)
         lex.whitespace_split = True
         toks = list(lex)
-    except ValueError:
-        toks = rest.split()
+    except ValueError:  # an unclosed quote, e.g. the end of `bash -c "cd A && kaggle kernels push -p ."`
+        toks = [t.strip("'\"") for t in rest.split()]
     # stop at the next shell separator (quote-aware: separators inside quotes stay in their token)
     for i, t in enumerate(toks):
         if t in {"&&", "||", ";", "|", "&", ";;"}:
@@ -72,7 +72,8 @@ def _tokens(rest: str) -> list[str]:
 
 
 def parse_pushes(command: str) -> list[dict]:
-    """Every `kaggle kernels push` in a (possibly compound) command, `--help` calls left out."""
+    """Every `kaggle kernels push` in a (possibly compound) command, `--help` calls left out. ``at`` is where
+    each one starts, so its folder is read after the `cd` steps before it (`path_at`)."""
     out, pos = [], 0
     while True:
         m = PUSH_RE.search(command, pos)
@@ -81,6 +82,7 @@ def parse_pushes(command: str) -> list[dict]:
         pos = m.start() + 1
         push = _parse_push_args(m.group(1))
         if push is not None:
+            push["at"] = m.start()
             out.append(push)
 
 
@@ -116,7 +118,7 @@ def parse_upload(command: str) -> dict | None:
     if not m:
         return None
     toks = _tokens(m.group(1))
-    out = {"path": None, "dir_mode": "skip", "ignore": []}
+    out = {"path": None, "dir_mode": "skip", "ignore": [], "at": m.start()}
     i = 0
     while i < len(toks):
         t, nxt = toks[i], (toks[i + 1] if i + 1 < len(toks) else None)
@@ -135,11 +137,196 @@ def parse_upload(command: str) -> dict | None:
     return out
 
 
-def push_target(payload: dict, push: dict) -> tuple[Path, dict] | None:
-    """(kernel folder, kernel-metadata.json) of a parsed push, or None when unreadable."""
-    folder = Path(push.get("path") or ".")
-    if not folder.is_absolute():
-        folder = Path(payload.get("cwd") or ".") / folder
+# A relative path in a compound command is relative to wherever the `cd` steps before it left the shell, not to
+# the hook's `cwd` (where the command starts for PreToolUse, where it ended for PostToolUse). Commands that move
+# the shell:
+CD_CMDS = {"cd", "chdir", "pushd", "set-location", "sl", "push-location"}
+POP_CMDS = {"popd", "pop-location"}
+SHELL_OPS = ("&&", "||", ";;", "|&", ";", "|", "&", "\n", "(", ")")
+# Words before a command name. A `cd` after an opener sits in a branch, a loop or a function: it may not run.
+OPENERS = {"if", "while", "until", "for", "case", "select", "function", "foreach", "switch", "try"}
+CLOSERS = {"fi", "done", "esac"}
+PREFIXES = OPENERS | CLOSERS | {"then", "elif", "else", "do", "{", "}", "!", "time", "builtin", "command"}
+ASSIGN_RE = re.compile(r"[A-Za-z_]\w*=")
+REDIRECT_RE = re.compile(r"(?:\d*|&)(?:>>?|<)&?")
+MSYS_DRIVE_RE = re.compile(r"/[A-Za-z](?=/|$)")
+DYNAMIC = set("$`*?[{")  # variables, substitutions and globs: not followed
+# A directory state is (base, ups, names): `ups` levels above `base`, then down `names`. Base None is the
+# directory the command started in; a state of None is a directory that cannot be told.
+START = (None, 0, ())
+
+
+def _shell_text(command: str) -> str:
+    """The command with line continuations blanked and backslashes as slashes (Windows paths), offsets kept."""
+    for cont in ("\\\r\n", "\\\n", "`\r\n", "`\n"):
+        command = command.replace(cont, " " * len(cont))
+    return command.replace("\\", "/")
+
+
+def _shell_words(text: str) -> tuple[list[tuple[bool, str]], int | None]:
+    """Quote-aware words and operators of a command, as (is_operator, text), and the offset of a quote still
+    open at the end (None when every quote closes)."""
+    out, word, i = [], None, 0
+    while i < len(text):
+        c = text[i]
+        if c in "'\"":
+            j = text.find(c, i + 1)
+            if j < 0:
+                return out + ([(False, word)] if word is not None else []), i
+            word, i = (word or "") + text[i + 1:j], j + 1
+            continue
+        op = next((o for o in SHELL_OPS if text.startswith(o, i)), None) if c in "&|;\n()" else None
+        if op == "&" and (text.startswith("&>", i) or (word or "").endswith((">", "<"))):
+            op = None  # a redirection: &>file, 2>&1
+        if c == "#" and word is None:  # a comment, up to the end of the line
+            j = text.find("\n", i)
+            i = len(text) if j < 0 else j
+        elif op or c in " \t\r":
+            if word is not None:
+                out.append((False, word))
+            if op:
+                out.append((True, op))
+            word, i = None, i + (len(op) if op else 1)
+        else:
+            word, i = (word or "") + c, i + 1
+    return out + ([(False, word)] if word is not None else []), None
+
+
+def _cd_target(args: list[str]) -> str | None:
+    """The directory a cd / pushd / Set-Location call names; None unless it names exactly one."""
+    names, i = [], 0
+    while i < len(args):
+        a = args[i]
+        if a.lower() in ("-path", "-literalpath") and i + 1 < len(args):
+            names.append(args[i + 1])
+            i += 2
+            continue
+        if REDIRECT_RE.match(a):  # >/dev/null, 2>&1, or a bare > before its target
+            i += 2 if REDIRECT_RE.fullmatch(a) else 1
+            continue
+        if a.startswith("-") and a != "-":
+            if a.lower() not in ("-l", "-p", "-e", "-@", "-passthru", "--"):
+                return None
+        else:
+            names.append(a)
+        i += 1
+    return names[0] if len(names) == 1 else None
+
+
+def _join(state: tuple | None, path: str) -> tuple | None:
+    """`state` moved to `path`, lexically; None when `path` cannot be followed without running the shell."""
+    if state is None or not path or DYNAMIC & set(path) or (path[0] == "~" and path[:2] not in ("~", "~/")):
+        return None
+    if path[0] == "~":
+        state, path = (Path.home(), 0, ()), path[2:]
+    elif os.name == "nt" and MSYS_DRIVE_RE.match(path):
+        path = f"{path[1]}:/{path[3:]}"  # Git Bash's /c/x is C:/x
+    p = Path(path)
+    if p.is_absolute():
+        state, path = (Path(p.anchor), 0, ()), path[len(p.anchor):]
+    elif p.drive or path.startswith("/"):
+        return None  # drive-relative (C:x), or a Git Bash path such as /tmp with no fixed Windows path
+    base, ups, names = state
+    names = list(names)
+    for name in path.split("/"):
+        if name == "..":
+            if names:
+                names.pop()
+            else:
+                ups += 1
+        elif name not in ("", "."):
+            names.append(name)
+    return base, ups, tuple(names)
+
+
+def _walk(words: list[tuple[bool, str]], state: tuple | None) -> tuple | None:
+    """The directory state after the `cd` steps among `words` (from `_shell_words`). A step that may not run
+    (in a branch or loop, after ||, in a pipe or a background job) leaves it unknown. Steps in a subshell
+    end with it, as in bash."""
+    old, pushed, scopes, depth = None, [], [], 0
+    cmd, before = [], None
+    for is_op, text in words + [(True, "")]:
+        if not is_op:
+            cmd.append(text)
+            continue
+        while cmd and (cmd[0].lower() in PREFIXES or ASSIGN_RE.match(cmd[0])):
+            w = cmd.pop(0).lower()
+            depth = depth + 1 if w in OPENERS else max(depth - (w in CLOSERS), 0)
+        name = cmd[0].lower() if cmd else ""
+        if name in CD_CMDS or name in POP_CMDS:
+            if depth or before in ("||", "|", "|&") or text in ("|", "|&", "&"):
+                new = None
+            elif name in POP_CMDS:
+                new = pushed.pop() if pushed else None
+            else:
+                target = _cd_target(cmd[1:])
+                if target == "-":
+                    new = old
+                else:
+                    if name in ("pushd", "push-location"):
+                        pushed.append(state)
+                    new = _join(state, target) if target else None
+            old, state = state, new
+        if text == "(":
+            scopes.append((state, old, list(pushed), depth))
+        elif text == ")" and scopes:
+            state, old, pushed, depth = scopes.pop()
+        cmd, before = [], text
+    return state
+
+
+def _cd_state(text: str, state: tuple | None = START) -> tuple | None:
+    """The directory state after `text`: a command, or the part of one before an offset. When that offset is in
+    a quoted string (`bash -c "cd A && kaggle ..."`), the string's text runs as a command too."""
+    words, quote = _shell_words(text)
+    state = _walk(words, state)
+    return state if quote is None else _cd_state(text[quote + 1:], state)
+
+
+def _start_after(cwd: Path, final: tuple | None) -> tuple[Path | None, int]:
+    """(dir, ups): the directory a command started in is `ups` levels below `dir`, found by undoing its `cd`
+    steps (`final`) from the `cwd` it ended in; (None, 0) when they do not lead to that `cwd`."""
+    if final is not None and final[0] is None:
+        _, ups, names = final
+        keep = len(cwd.parts) - len(names)
+        if keep >= 0 and [os.path.normcase(n) for n in cwd.parts[keep:]] == [os.path.normcase(n) for n in names]:
+            return Path(*cwd.parts[:keep]), ups
+    if os.environ.get("CLAUDE_BASH_MAINTAIN_PROJECT_WORKING_DIR", "").strip().lower() in ("1", "true", "yes", "on"):
+        return cwd, 0  # Claude Code moved back to the directory every command starts in
+    return None, 0
+
+
+def _place(state: tuple, start: Path | None, known: int = 0) -> Path | None:
+    """The path of a directory state, given the start directory (or its ancestor `known` levels up)."""
+    base, ups, names = state
+    if base is None:
+        if start is None or ups < known:
+            return None
+        base, ups = start, ups - known
+    for _ in range(ups):
+        base = base.parent
+    return base.joinpath(*names)
+
+
+def path_at(payload: dict, path: str | None, at: int, ran: bool = False) -> Path | None:
+    """`path` (default: the current directory) as the payload's command uses it at offset `at`: a relative path
+    is read from the directory the `cd` steps before `at` lead to. ``ran`` marks a PostToolUse payload, whose
+    `cwd` is where the whole command left the shell: the start is found by undoing the command's `cd` steps.
+    None when the directory cannot be told, e.g. after a `cd` with a variable, in a loop or in a pipe."""
+    text = _shell_text(command_of(payload))
+    state = _join(_cd_state(text[:at]), path or ".")
+    if state is None:
+        return None
+    cwd = Path(payload.get("cwd") or ".")
+    return _place(state, *_start_after(cwd, _cd_state(text))) if ran else _place(state, cwd)
+
+
+def push_target(payload: dict, push: dict, ran: bool = False) -> tuple[Path, dict] | None:
+    """(kernel folder, kernel-metadata.json) of a parsed push, or None when the folder cannot be told or its
+    metadata cannot be read. ``ran``: a PostToolUse payload (see `path_at`)."""
+    folder = path_at(payload, push.get("path"), push.get("at", 0), ran)
+    if folder is None:
+        return None
     try:
         meta = json.loads((folder / "kernel-metadata.json").read_text(encoding="utf-8"))
     except (OSError, ValueError):
@@ -167,7 +354,7 @@ def parse_submit(command: str) -> dict | None:
     if not m:
         return None
     toks = _tokens(m.group(1))
-    out = {"competition": None, "file": None, "message": None, "kernel": None, "version": None}
+    out = {"competition": None, "file": None, "message": None, "kernel": None, "version": None, "at": m.start()}
     flags = {"-f": "file", "--file": "file", "-m": "message", "--message": "message",
              "-k": "kernel", "--kernel": "kernel", "-v": "version", "--version": "version"}
     i = 0

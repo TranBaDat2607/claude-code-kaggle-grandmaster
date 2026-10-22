@@ -11,6 +11,7 @@
    count has reached the daily limit, or when Kaggle reported no submissions left today for the team.
 4. Before each GPU or TPU `kaggle kernels push` in the command: asks for confirmation when the cached
    weekly quota of that accelerator (minus kernels still running) is exhausted or smaller than the -t cap.
+Relative paths (-p, -f) are read from where the command's own `cd` steps put the shell at that point.
 Valid submissions produce no output, so the normal permission flow is unchanged.
 """
 
@@ -18,7 +19,6 @@ from __future__ import annotations
 
 import re
 import sys
-from pathlib import Path
 
 try:
     import _common as C
@@ -109,10 +109,8 @@ def secret_reason(cmd: str) -> str | None:
 
 def upload_guard(payload: dict, up: dict) -> bool:
     """Deny a dataset/model upload that would send credential files; True when it emitted a decision."""
-    folder = Path(up.get("path") or ".")
-    if not folder.is_absolute():
-        folder = Path(payload.get("cwd") or ".") / folder
-    if not folder.is_dir():
+    folder = C.path_at(payload, up.get("path"), up.get("at", 0))
+    if folder is None or not folder.is_dir():
         return False
     found = C.SF.scan_upload(folder, recursive=str(up.get("dir_mode")).lower() in ("zip", "tar"),
                              ignore=up.get("ignore"))
@@ -190,19 +188,19 @@ def main() -> None:
         return
     root = C.workspace(payload)
     records = C.submission_records(root) if root is not None else []
-    cwd = Path(payload.get("cwd") or ".")
     problems, notes, asks = [], [], []
 
     if sub.get("file") and not sub.get("kernel"):
-        f = Path(sub["file"])
-        if not f.is_absolute():
-            f = cwd / f
-        if not f.is_file():
+        f = C.path_at(payload, sub["file"], sub.get("at", 0))
+        if f is None:
+            notes.append("the -f file was not checked: the hook cannot tell which folder it is in (a `cd` with a "
+                         "variable, in a loop or in a pipe)")
+        elif not f.is_file():
             problems.append(f"submission file not found: {f}")
         elif root is not None and (prev := C.previous_submission(root, f, records)):
             asks.append(f"this exact file was already submitted at {prev.get('time_utc')} "
                         f"(message {prev.get('message')!r}); Kaggle would score it the same and it uses a daily slot")
-        if f.is_file() and f.suffix.lower() == ".csv" and root is not None:
+        if f is not None and f.is_file() and f.suffix.lower() == ".csv" and root is not None:
             sample = C.find_sample(root)
             if sample is not None:
                 errs, warns = C.validate_csv(f, sample)
