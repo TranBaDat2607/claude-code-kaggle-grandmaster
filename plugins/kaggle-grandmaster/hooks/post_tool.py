@@ -1,12 +1,14 @@
-"""PostToolUse: after `kaggle competitions submit`, log the submission locally (with the file's SHA-256 and
-what Kaggle says is left today) and remind Claude to fetch the public score and attach it to the
-experiment ledger. After each GPU or TPU `kaggle kernels push` in the command (`--help` calls aside),
-record the run in the GPU-hour log; a re-push of a kernel replaces its earlier reservation. `cwd` here is
-where the command left the shell: relative paths are read from where its `cd` steps were at that point, and
-a push whose folder cannot be told is reported, not logged. A command that went on in the background has
-left `cwd` where it started, and Kaggle's reply comes after this hook: its pushes are logged as pending, their
-whole cap reserved, until `kgkit gpu status` / `gpu wait` see Kaggle run them. The Kaggle CLI exits 0 after
-several failed writes; say so when one shows up in the output."""
+"""PostToolUse: after each `kaggle competitions submit` in the command that Kaggle replied to, log the
+submission locally (with the file's SHA-256 and what Kaggle said was left today after it) and remind Claude
+to fetch the public score and attach it to the experiment ledger. Kaggle's replies are matched to the
+submits in output order; a submit with no reply (text quoting one, or one after a step that failed) is not
+logged, unless the command went on in the background. After each GPU or TPU `kaggle kernels push` in the
+command (`--help` calls aside), record the run in the GPU-hour log; a re-push of a kernel replaces its earlier
+reservation. `cwd` here is where the command left the shell: relative paths are read from where its `cd` steps
+were at that point, and a push whose folder cannot be told is reported, not logged. A command that went on in
+the background has left `cwd` where it started, and Kaggle's reply comes after this hook: its pushes are logged
+as pending, their whole cap reserved, until `kgkit gpu status` / `gpu wait` see Kaggle run them. The Kaggle CLI
+exits 0 after several failed writes; say so when one shows up in the output."""
 
 from __future__ import annotations
 
@@ -60,12 +62,16 @@ def _background_since(payload: dict) -> dt.datetime:
         return now - dt.timedelta(minutes=2)
 
 
-# A successful `submit -k` (code competition) prints only "N submissions remaining today."
-SUBMIT_OK_RE = re.compile(r"successfully submitted|\d+\s+submissions?\s+remaining\s+today", re.IGNORECASE)
-REMAINING_RE = re.compile(r"(\d+)\s+submissions?\s+remaining\s+today", re.IGNORECASE)
-# Printed by kaggle 2.2.4 with exit status 0: a refused upload, a 404 competition, failed writes.
-SUBMIT_FAILED = ("error", "exception", "forbidden", "401", "403", "404", "400 client", "could not submit",
-                 "could not find competition")
+# Kaggle's reply to each submit, as the Kaggle CLI (2.2.4) prints it. Accepted: "N submissions remaining today." (left
+# out with -q, or when the competition comes from the CLI config), then the server's message with no newline after
+# it: "Successfully submitted to <title>" for a file, nothing for a notebook. Refused: "Could not submit to
+# competition" (a failed upload) or "Could not find competition" with exit status 0, or an HTTP error on stderr.
+REPLY_RE = re.compile(r"(?<!\d)(?P<left>\d+)\s+submissions?\s+remaining\s+today|(?P<ok>successfully submitted)"
+                      r"|(?P<failed>could not submit to competition|could not find competition"
+                      r"|\b[45]\d\d (?:client|server) error\b[^\n]*competition|authentication required)",
+                      re.IGNORECASE)
+RETRIED_RE = re.compile(r"request failed:[^\n]*will retry", re.IGNORECASE)  # an error the CLI retried: no reply
+# Printed by kaggle 2.2.4 with exit status 0 after a failed upload, push or model write.
 SILENT_FAILURE_RE = re.compile(r"(?:Dataset(?: version)? creation|Kernel push|Model(?: instance)?(?: version)? "
                                r"creation) error\b[^\n]*", re.IGNORECASE)
 
@@ -83,15 +89,15 @@ def _kernel_runtime_h(root, kernel: str | None) -> float | None:
     return None
 
 
-def _failure_hint(low: str) -> str:
+def _failure_hint(low: str, label: str = "") -> str:
     if any(w in low for w in ("400 client", "bad request", "failed_precondition")):
-        return ("kaggle-grandmaster: Kaggle refused the submission (400). The CLI hides the reason, which is in the "
-                "response body: re-run it through the Python API and print `e.response.text` (snippet in skill "
+        return (f"kaggle-grandmaster: Kaggle refused the submission{label} (400). The CLI hides the reason, which is "
+                "in the response body: re-run it through the Python API and print `e.response.text` (snippet in skill "
                 "`kaggle-cli`). In code competitions the usual cause is FAILED_PRECONDITION 'Your Notebook uses "
                 "non-versioned datasets': attach a versioned dataset (or pin a dataset version) to the notebook, "
                 "push a new kernel version and submit that version.")
-    return ("kaggle-grandmaster: the submission appears to have failed. Read the CLI output; 403 usually means "
-            "the competition rules were not accepted.")
+    return (f"kaggle-grandmaster: the submission{label} appears to have failed. Read the CLI output; 403 usually "
+            "means the competition rules were not accepted.")
 
 
 def _poll_hint(root, sub: dict, st, slug: str) -> str:
@@ -222,20 +228,94 @@ def silent_failure_note(payload: dict) -> str | None:
             f"submit this version.{hint}")
 
 
-def log_submission(payload: dict, sub: dict) -> str | None:
+def _replies(text: str) -> list[tuple[str, int | str | None]]:
+    """Kaggle's replies to the submits in a command's output, in order: ("left", N), ("ok", None) or ("failed", the
+    error). Errors in a row are one reply: one refused submit can print more than one. A count printed right after
+    the previous submit's message is glued to the title that message ends with, and a title can end in a number
+    ("... Episode 10" + "3 submissions"): its last digit is taken (daily limits above 10 are rare)."""
+    out, text = [], RETRIED_RE.sub("", text)
+    for m in REPLY_RE.finditer(text):
+        kind = m.lastgroup
+        if kind == "left":
+            glued = text[text.rfind("\n", 0, m.start()) + 1:m.start()].strip()
+            out.append((kind, int(m.group("left")[-1] if glued else m.group("left"))))
+        elif kind == "ok":
+            out.append((kind, None))
+        elif not (out and out[-1][0] == "failed"):
+            out.append((kind, m.group(0).lower()))
+    return out
+
+
+def _match_replies(subs: list[dict], replies: list, unseen: bool) -> list[tuple]:
+    """(submit, status, remaining count, error) for the submits Kaggle replied to, its replies taken in order. A
+    submit with no reply never ran (an earlier step failed) or is only text, and is left out. Its status is
+    "unknown" instead when the output is not all there (``unseen``: the command went on in the background), or when
+    Kaggle prints nothing for it once accepted (a notebook submit with -q or without the competition: it takes a
+    reply only if that is an error). Replies left over come from a submit that ran more than once, in a loop: they
+    are logged as the last one's."""
+    out, i = [], 0
+    for sub in subs:
+        silent = bool(sub.get("kernel")) and bool(sub.get("quiet") or not sub.get("competition"))
+        if i < len(replies) and (replies[i][0] == "failed" or not silent):
+            i = _take_reply(sub, replies, i, out)
+        elif silent or unseen:
+            out.append((sub, "unknown", None, None))
+    while subs and i < len(replies):
+        if replies[i][0] == "failed":
+            i += 1
+        else:
+            i = _take_reply(dict(subs[-1], repeat=True), replies, i, out)
+    return out
+
+
+def _take_reply(sub: dict, replies: list, i: int, out: list) -> int:
+    kind, value = replies[i]
+    i += 1
+    if kind == "left" and i < len(replies) and replies[i][0] == "ok":
+        i += 1  # the server's message after the count: "Successfully submitted to ..." for a file
+    out.append((sub, "failed", None, value) if kind == "failed"
+               else (sub, "submitted", value if kind == "left" else None, None))
+    return i
+
+
+def log_submissions(payload: dict, subs: list[dict]) -> list[str]:
+    """Log each submit in the command that Kaggle replied to (see `_match_replies`), and say what comes next."""
     root = C.workspace(payload)
-    if root is None:
-        return None
-    # An upload/push error earlier in the same command must not be read as this submit's failure.
+    if root is None or not subs:
+        return []
+    # An upload/push error earlier in the same command must not be read as a submit's failure.
     text = SILENT_FAILURE_RE.sub("", _response_text(payload))
-    low = text.lower()
-    failed = any(w in low for w in SUBMIT_FAILED)
-    ok = SUBMIT_OK_RE.search(text) is not None and "could not submit" not in low
-    status = "submitted" if ok else ("failed" if failed else "unknown")
-    left = REMAINING_RE.search(text)
+    background = _backgrounded(payload)  # Kaggle has not replied yet, and cwd is where the command started
+    outcomes = _match_replies(subs, _replies(text), background)
+    st = C.S.load(root)
+    recs = [_log_submission(payload, root, sub, status, left, ran=not background)
+            for sub, status, left, _ in outcomes]
+    notes = []
+    for (sub, status, _, error), rec in zip(outcomes, recs):
+        label = f" {C.submit_label(sub)}" if len(subs) > 1 else ""
+        if sub.get("repeat"):
+            continue
+        notes.append(_failure_hint(error, label) if status == "failed" else _logged_note(root, st, sub, rec, label))
+    slug = subs[-1].get("competition") or (st.slug if st else "<slug>")
+    statuses = [status for _, status, _, _ in outcomes]
+    if "submitted" in statuses and "failed" in statuses:
+        notes.append(f"kaggle-grandmaster: Kaggle accepted {statuses.count('submitted')} and refused "
+                     f"{statuses.count('failed')} of the submits in this command. The hook matches Kaggle's replies "
+                     "to the submits in output order, but the CLI prints HTTP errors on stderr, after all of stdout: "
+                     f"check which went through with `kaggle competitions submissions {slug}` before attaching scores.")
+    repeats = sum(1 for sub, *_ in outcomes if sub.get("repeat"))
+    if repeats:
+        notes.append(f"kaggle-grandmaster: Kaggle accepted {repeats} more submit(s) than this command has `kaggle "
+                     "competitions submit` calls (one runs in a loop?). They are logged too, with the arguments of the "
+                     f"last call as written: check `kaggle competitions submissions {slug}` for which notebook or "
+                     "file each one was.")
+    return notes
+
+
+def _log_submission(payload: dict, root: Path, sub: dict, status: str, left: int | None, ran: bool) -> dict:
     sha = size = f = None
     if sub.get("file") and not sub.get("kernel"):
-        f = C.path_at(payload, sub["file"], sub.get("at", 0), ran=True)
+        f = C.path_at(payload, sub["file"], sub.get("at", 0), ran=ran)
     if f is not None:
         sha = C.file_sha256(f)
         try:
@@ -243,32 +323,32 @@ def log_submission(payload: dict, sub: dict) -> str | None:
         except OSError:
             pass
     m = C.EXP_ID_RE.search(sub.get("message") or "") or C.EXP_ID_RE.search(sub.get("file") or "")
-    exp_id = m.group(1) if m else None
     rec = {
         "time_utc": dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "competition": sub.get("competition"),
         "file": sub.get("file"),
         "kernel": sub.get("kernel"),
         "message": sub.get("message"),
-        "exp_id": exp_id,
+        "exp_id": m.group(1) if m else None,
         "status": status,
         "sha256": sha,
         "size": size,
-        "remaining_today": int(left.group(1)) if left else None,
+        "remaining_today": left,
     }
     log = C.submissions_log(root)
     log.parent.mkdir(parents=True, exist_ok=True)
-    with log.open("a", encoding="utf-8") as f:
-        f.write(json.dumps(rec) + "\n")
-    if status == "failed":
-        return _failure_hint(low)
-    st = C.S.load(root)
+    with log.open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps(rec) + "\n")
+    return rec
+
+
+def _logged_note(root: Path, st, sub: dict, rec: dict, label: str) -> str:
     slug = sub.get("competition") or (st.slug if st else "<slug>")
-    used = C.submissions_today(root)
-    limit = st.daily_submissions if st else 5
-    count = (f"Kaggle reports {left.group(1)} left today for the team" if left
-             else f"{used}/{limit} today in the local log, UTC")
-    ctx = (f"kaggle-grandmaster: submission logged ({count}). {_poll_hint(root, sub, st, slug)}; "
+    left, exp_id = rec["remaining_today"], rec["exp_id"]
+    count = (f"Kaggle reports {left} left today for the team" if left is not None
+             else f"{C.submissions_today(root)}/{st.daily_submissions if st else 5} today in the local log, UTC")
+    unknown = "" if rec["status"] == "submitted" else ", outcome unknown: Kaggle's reply is not in this output"
+    ctx = (f"kaggle-grandmaster: submission{label} logged{unknown} ({count}). {_poll_hint(root, sub, st, slug)}; "
            f"when the public score appears, run `python -m kgkit ledger lb {exp_id or '<exp_id>'} <score>` and "
            f"compare with CV.")
     if not exp_id:
@@ -279,11 +359,9 @@ def log_submission(payload: dict, sub: dict) -> str | None:
 def main() -> None:
     payload = C.read_input()
     cmd = C.command_of(payload)
-    # One command can chain an upload, a push and a submit: report on each, in one message.
-    notes = [silent_failure_note(payload), *log_gpu_pushes(payload, C.parse_pushes(cmd))]
-    sub = C.parse_submit(cmd)
-    if sub is not None:
-        notes.append(log_submission(payload, sub))
+    # One command can chain an upload, pushes and submits: report on each, in one message.
+    notes = [silent_failure_note(payload), *log_gpu_pushes(payload, C.parse_pushes(cmd)),
+             *log_submissions(payload, C.parse_submits(cmd))]
     notes = [n for n in notes if n]
     if notes:
         C.emit("PostToolUse", additionalContext="\n\n".join(notes))

@@ -57,7 +57,8 @@ def workspace(payload: dict) -> Path | None:
 
 
 def _tokens(rest: str) -> list[str]:
-    rest = rest.replace("\\", "/")  # Windows paths: POSIX lexing would treat \ as an escape
+    rest = _shell_text(rest)  # Windows paths: POSIX lexing would treat \ as an escape
+    rest = rest[:_line_end(rest)]  # a newline ends the command too: the next line's flags are not its own
     try:
         lex = shlex.shlex(rest, posix=True, punctuation_chars=True)
         lex.whitespace_split = True
@@ -69,6 +70,20 @@ def _tokens(rest: str) -> list[str]:
         if t in {"&&", "||", ";", "|", "&", ";;"}:
             return toks[:i]
     return toks
+
+
+def _line_end(text: str) -> int:
+    """Offset of the first newline or comment in `text` outside quotes: the end of the command on its first line."""
+    quote, prev = None, " "
+    for i, c in enumerate(text):
+        if quote:
+            quote = None if c == quote else quote
+        elif c in "'\"":
+            quote = c
+        elif c == "\n" or (c == "#" and prev in " \t"):
+            return i
+        prev = c
+    return len(text)
 
 
 def parse_pushes(command: str) -> list[dict]:
@@ -348,29 +363,144 @@ def push_uses_gpu(push: dict, meta: dict) -> bool:
     return push_resource(push, meta) == "GPU"
 
 
+# A heredoc can be only text: what cat or tee save or print (an issue body, notes) and what git or gh read (a commit
+# message or PR body, also as "$(cat <<'EOF' ... EOF)" in their arguments). The `kaggle ...` lines it quotes are not
+# calls. Its body is still read as commands when it can run: piped on, saved to a script the command then runs, or
+# unquoted with $(...) or `...` in it.
+HEREDOC_RE = re.compile(r"(?<!<)<<-?[ \t]*(['\"]?)([A-Za-z_]\w*)\1")
+TEXT_READERS = {"cat", "tee", "git", "gh"}
+MESSAGE_CMDS = {"git", "gh"}
+RUNS_SCRIPT = (r"(?:(?:^|[\s;&|(])(?:(?:ba|z|da|k)?sh|source|\.|python[\d.]*|py|pwsh|powershell(?:\.exe)?)\s+"
+               r"(?:-\S+\s+)*|\./)['\"]?(?:[^\s'\"]*/)?")  # `bash x.sh`, `python x.py`, `. x.sh`, `./x.sh`
+
+
+def _text_heredocs_blanked(command: str) -> str:
+    """`command` with the bodies of its text-only heredocs (see HEREDOC_RE) blanked, offsets kept."""
+    # Lines are found in the command itself: _shell_text would join a body line ending in ` (Markdown) to the next.
+    text, out, pos = _shell_text(command), list(command), 0
+    for m in HEREDOC_RE.finditer(command):
+        eol = command.find("\n", m.end())
+        if m.start() < pos or eol < 0:
+            continue  # in a body blanked already, or no body
+        end = re.compile(rf"^[ \t]*{re.escape(m.group(2))}[ \t]*\r?$", re.MULTILINE).search(command, eol + 1)
+        if end is None or (not m.group(1) and re.search(r"\$\(|`", command[eol + 1:end.start()])):
+            continue
+        if _heredoc_is_text(text[command.rfind("\n", 0, m.start()) + 1:m.start()], text[m.end():eol],
+                            text[end.start():]):
+            out[eol + 1:end.start()] = [c if c == "\n" else " " for c in command[eol + 1:end.start()]]
+            pos = end.start()
+    return "".join(out)
+
+
+def _heredoc_is_text(head: str, tail: str, rest: str) -> bool:
+    """Whether a heredoc's body is only text, from the command text before its marker on that line (`head`), the
+    rest of that line (`tail`) and the command after the body (`rest`)."""
+    words, quote = _shell_words(head)
+    outer = None
+    if quote is not None:  # in a quoted argument: `git commit -m "$(cat <<'EOF'`
+        outer, (words, quote) = words, _shell_words(head[quote + 1:])
+        if quote is not None:
+            return False
+    after, _ = _shell_words(tail)
+    if next((t for is_op, t in after if is_op), "") in ("|", "|&"):
+        return False  # piped on to another command
+    cut = max((i for i, (is_op, _) in enumerate(words) if is_op), default=-1)
+    cmd = _command_words(words[cut + 1:])
+    if not cmd or cmd[0].lower() not in TEXT_READERS:
+        return False
+    if cut > 0 and words[cut][1] == "(" and words[cut - 1][1].endswith("$"):  # $(cat <<'EOF' ...)
+        owner = _command_words(outer if outer is not None else words[:cut - 1])
+        return bool(owner) and owner[0].lower() in MESSAGE_CMDS
+    if outer is not None:
+        return False
+    for is_op, t in after:
+        if is_op:
+            break
+        cmd.append(t)
+    return not any(re.search(RUNS_SCRIPT + re.escape(f.rsplit("/", 1)[-1]) + r"(?![\w.-])", rest, re.IGNORECASE)
+                   for f in _written_files(cmd))
+
+
+def _command_words(words: list[tuple[bool, str]]) -> list[str]:
+    """The words of the last command among `words` (from `_shell_words`), without prefixes such as `then` or X=1."""
+    cmd = []
+    for is_op, text in words:
+        cmd = [] if is_op else cmd + [text]
+    while cmd and (cmd[0].lower() in PREFIXES or ASSIGN_RE.match(cmd[0])):
+        cmd.pop(0)
+    return cmd
+
+
+def _written_files(cmd: list[str]) -> list[str]:
+    """The files a cat or tee command writes: its > and >> targets, and tee's arguments."""
+    out, i = [], 1
+    while i < len(cmd):
+        m = re.fullmatch(r"\d?>>?(.*)", cmd[i])
+        if m:
+            target = m.group(1) or (cmd[i + 1] if i + 1 < len(cmd) else "")
+            i += 1 if m.group(1) else 2
+        else:
+            target = cmd[i] if cmd[0].lower() == "tee" and not cmd[i].startswith("-") else ""
+            i += 1
+        if target and not target.startswith(("&", "/dev/")):
+            out.append(target)
+    return out
+
+
+SUBMIT_FLAGS = {"-f": "file", "--file": "file", "-m": "message", "--message": "message", "-k": "kernel",
+                "--kernel": "kernel", "-v": "version", "--version": "version", "-c": "competition",
+                "--competition": "competition"}
+
+
+def parse_submits(command: str) -> list[dict]:
+    """Every `kaggle competitions submit` in a (possibly compound) command, in order: competition / file / message /
+    kernel / version / quiet. `--help` calls and text in heredocs (an issue body quoting a submit) are left out.
+    ``at`` is where each one starts, so its -f file is read after the `cd` steps before it (`path_at`)."""
+    text, out, pos = _text_heredocs_blanked(command), [], 0
+    while True:
+        m = SUBMIT_RE.search(text, pos)
+        if not m:
+            return out
+        pos = m.start() + 1
+        sub = _parse_submit_args(m.group(1))
+        if sub is not None:
+            sub["at"] = m.start()
+            out.append(sub)
+
+
 def parse_submit(command: str) -> dict | None:
-    """Extract competition / file / message / kernel from a `kaggle competitions submit` command."""
-    m = SUBMIT_RE.search(command)
-    if not m:
+    """The first real `kaggle competitions submit` in a command."""
+    subs = parse_submits(command)
+    return subs[0] if subs else None
+
+
+def _parse_submit_args(rest: str) -> dict | None:
+    toks = _tokens(rest)
+    if "-h" in toks or "--help" in toks:
         return None
-    toks = _tokens(m.group(1))
-    out = {"competition": None, "file": None, "message": None, "kernel": None, "version": None, "at": m.start()}
-    flags = {"-f": "file", "--file": "file", "-m": "message", "--message": "message",
-             "-k": "kernel", "--kernel": "kernel", "-v": "version", "--version": "version"}
+    out = {"competition": None, "file": None, "message": None, "kernel": None, "version": None,
+           "quiet": "-q" in toks or "--quiet" in toks}
     i = 0
     while i < len(toks):
         t = toks[i]
-        if t in flags and i + 1 < len(toks):
-            out[flags[t]] = toks[i + 1]
+        if t in SUBMIT_FLAGS and i + 1 < len(toks):
+            out[SUBMIT_FLAGS[t]] = toks[i + 1]
             i += 2
             continue
-        if "=" in t and t.split("=", 1)[0] in flags:
+        if "=" in t and t.split("=", 1)[0] in SUBMIT_FLAGS:
             k, v = t.split("=", 1)
-            out[flags[k]] = v
+            out[SUBMIT_FLAGS[k]] = v
         elif not t.startswith("-") and out["competition"] is None:
             out["competition"] = t
         i += 1
     return out
+
+
+def submit_label(sub: dict) -> str:
+    """A parsed submit as messages name it: its notebook and version, or its file."""
+    if sub.get("kernel"):
+        return f"{sub['kernel']} v{sub['version']}" if sub.get("version") else sub["kernel"]
+    return sub.get("file") or "no -f file"
 
 
 def find_sample(root: Path) -> Path | None:

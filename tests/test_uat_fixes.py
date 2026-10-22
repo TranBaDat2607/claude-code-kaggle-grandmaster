@@ -1039,3 +1039,123 @@ def test_wait_stops_at_a_pending_push_kaggle_never_ran(ws, monkeypatch, capsys):
     cli.main(["gpu", "status"])
     assert "its reservation has lapsed" in capsys.readouterr().out
     assert G.active_runs(ws) == [] and G.release(ws, "me/k") == 1
+
+
+# ----------------------------------------------------------------------------- #39 several submits in one command
+def _logged(ws):
+    return [(r["kernel"] or r["file"], r["status"], r["remaining_today"]) for r in S.submission_records(ws)]
+
+
+def _code_submits(*kernels, sep=" ; "):
+    return sep.join(f'kaggle competitions submit demo -k me/{k} -v 1 -f submission.csv -m "000{n}_{k}"'
+                    for n, k in enumerate(kernels, 1))
+
+
+@pytest.mark.parametrize("sep", [" ; ", " && ", "\n"])
+def test_each_submit_in_a_command_is_logged_with_its_own_count(plugin_root, ws, sep):
+    out = "4 submissions remaining today.\n3 submissions remaining today.\n"
+    ctx = _hook(plugin_root, "post_tool.py", _code_submits("a23", "a22", sep=sep), ws, out)["additionalContext"]
+    assert _logged(ws) == [("me/a23", "submitted", 4), ("me/a22", "submitted", 3)]  # was: me/a23 only
+    assert "submission me/a23 v1 logged (Kaggle reports 4 left today" in ctx and "ledger lb 0001_a23" in ctx
+    assert "submission me/a22 v1 logged (Kaggle reports 3 left today" in ctx and "ledger lb 0002_a22" in ctx
+    assert S.submissions_today(ws) == 2 and S.server_remaining_today(ws) == 3
+
+
+def test_file_submits_are_told_apart_though_kaggle_ends_its_message_without_a_newline(plugin_root, ws):
+    (ws / "subs").mkdir()
+    (ws / "subs" / "a.csv").write_text("id,target\n1,0.1\n")
+    (ws / "subs" / "b.csv").write_text("id,target\n1,0.2\n")
+    cmd = 'kaggle competitions submit demo -f subs/a.csv -m "0001_a" && kaggle c submit demo -f subs/b.csv -m 0002_b'
+    title = "Playground Series - Season 5, Episode 10"  # the next count is printed right after it: "...Episode 103"
+    _hook(plugin_root, "post_tool.py", cmd, ws, f"4 submissions remaining today.\nSuccessfully submitted to {title}"
+                                                f"3 submissions remaining today.\nSuccessfully submitted to {title}")
+    assert _logged(ws) == [("subs/a.csv", "submitted", 4), ("subs/b.csv", "submitted", 3)]
+    a, b = S.submission_records(ws)
+    assert len(a["sha256"]) == 64 and len(b["sha256"]) == 64 and a["sha256"] != b["sha256"]
+
+
+def test_a_refused_submit_is_logged_failed_and_the_order_is_flagged(plugin_root, ws):
+    out = ("400 Client Error: Bad Request for url: https://api.kaggle.com/v1/competitions.CompetitionApiService/"
+           "CreateCodeSubmission\n3 submissions remaining today.\n")
+    ctx = _hook(plugin_root, "post_tool.py", _code_submits("k1", "k2"), ws, out)["additionalContext"]
+    assert _logged(ws) == [("me/k1", "failed", None), ("me/k2", "submitted", 3)]
+    assert "refused the submission me/k1 v1 (400)" in ctx and "submission me/k2 v1 logged" in ctx
+    assert "accepted 1 and refused 1" in ctx and "kaggle competitions submissions demo" in ctx
+    assert S.submissions_today(ws) == 1
+
+
+def test_submits_in_text_or_after_a_failed_step_are_neither_checked_nor_logged(plugin_root, ws):
+    issue = ("cat > body.md <<'EOF'\nRepro: `kaggle competitions submit <comp> -k u/k1 -v 1 -f missing.csv -m \"a\"`\n"
+             "EOF\ngh issue create --title t --body-file body.md")
+    commit = ("git add -A && git commit -m \"$(cat <<'EOF'\nHooks: check `kaggle competitions submit demo -f "
+              "missing.csv -m x`\nEOF\n)\"")
+    for cmd in (issue, commit):
+        assert _hook(plugin_root, "pre_tool.py", cmd, ws) is None, cmd  # was denied: missing.csv not found
+        assert _hook(plugin_root, "post_tool.py", cmd, ws, "https://github.com/o/r/issues/40\n") is None, cmd
+    cmd = "kaggle competitions submit -h | head -2; python make_sub.py && kaggle competitions submit demo -f s.csv -m x"
+    out = "usage: kaggle competitions submit [-h]\nTraceback (most recent call last):\nFileNotFoundError: test.csv\n"
+    assert _hook(plugin_root, "post_tool.py", cmd, ws, out) is None
+    assert S.submission_records(ws) == []  # each of these logged an entry, counted against the budget
+    script = "cat > s.sh <<'EOF'\nkaggle competitions submit demo -f missing.csv -m x\nEOF\nbash s.sh"
+    assert _hook(plugin_root, "pre_tool.py", script, ws)["permissionDecision"] == "deny"  # a script it then runs
+
+
+def test_submits_in_a_background_command_are_logged_with_an_unknown_outcome(plugin_root, ws):
+    ctx = _post_bg(plugin_root, _code_submits("k1", "k2", sep=" && "), ws)
+    assert _logged(ws) == [("me/k1", "unknown", None), ("me/k2", "unknown", None)]
+    assert "outcome unknown: Kaggle's reply is not in this output" in ctx and S.submissions_today(ws) == 2
+
+
+def test_a_submit_in_a_loop_is_logged_once_per_reply(plugin_root, ws):
+    cmd = 'for k in k1 k2; do kaggle competitions submit demo -k me/$k -v 1 -f submission.csv -m "$k"; done'
+    out = "4 submissions remaining today.\n3 submissions remaining today.\n"
+    ctx = _hook(plugin_root, "post_tool.py", cmd, ws, out)["additionalContext"]
+    assert _logged(ws) == [("me/$k", "submitted", 4), ("me/$k", "submitted", 3)]
+    assert "accepted 1 more submit(s) than this command has" in ctx and S.server_remaining_today(ws) == 3
+
+
+def test_a_quiet_notebook_submit_takes_no_count_from_the_next_one(plugin_root, ws):
+    cmd = _code_submits("k1", "k2").replace("submit demo -k me/k1", "submit demo -q -k me/k1")
+    _hook(plugin_root, "post_tool.py", cmd, ws, "3 submissions remaining today.\n")  # -q prints nothing when accepted
+    _hook(plugin_root, "post_tool.py", cmd.split(" ; ")[0], ws, "Could not find competition - please verify")
+    assert _logged(ws) == [("me/k1", "unknown", None), ("me/k2", "submitted", 3), ("me/k1", "failed", None)]
+
+
+def test_pre_checks_every_submit_and_counts_them_all_against_the_budget(plugin_root, ws):
+    (ws / "data").mkdir()
+    (ws / "data" / "sample_submission.csv").write_text("id,target\n1,0.5\n2,0.5\n")
+    (ws / "subs").mkdir()
+    for name, rows in (("good", "1,0.1\n2,0.9\n"), ("other", "1,0.2\n2,0.8\n"), ("bad", "1,0.1\n")):
+        (ws / "subs" / f"{name}.csv").write_text("id,target\n" + rows)
+    cmd = 'kaggle competitions submit demo -f subs/good.csv -m 0001_a\nkaggle competitions submit demo -f {} -m 0002_b'
+    out = _hook(plugin_root, "pre_tool.py", cmd.format("subs/bad.csv"), ws)
+    assert out["permissionDecision"] == "deny"  # was: only the first submit was checked
+    assert "- submit 2 (subs/bad.csv): 1 rows but sample_submission has 2" in out["permissionDecisionReason"]
+    assert "submit 1" not in out["permissionDecisionReason"]
+
+    now = dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    S.submissions_log(ws).write_text((json.dumps({"time_utc": now, "status": "submitted"}) + "\n") * 3)
+    assert _hook(plugin_root, "pre_tool.py", cmd.format("subs/other.csv"), ws) is None  # 3 + 2 fits in 5
+    with S.submissions_log(ws).open("a") as f:
+        f.write(json.dumps({"time_utc": now, "status": "submitted", "remaining_today": 1}) + "\n")
+    out = _hook(plugin_root, "pre_tool.py", cmd.format("subs/other.csv"), ws)
+    assert out["permissionDecision"] == "ask"
+    assert "4/5 submissions already logged today (UTC) and this command submits 2 times" in out[
+        "permissionDecisionReason"]
+    S.submissions_log(ws).write_text(json.dumps({"time_utc": now, "status": "submitted", "remaining_today": 1}) + "\n")
+    out = _hook(plugin_root, "pre_tool.py", cmd.format("subs/other.csv"), ws)
+    assert "Kaggle reported 1 submission left today for the team and this command submits 2 times" in out[
+        "permissionDecisionReason"]
+
+
+def test_flags_are_read_up_to_the_end_of_their_line(plugin_root):
+    sys.path.insert(0, str(plugin_root / "hooks"))
+    import _common as C
+
+    subs = C.parse_submits("kaggle competitions submit c -k u/a -v 1 -m a  # it's a\n"
+                           "kaggle competitions submit c -k u/b -v 2 -m b \\\n  -q")
+    assert [(s["kernel"], s["version"], s["message"], s["quiet"]) for s in subs] == [("u/a", "1", "a", False),
+                                                                                    ("u/b", "2", "b", True)]
+    pushes = C.parse_pushes("kaggle kernels push -p A\nkaggle kernels push -p B -t 60")
+    assert [(p["path"], p["timeout"]) for p in pushes] == [("A", None), ("B", "60")]  # A took B's flags before
+    assert C.parse_submits("kaggle competitions submit --help") == []
