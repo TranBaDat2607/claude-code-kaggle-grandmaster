@@ -34,7 +34,7 @@ import subprocess
 import sys
 import time
 import zipfile
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from . import kaggle_cli as KC
 from . import safety
@@ -71,6 +71,9 @@ BUNDLE_EXCLUDE_DIRS = {"__pycache__", ".git", ".ipynb_checkpoints", "wandb", ".v
 BUNDLE_EXCLUDE_SUFFIXES = {".pyc", ".pt", ".pth", ".bin", ".ckpt", ".safetensors", ".npy", ".npz", ".pkl",
                            ".parquet", ".feather", ".zip", ".png", ".jpg", ".jpeg", ".dcm"}
 BUNDLE_WARN_MB, BUNDLE_MAX_MB = 2.0, 20.0
+# Where `gpu build` links attached datasets and kernel outputs in the run (competition data is always in data/).
+INPUT_LAYOUTS = {"flat": "into data/, beside the competition data",
+                 "nested": "each in its own folder: data/ext/<slug>/, kernel outputs data/ext/kout-<slug>/"}
 # A push in a command that went on in the background: Kaggle's reply (and the version) came after the hook ran,
 # so the run may not have started. It reserves its whole cap and takes no status from Kaggle, which still reports
 # an earlier version, until Kaggle lists a version of the kernel run after it (`confirm_pending`).
@@ -645,6 +648,41 @@ def build_bundle(root: Path, include: list[str], baseline_dir: Path | None = Non
     return buf.getvalue()
 
 
+def input_sources(datasets: list[str], kernels: list[str], layout: str = "flat") -> list[dict]:
+    """``--dataset`` / ``--kernel`` arguments as the runner's sources: {ref, kind, dest}, ``dest`` being the
+    folder (relative to the project root, so the same locally) that the input's files appear in. An argument is
+    ``owner/slug``, placed by ``layout``, or ``owner/slug=<folder>`` with the folder ``data`` or one under it."""
+    if layout not in INPUT_LAYOUTS:
+        raise SystemExit(f"--input-layout {layout}: one of {', '.join(INPUT_LAYOUTS)}")
+    out = []
+    for kind, args in (("dataset", datasets), ("kernel", kernels)):
+        for arg in dict.fromkeys(args):
+            ref, given, dest = (x.strip() for x in arg.partition("="))
+            if not re.fullmatch(r"[^/\s=]+/[^/\s=]+", ref):
+                raise SystemExit(f"--{kind} {arg}: expected <owner>/<slug>, or <owner>/<slug>=<folder under data/>")
+            if given:
+                p = PurePosixPath(dest.replace("\\", "/"))
+                if p.is_absolute() or ".." in p.parts or p.parts[:1] != ("data",):
+                    raise SystemExit(f"--{kind} {arg}: the folder must be data or one under it, relative to the "
+                                     f"project root (e.g. {ref}=data/ext/{ref.split('/')[1]})")
+                dest = p.as_posix()
+            elif layout == "nested":
+                dest = f"data/ext/{'kout-' if kind == 'kernel' else ''}{ref.split('/')[1]}"
+            else:
+                dest = "data"
+            out.append({"ref": ref, "kind": kind, "dest": dest, "auto": not given})
+    for i, s in enumerate(out):  # two inputs share a folder only when both were given it
+        for o in out[i + 1:]:
+            same_input = (o["kind"], o["ref"]) == (s["kind"], s["ref"])
+            if o["dest"] == s["dest"] != "data" and not same_input and (s["auto"] or o["auto"]):
+                m = o if o["auto"] else s
+                raise SystemExit(f"{s['ref']} and {o['ref']} would share the folder {s['dest']}/: give {m['ref']} "
+                                 f"its own, e.g. --{m['kind']} {m['ref']}={s['dest']}-{m['ref'].split('/')[0]}")
+    for s in out:
+        del s["auto"]
+    return out
+
+
 def _accepted_or_best(cands: list[dict], gib: bool) -> dict | None:
     """The accepted baseline (latest record decided keep/baseline), else the highest CV — the same rule
     as ``kgkit.experiment.Ledger.baseline`` (duplicated here: this module stays standard-library only)."""
@@ -689,15 +727,17 @@ def build_kernel(root: str | Path | None, name: str, cmd: str, hours: float, fol
                  wheel_sources: list[str] = (), assemble_cmd: str | None = None, post_cmds: list[str] = (),
                  prune_against: str | None = None, prune_margin: float | None = None,
                  prune_min_frac: float = 0.3, slug: str | None = None, out_dir: str | Path | None = None,
-                 public: bool = False, extra_jobs: list[tuple[str, str]] = ()) -> Path:
+                 public: bool = False, extra_jobs: list[tuple[str, str]] = (), input_layout: str = "flat") -> Path:
     """Write ``kernels/<slug>/`` (kernel-metadata.json + generated runner script + kg-train.json).
 
     ``extra_jobs`` ((name, cmd) pairs) share the session: e.g. two 1-fold screens of different ideas
-    run side by side on the two T4s instead of leaving one GPU idle."""
+    run side by side on the two T4s instead of leaving one GPU idle. ``datasets`` / ``kernels`` are linked
+    into the run as :func:`input_sources` places them."""
     root = _root(root)
     st = S.load(root)
     if st is None:
         raise SystemExit("not inside a competition workspace (no .kaggle-gm/competition.json)")
+    sources = input_sources(list(datasets), list(kernels), input_layout)
     if accelerator not in ACCELERATORS and accelerator != "none":
         problem = machine_shape_problem(accelerator)
         raise SystemExit(f"--accelerator: {problem}" if problem else
@@ -751,7 +791,8 @@ def build_kernel(root: str | Path | None, name: str, cmd: str, hours: float, fol
     config = {
         "jobs": jobs, "post_cmds": list(post_cmds),
         "hours": hours, "accelerator": accelerator, "pip": list(pip), "wheel_sources": list(wheel_sources),
-        "sources": [st.slug, *datasets, *kernels], "resume_sources": resume_src, "prune": prune,
+        "sources": [{"ref": st.slug, "kind": "competition", "dest": "data"}, *sources], "input_layout": input_layout,
+        "resume_sources": resume_src, "prune": prune,
         "git_commit": commit, "git_dirty": dirty, "build_id": f"{kslug}@{built}",
         "allow_cpu": accelerator == "none", "resource": res, "tpu_chips": TPU_CHIPS.get(accelerator, 0),
     }
@@ -773,16 +814,25 @@ def build_kernel(root: str | Path | None, name: str, cmd: str, hours: float, fol
         "id": f"{user}/{kslug}", "title": kslug.replace("-", " "), "code_file": code_file, "language": "python",
         "kernel_type": "script", "is_private": not public, "enable_gpu": res == "GPU",
         "enable_tpu": res == "TPU", "enable_internet": internet,
-        "dataset_sources": [*datasets, *wheel_sources], "competition_sources": [st.slug],
-        "kernel_sources": [*kernels, *resume_src], "model_sources": list(models),
+        "dataset_sources": [*dict.fromkeys([*(s["ref"] for s in sources if s["kind"] == "dataset"), *wheel_sources])],
+        "competition_sources": [st.slug],
+        "kernel_sources": [*dict.fromkeys([*(s["ref"] for s in sources if s["kind"] == "kernel"), *resume_src])],
+        "model_sources": list(models),
     }
     if accelerator != "none":
         meta["machine_shape"] = accelerator
     (kdir / "kernel-metadata.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
     train_meta = {"kernel": meta["id"], "name": name, "jobs": [j["name"] for j in jobs], "hours": hours,
                   "accelerator": accelerator, "resource": res, "folds": folds, "cmd": cmd, "build_id": config["build_id"], "prune": prune,
-                  "resume_from": resume_src, "bundle_kb": round(len(payload) / 1024, 1)}
+                  "resume_from": resume_src, "bundle_kb": round(len(payload) / 1024, 1),
+                  "input_layout": input_layout, "inputs": config["sources"]}
     (kdir / "kg-train.json").write_text(json.dumps(train_meta, indent=2), encoding="utf-8")
+    flat = [s["ref"] for s in sources if s["dest"] == "data"]
+    if len(flat) > 1:
+        names = ", ".join(flat[:4]) + (f" and {len(flat) - 4} more" if len(flat) > 4 else "")
+        print(f"note: {len(flat)} inputs are linked side by side into data/ ({names}): a name two of them share is "
+              "linked from the first only (the run log lists each). --input-layout nested gives each its own folder "
+              "(data/ext/<slug>/, kernel outputs data/ext/kout-<slug>/)")
     return kdir
 
 
@@ -1191,8 +1241,20 @@ MIN_DIAG_S, MIN_DIAG_SAMPLES = 1200, 20
 
 
 def diagnose(report: dict) -> list[str]:
-    """Quota-efficiency findings for a finished remote run."""
+    """Findings for a finished remote run: inputs it did not have, then quota efficiency."""
     out = []
+    rows = report.get("inputs") or []
+    lost = [f"{r['source']} ({r['error']})" for r in rows if r.get("error")]
+    if lost:
+        out.append("inputs the run did not have: " + "; ".join(lost) + " - `gpu push` prints the inputs Kaggle "
+                   "could not attach, and a kernel's output is bound when the kernel reading it is pushed")
+    skipped = [f"{e} from {r['source']} (already {why})" for r in rows for e, why in (r.get("skipped") or {}).items()]
+    if skipped:
+        more = f"; {len(skipped) - 8} more in kg_run.json" if len(skipped) > 8 else ""
+        out.append(f"{len(skipped)} input entries were not linked, as the name was already taken: "
+                   + "; ".join(skipped[:8]) + more + ". Give each input its own folder: `gpu build --input-layout "
+                   "nested` (data/ext/<slug>/, kernel outputs data/ext/kout-<slug>/) or `--dataset "
+                   "<owner>/<slug>=data/<folder>`")
     util = report.get("gpu_util") or {}
     gpus = report.get("gpus") or []
     elapsed = report.get("elapsed_s")

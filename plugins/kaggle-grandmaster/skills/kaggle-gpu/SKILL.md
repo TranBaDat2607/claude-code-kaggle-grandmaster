@@ -1,6 +1,6 @@
 ---
 name: kaggle-gpu
-description: Training models on Kaggle's free GPUs and TPUs with limited weekly quotas — T4x2 vs P100 vs TPU v5e-8 choice, quota, session and concurrency limits, remote training kernels (kgkit gpu build/push/wait/collect/release), screening ideas on one fold with learning-curve pruning, packing two jobs per 2xT4 session, resuming past the 12h limit, porting to torch_xla and the TPU queue, CPU kernels for preprocessing, input-pipeline throughput, and budgeting accelerator hours until the deadline. Use when training on Kaggle notebooks/kernels, planning or rationing GPU/TPU quota, choosing an accelerator, or when a remote run was slow, idle, queued, timed out or wasted hours.
+description: Training models on Kaggle's free GPUs and TPUs with limited weekly quotas — T4x2 vs P100 vs TPU v5e-8 choice, quota, session and concurrency limits, remote training kernels (kgkit gpu build/push/wait/collect/release), screening ideas on one fold with learning-curve pruning, packing two jobs per 2xT4 session, resuming past the 12h limit, porting to torch_xla and the TPU queue, CPU kernels for preprocessing or stacking many OOF libraries, where attached inputs are mounted, input-pipeline throughput, and budgeting accelerator hours until the deadline. Use when training on Kaggle notebooks/kernels, planning or rationing GPU/TPU quota, choosing an accelerator, or when a remote run was slow, idle, queued, timed out or wasted hours.
 ---
 
 # Training on Kaggle GPUs
@@ -64,7 +64,7 @@ a session slot frees up) is logged as pending: its whole cap stays reserved unti
 the kernel run after it, which `gpu status` and `gpu wait <kernel>` check (`gpu release <kernel>` if the
 push never went through). Your username (for `"id"` in kernel-metadata.json): `python -m kgkit whoami`.
 
-The runner links every attached input into `./data` and points `./artifacts` and `./subs` into
+The runner links the attached inputs into `./data` and points `./artifacts` and `./subs` into
 `/kaggle/working`. Your training command then runs unchanged, with the same relative paths and the same frozen
 folds (so `folds_hash` matches the local ledger). It runs one process per (job, fold), one per GPU,
 sets `KG_DEADLINE` so the templates checkpoint before the session ends, and assembles each finished job once.
@@ -80,6 +80,26 @@ python -m kgkit gpu wait me/cnx384-train --collect     # background
 Custom scripts work if they follow the contract: accept `--folds <k>` and `--assemble`, write
 `artifacts/<name>/fold<k>_oof.npy` (+ `_idx.npy`, `_test.npy`), and use `kgkit.budget.TrainBudget`
 for deadline, resume and pruning. The image and transformer templates already do all of this.
+
+Where the inputs go (match your local layout, so the command finds them):
+- `--input-layout flat` (the default): competition data, `--dataset` and `--kernel` contents side by side in `data/`.
+  A name two inputs share (`oof_predictions.parquet`, `submission.csv`, `README.md`) is linked from the first
+  only. The run log warns about each one, and `collect` lists them.
+- `--input-layout nested`: each input in its own folder, `data/ext/<slug>/` (datasets) and
+  `data/ext/kout-<slug>/` (kernel outputs). Competition data stays in `data/`. Use it whenever several inputs
+  can share file names, e.g. a stack over public OOF libraries.
+- `--dataset <owner>/<slug>=data/<folder>` (or `--kernel`) puts one input where your scripts expect it, e.g.
+  the folder you gave `kgkit datasets pull`. `=data` puts it beside the competition data.
+
+An input Kaggle did not mount (not attached, or a kernel still running at push time) is a warning in the log
+and a `collect` finding, and so is a missing `--resume-from` kernel, whose folds would be trained again.
+
+```bash
+# CPU stack over many OOF libraries (no GPU quota): every library keeps its own files
+python -m kgkit gpu build --name stack --hours 2 --accelerator none --input-layout nested \
+    --dataset megayak/s6e10-oof mitudru/s6e10-oof=data/ext/mitudru-oof --kernel thisray/s6e10-stack \
+    --cmd "python src/stack.py"
+```
 
 ## 3. Grandmaster protocol for the most leaderboard per GPU-hour
 

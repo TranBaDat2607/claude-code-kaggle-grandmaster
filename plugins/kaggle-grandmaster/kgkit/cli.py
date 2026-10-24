@@ -1213,10 +1213,15 @@ def cmd_gpu(a):
             internet=not a.no_internet, pip=a.pip, wheel_sources=a.wheels, assemble_cmd=a.assemble_cmd,
             post_cmds=a.post_cmd, prune_against=a.prune_against, prune_margin=a.prune_margin,
             prune_min_frac=a.prune_min_frac, slug=a.slug, public=a.public,
-            extra_jobs=[tuple(j) for j in a.extra_job or []])
+            extra_jobs=[tuple(j) for j in a.extra_job or []], input_layout=a.input_layout)
         tm = json.loads((kdir / "kg-train.json").read_text(encoding="utf-8"))
         print(f"wrote {kdir} (kernel {tm['kernel']}, jobs {tm['jobs']}, {tm['accelerator']}, cap {tm['hours']}h, "
               f"folds {tm['folds']}, code bundle {tm['bundle_kb']} KB)")
+        folders = {}
+        for s in tm["inputs"]:
+            folders.setdefault(s["dest"], []).append(s["ref"])
+        if set(folders) != {"data"}:
+            print("inputs: " + "; ".join(f"{d}/ <- {', '.join(refs)}" for d, refs in folders.items()))
         if tm.get("prune"):
             print(f"pruning against {tm['prune']['baseline']} with margin {tm['prune']['margin']:.5f}")
         print(f"next: smoke-test the command locally, then  python -m kgkit gpu push {kdir.as_posix()}")
@@ -1631,8 +1636,15 @@ def build_parser() -> argparse.ArgumentParser:
                    help="NvidiaTeslaT4 (2x T4) | NvidiaTeslaP100 | TpuV5E8 (TPU quota, one process per chip) | "
                         "TpuV6E8 | none")
     s.add_argument("--user", help="Kaggle username (default: KAGGLE_USERNAME / kaggle.json / `kaggle config view`)")
-    s.add_argument("--dataset", nargs="*", default=[], help="owner/slug datasets linked into data/")
-    s.add_argument("--kernel", nargs="*", default=[], help="owner/slug kernel outputs linked into data/")
+    s.add_argument("--dataset", nargs="*", default=[],
+                   help="owner/slug datasets, linked as --input-layout says; owner/slug=data/<folder> puts one "
+                        "in that folder (as `datasets pull` did locally)")
+    s.add_argument("--kernel", nargs="*", default=[],
+                   help="owner/slug kernel outputs, linked as --input-layout says (or owner/slug=data/<folder>)")
+    s.add_argument("--input-layout", choices=["flat", "nested"], default="flat",
+                   help="where datasets and kernel outputs go: flat = into data/ beside the competition data "
+                        "(a name two inputs share is linked from the first only); nested = each in its own "
+                        "folder, data/ext/<slug>/ and data/ext/kout-<slug>/ for kernel outputs")
     s.add_argument("--model", nargs="*", default=[], help="Kaggle model sources")
     s.add_argument("--resume-from", nargs="*", default=[], help="previous training kernel(s) to resume from")
     s.add_argument("--include", nargs="*", default=["src"], help="code paths bundled into the kernel")
