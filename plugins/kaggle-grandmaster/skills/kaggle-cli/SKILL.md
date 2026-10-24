@@ -122,10 +122,14 @@ adds the quota check, a `-t` cap, deadline-aware checkpoints, both T4s busy and 
 kaggle datasets init -p kernels/weights                 # dataset-metadata.json (title, id user/slug, licenses)
 kaggle datasets create -p kernels/weights --dir-mode zip
 kaggle datasets version -p kernels/weights -m "fold models v3" --dir-mode zip
-kaggle datasets download <owner>/<slug> -p data/ext --unzip
+kaggle datasets download <owner>/<slug> -p data/ext/<slug> --unzip
 python -m kgkit datasets pull <owner>/<slug> data/ext/<slug>   # same, file by file when the archive 404s
+kaggle kernels output <owner>/<kernel> -p data/ext/kout-<kernel>   # a notebook's outputs used as inputs (OOFs)
 kaggle models instances versions create ...              # Kaggle Models (for model hubs) — see `kaggle models -h`
 ```
+One folder per input keeps same-named files of different inputs apart (`oof_predictions.parquet` from two
+libraries), and `kgkit gpu build --input-layout nested` mounts them the same way on Kaggle.
+
 **404 on `datasets download`.** Some public datasets (seen on OOF libraries with many versions or recent
 updates) return `404 Client Error: Not Found for url: .../DownloadDataset` for the whole-dataset archive,
 while `kaggle datasets files` lists them and `-f <file>` downloads every file. `kgkit datasets pull` tries

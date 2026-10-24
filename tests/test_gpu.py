@@ -177,7 +177,9 @@ def test_build_kernel(gws):
     cfg = json.loads(_decode(script, "CONFIG_B64"))
     job = cfg["jobs"][0]
     assert job["folds"] == [0, 1, 2, 3] and cfg["hours"] == 2.5
-    assert job["assemble_cmd"].endswith("--name fk --assemble") and cfg["sources"] == ["demo-comp", "tester/demo-512"]
+    assert job["assemble_cmd"].endswith("--name fk --assemble") and cfg["input_layout"] == "flat"
+    assert cfg["sources"] == [{"ref": "demo-comp", "kind": "competition", "dest": "data"},
+                              {"ref": "tester/demo-512", "kind": "dataset", "dest": "data"}]
     names = zipfile.ZipFile(io.BytesIO(_decode(script, "PAYLOAD_B64"))).namelist()
     assert "src/fake_train.py" in names and "kgkit/gpu.py" in names and "data/folds.csv" in names
     assert ".kaggle-gm/competition.json" in names and "src/big.npy" not in names

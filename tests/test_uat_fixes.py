@@ -1390,3 +1390,193 @@ def test_gpu_push_end_to_end_prints_the_cause_after_the_output(ws, tmp_path, plu
     assert r.returncode == 1 and "kernels push" in calls.read_text()
     assert out.index("warning: machine_shape") < out.index(SAVE_400) < out.index("kernel push failed (see output above)")
     assert "Kaggle refused the push: machine_shape 'NvidiaTeslaT4Highmem'" in out
+
+
+# ----------------------------------------------------------------------------- #44 inputs of a remote run
+SHOW_INPUTS = ("import os, sys\n"
+               "sys.stdout.reconfigure(encoding='utf-8')\n"  # the runner's own log must be ASCII, not this one's
+               "for d, _, files in sorted(os.walk('data', followlinks=True)):\n"
+               "    for f in sorted(files):\n"
+               "        p = os.path.join(d, f)\n"
+               "        print('SEE', p.replace(os.sep, '/'), open(p).read().strip().replace(chr(10), '|'))\n")
+
+
+def _inputs_ws(tmp_path):
+    root = tmp_path / "ws"
+    (root / "src").mkdir(parents=True)
+    S.CompetitionState(slug="demo-comp", metric="auc").save(root)
+    (root / "data").mkdir()
+    (root / "data" / "folds.csv").write_text("id,fold\n0,0\n1,1\n")
+    (root / "src" / "show.py").write_text(SHOW_INPUTS)
+    return root
+
+
+def _run_inputs(root, base, mounted, **build):
+    """Build a CPU kernel whose command prints every file under data/, mount ``mounted`` ({path under
+    /kaggle/input: text}) and run it: (stdout, {file under data/: text}, kg_run.json)."""
+    kdir = G.build_kernel(root, "show", f'"{sys.executable}" src/show.py', hours=1, user="me", accelerator="none",
+                          **build)
+    for rel, text in mounted.items():
+        (base / "input" / rel).parent.mkdir(parents=True, exist_ok=True)
+        (base / "input" / rel).write_text(text)
+    meta = json.loads((kdir / "kernel-metadata.json").read_text())
+    env = dict(os.environ, KAGGLE_INPUT=str(base / "input"), KAGGLE_WORKING=str(base / "working"),
+               KG_RUN_DIR=str(base / "run"), KG_FAKE_GPUS="0")
+    env.pop("PYTHONPATH", None)
+    r = subprocess.run([sys.executable, str(kdir / meta["code_file"])], env=env, capture_output=True, text=True,
+                       timeout=300)
+    assert r.returncode == 0, r.stdout[-3000:] + r.stderr[-3000:]
+    seen = dict(l[len("[train] SEE "):].split(" ", 1) for l in r.stdout.splitlines() if l.startswith("[train] SEE "))
+    return r.stdout, seen, json.loads((base / "working" / "kg_run.json").read_text())
+
+
+OOF_LIBRARIES = {
+    "competitions/demo-comp/train.csv": "competition train",
+    "datasets/megayak/s6e10-oof/oof_predictions.parquet": "megayak oof",
+    "datasets/megayak/s6e10-oof/test_predictions.parquet": "megayak test",
+    "datasets/mitudru/s6e10-oof/oof_predictions.parquet": "mitudru oof",  # another owner, the same slug
+    "datasets/mitudru/s6e10-oof/test_predictions.parquet": "mitudru test",
+    "datasets/thisray/s6e10-stack/oof_predictions.parquet": "thisray oof",
+    "datasets/thisray/s6e10-stack/folds.csv": "thisray's split",
+    "s6e10-stack/oof_members.csv": "kernel output of kagankoral",  # the layout of older Kaggle images
+}
+
+
+def test_flat_inputs_warn_about_every_name_two_inputs_share(tmp_path, capsys):
+    root = _inputs_ws(tmp_path)
+    mounted = {**OOF_LIBRARIES, "datasets/megayak/s6e10-oof/notes-\u0111.txt": "megayak notes",
+               "datasets/mitudru/s6e10-oof/notes-\u0111.txt": "mitudru notes"}  # not in cp1252 (Windows consoles)
+    out, seen, rep = _run_inputs(root, tmp_path / "k", mounted, resume_from=["me/old-train"],
+                                 datasets=["megayak/s6e10-oof", "mitudru/s6e10-oof", "thisray/s6e10-stack",
+                                           "me/not-attached"], kernels=["kagankoral/s6e10-stack"])
+    note = capsys.readouterr().out  # said at build time
+    assert "5 inputs are linked side by side into data/ (megayak/s6e10-oof, mitudru/s6e10-oof, thisray/s6e10-stack, " \
+           "me/not-attached and 1 more): a name two of them share is linked from the first only" in note
+    # the first input keeps a name; every other input that has it is named, with what holds it
+    assert seen["data/oof_predictions.parquet"] == "megayak oof" and seen["data/train.csv"] == "competition train"
+    for line in ["data/oof_predictions.parquet from mitudru/s6e10-oof skipped: already linked from megayak/s6e10-oof",
+                 "data/test_predictions.parquet from mitudru/s6e10-oof skipped: already linked from megayak/s6e10-oof",
+                 "data/oof_predictions.parquet from thisray/s6e10-stack skipped: already linked from megayak/s6e10-oof",
+                 "data/folds.csv from thisray/s6e10-stack skipped: already in the code bundle",
+                 "data/notes-?.txt from mitudru/s6e10-oof skipped: already linked from megayak/s6e10-oof"]:
+        assert "WARNING: " + line in out
+    assert seen["data/folds.csv"] == "id,fold|0,0|1,1"  # the frozen split, not the library's
+    # a slug two owners share is read from each owner's folder, not twice from the first one found
+    rows = {r["source"]: r for r in rep["inputs"]}
+    assert rows["mitudru/s6e10-oof"]["path"].replace("\\", "/").endswith("datasets/mitudru/s6e10-oof")
+    assert rows["mitudru/s6e10-oof"]["linked"] == 0 and len(rows["mitudru/s6e10-oof"]["skipped"]) == 3
+    assert seen["data/oof_members.csv"] == "kernel output of kagankoral"
+    assert rows["kagankoral/s6e10-stack"]["kind"] == "kernel"
+    # inputs that are not there are said, the resume source too (its folds would be trained again)
+    assert "WARNING: input me/not-attached not found under" in out and "Kaggle could not attach" in out
+    assert "WARNING: resume source me/old-train not found under" in out
+    assert "5 input entries were not linked" in out.splitlines()[-2]  # repeated at the end of the log
+    assert out.isascii() and seen["data/notes-?.txt"] == "megayak notes"
+    res = G.collect(root, "me/show-train", from_dir=tmp_path / "k" / "working")
+    assert "inputs the run did not have: me/not-attached (not found under " in res["summary"]
+    assert "me/old-train (resume source not found under " in res["summary"]
+    assert ("5 input entries were not linked, as the name was already taken: data/notes-\u0111.txt "
+            "from mitudru/s6e10-oof (already linked from megayak/s6e10-oof); data/oof_predictions.parquet "
+            "from mitudru/s6e10-oof (already linked from megayak/s6e10-oof);") in res["summary"]
+    assert "`gpu build --input-layout nested`" in res["summary"]
+
+
+def test_nested_inputs_keep_every_source_in_its_own_folder(tmp_path):
+    root = _inputs_ws(tmp_path)
+    mounted = {**OOF_LIBRARIES, "datasets/dariushafshar/s6e10-golem-oof-library/oof.npy": "golem",
+               "datasets/me/prep/train_512.csv": "preprocessed"}
+    out, seen, rep = _run_inputs(root, tmp_path / "k", mounted, input_layout="nested",
+                                 datasets=["megayak/s6e10-oof", "mitudru/s6e10-oof=data/ext/mitudru-s6e10-oof",
+                                           "thisray/s6e10-stack",
+                                           "dariushafshar/s6e10-golem-oof-library=data/ext/golem", "me/prep=data"],
+                                 kernels=["kagankoral/s6e10-stack"])
+    meta = json.loads((root / "kernels" / "show-train" / "kernel-metadata.json").read_text())
+    assert meta["dataset_sources"] == ["megayak/s6e10-oof", "mitudru/s6e10-oof", "thisray/s6e10-stack",
+                                       "dariushafshar/s6e10-golem-oof-library", "me/prep"]  # Kaggle gets refs only
+    assert meta["kernel_sources"] == ["kagankoral/s6e10-stack"]
+    assert "WARNING" not in out and rep["input_layout"] == "nested"
+    assert seen == {
+        "data/folds.csv": "id,fold|0,0|1,1", "data/train.csv": "competition train",
+        "data/train_512.csv": "preprocessed",  # =data: this one beside the competition data
+        "data/ext/s6e10-oof/oof_predictions.parquet": "megayak oof",
+        "data/ext/s6e10-oof/test_predictions.parquet": "megayak test",
+        "data/ext/mitudru-s6e10-oof/oof_predictions.parquet": "mitudru oof",
+        "data/ext/mitudru-s6e10-oof/test_predictions.parquet": "mitudru test",
+        "data/ext/s6e10-stack/oof_predictions.parquet": "thisray oof",
+        "data/ext/s6e10-stack/folds.csv": "thisray's split",
+        "data/ext/kout-s6e10-stack/oof_members.csv": "kernel output of kagankoral",
+        "data/ext/golem/oof.npy": "golem"}
+    assert G.diagnose(rep) == []
+
+
+def test_an_input_is_not_linked_into_a_folder_another_input_holds(tmp_path):
+    root = _inputs_ws(tmp_path)
+    mounted = {"competitions/demo-comp/train.csv": "competition train", "datasets/me/prep/ext/notes.txt": "notes",
+               "datasets/megayak/s6e10-oof/oof_predictions.parquet": "megayak oof"}
+    out, seen, rep = _run_inputs(root, tmp_path / "k", mounted, input_layout="nested",
+                                 datasets=["me/prep=data", "megayak/s6e10-oof"])
+    assert "WARNING: input megayak/s6e10-oof not linked: data/ext is already linked from me/prep" in out
+    assert seen["data/ext/notes.txt"] == "notes" and not (tmp_path / "k" / "input" / "datasets" / "me" / "prep" / "ext"
+                                                           / "s6e10-oof").exists()  # nothing written into an input
+    assert "megayak/s6e10-oof (data/ext is already linked from me/prep)" in G.diagnose(rep)[0]
+
+
+def _runner_module(plugin_root, inp):
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("kg_runner_under_test",
+                                                  plugin_root / "templates" / "kaggle_gpu_runner.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    mod.INPUT = inp
+    return mod
+
+
+def test_each_input_is_found_in_the_folder_of_its_owner_and_kind(tmp_path, plugin_root):
+    inp = tmp_path / "input"
+    for d in ["competitions/demo/train/lib", "datasets/a/demo", "datasets/a/lib", "datasets/b/lib", "datasets/abc/abc",
+              "notebooks/a/lib", "old-style"]:
+        (inp / d).mkdir(parents=True)
+    R = _runner_module(plugin_root, inp)
+    refs = {"demo": "competition", "a/demo": "dataset", "a/lib": "dataset", "b/lib": "dataset", "abc/abc": "dataset",
+            "a/lib ": "kernel", "x/old-style": "dataset", "x/missing": "dataset"}
+    found = R.scan_inputs([r.strip() for r in refs])
+    got = {f"{r.strip()} {k}": R.find_source(found, r.strip(), k) for r, k in refs.items()}
+    rel = {k: v.relative_to(inp).as_posix() if v else None for k, v in got.items()}
+    assert rel == {"demo competition": "competitions/demo", "a/demo dataset": "datasets/a/demo",
+                   "a/lib dataset": "datasets/a/lib", "b/lib dataset": "datasets/b/lib",
+                   "abc/abc dataset": "datasets/abc/abc",  # an owner folder named like the slug is walked into
+                   "a/lib kernel": "notebooks/a/lib", "x/old-style dataset": "old-style", "x/missing dataset": None}
+    assert all("train" not in str(p) for p, _ in found["lib"])  # the walk stays out of an input's own folders
+
+
+def test_build_places_each_input_and_refuses_folders_outside_data(ws, monkeypatch, capsys):
+    from kgkit import cli
+
+    srcs = G.input_sources(["a/lib", "b/lib=data\\ext\\b-lib", "c/x=data"], ["a/lib", "d/run"], "nested")
+    assert [(s["ref"], s["kind"], s["dest"]) for s in srcs] == [
+        ("a/lib", "dataset", "data/ext/lib"), ("b/lib", "dataset", "data/ext/b-lib"), ("c/x", "dataset", "data"),
+        ("a/lib", "kernel", "data/ext/kout-lib"), ("d/run", "kernel", "data/ext/kout-run")]
+    assert [s["dest"] for s in G.input_sources(["a/lib", "a/lib"], [], "flat")] == ["data"]
+    with pytest.raises(SystemExit, match=r"a/lib and b/lib would share the folder data/ext/lib/: give b/lib its own, "
+                                         r"e\.g\. --dataset b/lib=data/ext/lib-b"):
+        G.input_sources(["a/lib", "b/lib"], [], "nested")
+    with pytest.raises(SystemExit, match="would share the folder data/ext/lib/"):  # also with a folder given to one
+        G.input_sources(["a/lib=data/ext/lib", "b/lib"], [], "nested")
+    G.input_sources(["a/lib=data/ext", "b/lib=data/ext"], [], "nested")  # given on purpose: one folder for both
+    for bad in ["a/lib=../lib", "a/lib=/abs/lib", "a/lib=src/lib", "a/lib=artifacts/lib", "a/lib=", "a/lib=data/../x"]:
+        with pytest.raises(SystemExit, match="the folder must be data or one under it"):
+            G.input_sources([bad], [], "flat")
+    with pytest.raises(SystemExit, match="expected <owner>/<slug>"):
+        G.input_sources(["lib"], [], "flat")
+    with pytest.raises(SystemExit, match="--input-layout tree"):
+        G.input_sources([], [], "tree")
+    monkeypatch.chdir(ws)
+    cli.main(["gpu", "build", "--name", "stk", "--cmd", "python src/stack.py", "--hours", "1", "--user", "me",
+              "--include", "--accelerator", "none", "--input-layout", "nested", "--dataset", "a/lib", "b/x=data",
+              "--kernel", "a/lib"])
+    text = capsys.readouterr().out
+    assert "inputs: data/ <- demo, b/x; data/ext/lib/ <- a/lib; data/ext/kout-lib/ <- a/lib" in text
+    assert "side by side" not in text
+    tm = json.loads((ws / "kernels" / "stk-train" / "kg-train.json").read_text())
+    assert tm["input_layout"] == "nested" and tm["inputs"][0] == {"ref": "demo", "kind": "competition", "dest": "data"}
