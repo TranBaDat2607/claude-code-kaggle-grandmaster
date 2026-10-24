@@ -2,7 +2,7 @@
 
 Kaggle GPU time is a weekly quota, so a training loop should (1) never be killed mid-epoch by the
 session limit with nothing saved, and (2) stop early when it is clearly losing to the baseline.
-The remote runner (``templates/kaggle_gpu_runner.py``) passes the budget through env vars; locally
+The remote runner (``kgkit/kaggle_gpu_runner.py``) passes the budget through env vars; locally
 nothing is set and the guard only records the learning curve::
 
     from kgkit.budget import TrainBudget

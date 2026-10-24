@@ -40,8 +40,10 @@ from . import kaggle_cli as KC
 from . import safety
 from . import state as S
 
-PLUGIN_ROOT = Path(__file__).resolve().parents[1]
-RUNNER = PLUGIN_ROOT / "templates" / "kaggle_gpu_runner.py"
+# The runner is part of the package, not of the plugin around it: `kgkit vendor` copies only the package, and a copy
+# must fill in the runner its own config format was written for (the plugin's may be another version's).
+KGKIT_DIR = Path(__file__).resolve().parent
+RUNNER = KGKIT_DIR / "kaggle_gpu_runner.py"
 RUNS_FILE = "gpu_runs.jsonl"
 QUOTA_FILE = "gpu_quota.json"
 SESSION_LIMIT_H = 12.0
@@ -632,7 +634,7 @@ def build_bundle(root: Path, include: list[str], baseline_dir: Path | None = Non
     """Zip of the code a remote run needs. Data never goes in here: attach it as a dataset/competition."""
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED, compresslevel=9) as z:
-        _add_tree(z, PLUGIN_ROOT / "kgkit", "kgkit")
+        _add_tree(z, KGKIT_DIR, "kgkit")
         z.write(root / S.STATE_DIR / S.STATE_FILE, f"{S.STATE_DIR}/{S.STATE_FILE}")
         folds = root / "data" / "folds.csv"
         if folds.is_file():  # the frozen split must be identical remotely (folds_hash matches the local ledger)
@@ -737,6 +739,11 @@ def build_kernel(root: str | Path | None, name: str, cmd: str, hours: float, fol
     st = S.load(root)
     if st is None:
         raise SystemExit("not inside a competition workspace (no .kaggle-gm/competition.json)")
+    try:  # before any work, not after the bundle is built
+        runner = RUNNER.read_text(encoding="utf-8")
+    except OSError as e:
+        raise SystemExit(f"this kgkit ({KGKIT_DIR}) has no kernel runner ({e}): copy it again from the plugin's, "
+                         "`PYTHONPATH=\"$KGKIT_HOME\" python -m kgkit vendor <dest>`")
     sources = input_sources(list(datasets), list(kernels), input_layout)
     if accelerator not in ACCELERATORS and accelerator != "none":
         problem = machine_shape_problem(accelerator)
@@ -802,8 +809,7 @@ def build_kernel(root: str | Path | None, name: str, cmd: str, hours: float, fol
         raise SystemExit(f"code bundle is {mb:.1f} MB: keep data out of --include (upload it as a dataset)")
     if mb > BUNDLE_WARN_MB:
         print(f"note: code bundle is {mb:.1f} MB; anything big belongs in a Kaggle dataset")
-    script = RUNNER.read_text(encoding="utf-8")
-    script = script.replace("__KG_CONFIG_B64__", base64.b64encode(json.dumps(config).encode()).decode(), 1)
+    script = runner.replace("__KG_CONFIG_B64__", base64.b64encode(json.dumps(config).encode()).decode(), 1)
     script = script.replace("__KG_PAYLOAD_B64__", base64.b64encode(payload).decode(), 1)
 
     kdir = Path(out_dir) if out_dir else root / "kernels" / kslug

@@ -8,15 +8,18 @@ from __future__ import annotations
 
 import math
 import os
+import re
 import sys
 from pathlib import Path
 
 try:
     import _common as C
+    from kgkit import __version__ as KGKIT_VERSION
 except Exception:  # pragma: no cover - fail open
     sys.exit(0)
 
 KGKIT_HOME = C.PLUGIN_ROOT.as_posix()
+VERSION_RE = re.compile(r"""^__version__\s*=\s*["']([^"']+)["']""", re.MULTILINE)
 
 
 def _export_env() -> None:
@@ -45,6 +48,32 @@ def _pearson(xs, ys):
 
 def _own_cv(r: dict, holdout: bool = False) -> bool:
     return C.EV.own_score(r, holdout)
+
+
+def vendored_note(root: Path) -> str:
+    """Copies of kgkit in the workspace or a folder of it (`kgkit vendor src`) whose version is not the plugin's:
+    scripts that import one, and `python -m kgkit` run from one, run that version, which a plugin update leaves as
+    it was."""
+    found = []
+    for d in [root, *sorted(p for p in root.iterdir() if p.is_dir() and not p.name.startswith("."))]:
+        init = d / "kgkit" / "__init__.py"
+        try:
+            if not init.is_file() or init.resolve().parent == C.PLUGIN_ROOT / "kgkit":
+                continue
+            m = VERSION_RE.search(init.read_text(encoding="utf-8", errors="replace"))
+        except OSError:
+            continue
+        version = m.group(1) if m else "of no known version"
+        if version != KGKIT_VERSION:
+            found.append((d.relative_to(root).as_posix(), version))
+    if not found:
+        return ""
+    copies = "; ".join(f"{'' if d == '.' else d + '/'}kgkit is {v}" for d, v in found)
+    one = len(found) == 1
+    return (f"Vendored kgkit not at the plugin's version {KGKIT_VERSION}: {copies}. Scripts that import a copy, and "
+            f"`python -m kgkit` run from one, run its version. Refresh {'it' if one else 'each'} with the plugin's "
+            f"kgkit: `PYTHONPATH=\"{KGKIT_HOME}\" python -m kgkit vendor {found[0][0] if one else '<folder>'}` (later "
+            "experiments then run the new code).")
 
 
 def brief(root: Path) -> str:
@@ -110,6 +139,12 @@ def brief(root: Path) -> str:
         lines.append("No data/folds.csv yet — freeze the CV scheme before comparing experiments (/kg-cv). If "
                      "decisions are made on a fixed holdout + the public LB instead, record that: "
                      "`python -m kgkit config validation=holdout+lb holdout_n=<rows>`.")
+    try:
+        vendored = vendored_note(root)
+    except OSError:
+        vendored = ""
+    if vendored:
+        lines.append(vendored)
     return "\n".join(lines)
 
 

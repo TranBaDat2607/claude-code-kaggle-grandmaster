@@ -30,6 +30,8 @@ parts of a competition that are easy to get subtly wrong:
 - ``kgkit.submission``  submission validation against sample_submission
 - ``kgkit.state``       competition state (``.kaggle-gm/competition.json``)
 - ``kgkit.gpu``         training on Kaggle GPUs/TPUs: quota, remote kernels, accelerator-hour accounting
+- ``kgkit.kaggle_gpu_runner`` the script of a remote training kernel, which ``gpu build`` fills in (runs inside
+                        Kaggle; kept in the package so that a copy made by ``kgkit vendor`` has its own version's)
 - ``kgkit.budget``      training-loop guard: session deadline, resume checkpoints, learning-curve pruning
 
 Run ``python -m kgkit --help`` for the command line interface.

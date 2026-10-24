@@ -63,6 +63,21 @@ def test_session_start_inside_workspace(plugin_root, ws):
     assert "Accepted baseline" in ctx and "0001_lgbm" in ctx and "Backlog top: #1 pseudo-label" in ctx
 
 
+def test_session_start_flags_a_vendored_kgkit_of_another_version(plugin_root, ws):
+    import kgkit
+
+    init = ws / "src" / "kgkit" / "__init__.py"
+    init.parent.mkdir(parents=True)
+    init.write_text('"""kgkit"""\n\n__version__ = "1.6.2"\n')
+    ctx = hook(plugin_root, "session_start.py", {"hook_event_name": "SessionStart", "cwd": str(ws)})["additionalContext"]
+    home = ctx.split("kgkit home: ", 1)[1].split(" — ", 1)[0]
+    assert f"Vendored kgkit not at the plugin's version {kgkit.__version__}: src/kgkit is 1.6.2." in ctx
+    assert f'`PYTHONPATH="{home}" python -m kgkit vendor src`' in ctx
+    init.write_text(f'__version__ = "{kgkit.__version__}"\n')
+    ctx = hook(plugin_root, "session_start.py", {"hook_event_name": "SessionStart", "cwd": str(ws)})["additionalContext"]
+    assert "Vendored kgkit" not in ctx
+
+
 def test_secret_read_denied(plugin_root, tmp_path):
     for cmd in ["cat ~/.kaggle/kaggle.json", "Get-Content $HOME\\.kaggle\\kaggle.json", "echo $KAGGLE_KEY",
                 "printenv KAGGLE_KEY"]:
