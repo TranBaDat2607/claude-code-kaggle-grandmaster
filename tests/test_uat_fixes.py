@@ -1159,3 +1159,228 @@ def test_flags_are_read_up_to_the_end_of_their_line(plugin_root):
     pushes = C.parse_pushes("kaggle kernels push -p A\nkaggle kernels push -p B -t 60")
     assert [(p["path"], p["timeout"]) for p in pushes] == [("A", None), ("B", "60")]  # A took B's flags before
     assert C.parse_submits("kaggle competitions submit --help") == []
+
+
+# ----------------------------------------------------------------------------- #43 machine shapes, Kaggle's answers
+SAVE_400 = "400 Client Error: Bad Request for url: https://api.kaggle.com/v1/kernels.KernelsApiService/SaveKernel"
+
+
+def _shaped_kernel(root, shape, **meta):
+    k = _notebook_kernel(root)
+    m = json.loads((k / "kernel-metadata.json").read_text())
+    (k / "kernel-metadata.json").write_text(json.dumps({**m, "machine_shape": shape, **meta}))
+    return k
+
+
+@pytest.mark.parametrize("shape,ask", [("NvidiaTeslaT4Highmem", "NvidiaTeslaT4"), ("TpuV5E8Highmem", "TpuV5E8"),
+                                       ("nvidiateslap100", "NvidiaTeslaP100"), ("T4", "NvidiaTeslaT4"),
+                                       ("tpu", "TpuV5E8"), ("Bogus", None)])
+def test_machine_shape_problem_names_the_shape_to_ask_for(shape, ask):
+    problem = G.machine_shape_problem(shape)
+    assert f"machine_shape {shape!r}" in problem and "bare 400" in problem and "Tpu1VmV38 (TPU v3-8)" in problem
+    assert (f": ask for {ask}." in problem) if ask else ": ask for" not in problem
+
+
+def test_machine_shapes_kaggle_takes_pass():
+    for shape in [*G.MACHINE_SHAPES, "none", "", None]:
+        assert G.machine_shape_problem(shape) is None
+    assert "stored by Kaggle as TpuV5E8: ask for TpuV5E8" in G.machine_shape_problem("TpuV5E4")
+
+
+def test_push_refuses_a_machine_shape_kaggle_does_not_take_before_any_kaggle_call(ws, monkeypatch, capsys):
+    k = _shaped_kernel(ws, "NvidiaTeslaT4Highmem")
+    fake = FakeKaggle(_push_routes())
+    monkeypatch.setattr(G, "run_kaggle", fake)
+    with pytest.raises(SystemExit, match=r"\(kernel-metadata\.json\): machine_shape 'NvidiaTeslaT4Highmem' .*: ask for "
+                                         r"NvidiaTeslaT4\. .* --force pushes it"):
+        G.push(ws, k, hours=5.6)
+    assert fake.calls == []  # no session, source or quota lookups first: it fails at once
+    rec = G.push(ws, k, hours=1, force=True)  # a shape Kaggle may have added since
+    push = next(c for c in fake.calls if c[:2] == ["kernels", "push"])
+    assert push[push.index("--accelerator") + 1] == "NvidiaTeslaT4Highmem" and rec["version"] == 7
+    assert "warning: machine_shape 'NvidiaTeslaT4Highmem'" in capsys.readouterr().out
+    k = _shaped_kernel(ws / "tpu", "TpuV5E4", enable_gpu=False, enable_tpu=True)
+    with pytest.raises(SystemExit, match="ask for TpuV5E8$"):  # Kaggle runs it as a v5e-8: --force does not help
+        G.push(ws, k, hours=1, force=True)
+
+
+@pytest.mark.parametrize("shape,output,hint", [
+    ("NvidiaTeslaT4Highmem", SAVE_400, "Kaggle refused the push: machine_shape 'NvidiaTeslaT4Highmem' "),
+    ("NvidiaTeslaT4", f"{SAVE_400}\nKaggle's reason: Invalid docker image (INVALID_ARGUMENT)",
+     "Kaggle refused the push; its reason is above."),
+    ("NvidiaTeslaT4", SAVE_400, "the Kaggle CLI does not print why (machine_shape NvidiaTeslaT4 is one Kaggle accepts)"),
+    ("NvidiaTeslaT4", "Kernel push error: Maximum batch GPU session count of 2 reached", "2 batch GPU sessions")])
+def test_a_failed_push_says_why(ws, monkeypatch, shape, output, hint):
+    k = _shaped_kernel(ws, shape)
+    rc = 0 if output.startswith("Kernel push error") else 1  # the CLI exits 0 after that one
+    monkeypatch.setattr(G, "run_kaggle", FakeKaggle([(["kernels", "push"], _cp("", rc, output)), *_push_routes()]))
+    with pytest.raises(SystemExit) as e:
+        G.push(ws, k, hours=1, force=True)
+    assert str(e.value).startswith("kernel push failed (see output above); nothing was started.")
+    assert hint in str(e.value) and G.runs(ws) == []
+
+
+def test_push_says_which_inputs_kaggle_left_out(ws, monkeypatch, capsys):
+    from kgkit import cli
+
+    k = _notebook_kernel(ws)
+    out = ("The following are not valid dataset sources and could not be added to the kernel: ['me/knee-png-5l2']\n"
+           "Kernel version 7 successfully pushed.  Please check progress at https://www.kaggle.com/code/me/r6-gold58")
+    monkeypatch.setattr(G, "run_kaggle", FakeKaggle([(["kernels", "push"], _cp(out)), *_push_routes()]))
+    monkeypatch.chdir(ws)
+    cli.main(["gpu", "push", str(k), "--hours", "1"])
+    text = capsys.readouterr().out
+    assert ("WARNING: Kaggle accepted the push but left out inputs it could not attach (me/r6-gold58: dataset "
+            "['me/knee-png-5l2']), so the run starts without them.") in text and "gpu cancel me/r6-gold58" in text
+    assert "It runs without some of its inputs: see the WARNING above." in text and "Next:" not in text
+    run = G.runs(ws)[-1]  # it runs all the same: logged, its cap reserved
+    assert run["version"] == 7 and run["status"] == "pushed" and run["dropped_sources"] == ["dataset ['me/knee-png-5l2']"]
+
+
+def test_machine_shape_counts_without_the_enable_flags(ws, monkeypatch, plugin_root):
+    assert G.kernel_meta_accelerator({"machine_shape": "TpuV5E8"}) == "TpuV5E8"  # was 'none': no TPU check or log
+    assert G.kernel_meta_accelerator({"machine_shape": "None"}) == "none"
+    assert G.kernel_meta_accelerator({"enable_gpu": True, "machine_shape": "None"}) == "NvidiaTeslaT4"
+    assert G.kernel_meta_accelerator({"enable_tpu": True, "machine_shape": "NvidiaTeslaT4"}) == "TpuV5E8"
+    sys.path.insert(0, str(plugin_root / "hooks"))
+    import _common as C
+
+    assert C.push_resource({}, {"machine_shape": "TpuV5E8"}) == "TPU"
+    # an unknown shape and no flags: checked, not taken for a CPU kernel (the CLI would send that shape all the same)
+    k = _shaped_kernel(ws, "Bogus", enable_gpu=False)
+    monkeypatch.setattr(G, "run_kaggle", FakeKaggle(_push_routes()))
+    with pytest.raises(SystemExit, match="machine_shape 'Bogus'"):
+        G.push(ws, k, hours=1)
+
+
+def test_build_names_the_accelerator_to_ask_for(ws):
+    with pytest.raises(SystemExit, match="ask for NvidiaTeslaT4"):
+        G.build_kernel(ws, "x", "true", hours=1, user="me", accelerator="NvidiaTeslaT4Highmem")
+    with pytest.raises(SystemExit, match="`gpu build` targets NvidiaTeslaT4, NvidiaTeslaP100, TpuV5E8, TpuV6E8 or none"):
+        G.build_kernel(ws, "x", "true", hours=1, user="me", accelerator="Tpu1VmV38")  # Kaggle takes it; the runner not
+
+
+def _fake_kaggle_cli(root):
+    """A kaggle package whose CLI fails the way Kaggle CLI 2.2.4 does on a refused request: kagglesdk calls
+    requests' raise_for_status on Kaggle's error response (its first argument here), and the CLI's main prints it."""
+    (root / "kaggle").mkdir()
+    (root / "kaggle" / "__init__.py").write_text("")
+    (root / "kaggle" / "cli.py").write_text(
+        "import sys\nimport requests\n\n"
+        "def main():\n"
+        "    print('kgkit on the path:', [p for p in sys.path if p.rstrip('/\\\\').endswith('kgkit')])\n"
+        "    r = requests.Response()\n"
+        "    r.status_code, r.reason, r._content = 400, 'Bad Request', sys.argv[1].encode()\n"
+        "    r.url = 'https://api.kaggle.com/v1/kernels.KernelsApiService/SaveKernel'\n"
+        "    try:\n"
+        "        r.raise_for_status()\n"
+        "    except requests.HTTPError as e:\n"
+        "        print(e, file=sys.stderr)\n"
+        "        sys.exit(1)\n")
+
+
+@pytest.mark.parametrize("body,reason", [
+    ('{"error": {"code": 400, "message": "Invalid machine shape", "status": "INVALID_ARGUMENT"}}',
+     "Invalid machine shape (INVALID_ARGUMENT)"),
+    ('{"code": 9, "message": "FAILED_PRECONDITION: Your Notebook uses non-versioned datasets"}',
+     "FAILED_PRECONDITION: Your Notebook uses non-versioned datasets"),
+    ("<html>Bad Request</html>", None)])
+def test_kaggle_cli_prints_kaggles_reason(tmp_path, plugin_root, body, reason):
+    pytest.importorskip("requests")
+    _fake_kaggle_cli(tmp_path)
+    r = subprocess.run([sys.executable, str(plugin_root / "kgkit" / "kaggle_cli.py"), body], capture_output=True,
+                       text=True, timeout=60, env={**os.environ, "PYTHONPATH": str(tmp_path)})
+    assert r.returncode == 1 and SAVE_400 in r.stderr
+    assert (f"\nKaggle's reason: {reason}" in r.stderr) if reason else "Kaggle's reason" not in r.stderr
+    assert "kgkit on the path: []" in r.stdout  # kgkit's modules (cli, datasets, ...) cannot shadow the CLI's imports
+
+
+def test_kaggle_cli_imports_only_the_standard_library_at_import_time(plugin_root):
+    """It runs under the Kaggle CLI's interpreter, and the hooks import it through kgkit.gpu."""
+    import ast
+
+    tree = ast.parse((plugin_root / "kgkit" / "kaggle_cli.py").read_text(encoding="utf-8"))
+    mods = {a.name.split(".")[0] for n in tree.body if isinstance(n, ast.Import) for a in n.names}
+    mods |= {n.module.split(".")[0] for n in tree.body if isinstance(n, ast.ImportFrom) and n.level == 0}
+    assert mods <= set(sys.stdlib_module_names) | {"__future__"}, mods
+
+
+def test_run_kaggle_falls_back_to_the_plain_cli(tmp_path, monkeypatch):
+    (tmp_path / "kaggle").mkdir()
+    (tmp_path / "kaggle" / "__init__.py").write_text("raise ImportError('no kaggle here')\n")
+    monkeypatch.setenv("PYTHONPATH", str(tmp_path))
+    monkeypatch.setattr(G, "kaggle_python", lambda: sys.executable)
+    monkeypatch.setattr(G, "kaggle_cmd", lambda: [sys.executable, "-c", "import sys; print('plain', sys.argv[1:])"])
+    monkeypatch.setattr(G, "_PLAIN", set())
+    assert G.run_kaggle(["quota", "--format", "json"]).stdout.strip() == "plain ['quota', '--format', 'json']"
+    assert G._PLAIN == {sys.executable}  # not tried again in this process
+    monkeypatch.setattr(G, "_PLAIN", set())
+    monkeypatch.setenv("KGKIT_KAGGLE", "my-kaggle")  # the user's own command: used as given
+    monkeypatch.setattr(G, "kaggle_python", lambda: pytest.fail("the launcher was tried"))
+    assert G.run_kaggle(["quota"]).stdout.strip() == "plain ['quota']"
+
+
+def test_datasets_pull_keeps_kaggles_reason():
+    url = "404 Client Error: Not Found for url: https://api.kaggle.com/v1/datasets.DatasetApiService/DownloadDataset"
+    assert DS._error_line(f"Dataset URL: x\n{url}\nKaggle's reason: Not found (NOT_FOUND)\n") == (
+        f"{url} (Kaggle's reason: Not found (NOT_FOUND))")
+    assert DS._error_line(f"Dataset URL: x\n{url}\n") == url
+
+
+def test_kaggle_python_reads_the_cli_script(tmp_path, monkeypatch):
+    py, cli = sys.executable, tmp_path / "kaggle"
+    which = {"kaggle": None, "python3": py}
+    monkeypatch.setattr(G.shutil, "which", lambda name: which.get(name))
+    assert G.kaggle_python() == py  # not on PATH: the CLI runs as `python -m kaggle`
+    which["kaggle"] = str(cli)
+    for script, want in [(f"#!{py}\nfrom kaggle.cli import main\n", py),
+                         ("#!/usr/bin/env python3\n", py),
+                         (f"#!/bin/sh\n'''exec' \"{py}\" \"$0\" \"$@\"\n' '''\n", py),  # pip, for long paths
+                         ("#!/bin/sh\nexec python3 -m kaggle \"$@\"\n", None),  # a shell must never get the .py file
+                         ("MZ\x90\x00 a Windows .exe launcher", None)]:
+        cli.write_text(script)
+        assert G.kaggle_python() == want, script
+
+
+def test_post_hook_explains_a_refused_push(plugin_root, ws):
+    _shaped_kernel(ws, "NvidiaTeslaT4Highmem")
+    cmd = "kaggle kernels push -p kernels/r6-gold58 -t 3600"
+    ctx = _hook(plugin_root, "post_tool.py", cmd, ws, stdout=SAVE_400)["additionalContext"]
+    assert "Kaggle refused the kernel push (a 4xx from SaveKernel), so nothing was started." in ctx
+    assert "me/r6-gold58: machine_shape 'NvidiaTeslaT4Highmem'" in ctx and ": ask for NvidiaTeslaT4." in ctx
+    assert G.runs(ws) == []
+    # --accelerator is what the CLI sends: an accepted one rules the folder's shape out
+    ctx = _hook(plugin_root, "post_tool.py", cmd + " --accelerator NvidiaTeslaT4", ws, stdout=SAVE_400)["additionalContext"]
+    assert "Highmem" not in ctx and "`python -m kgkit gpu push <dir> --hours H`, which shows it" in ctx
+
+
+def test_post_hook_names_inputs_kaggle_left_out(plugin_root, ws):
+    _notebook_kernel(ws)
+    out = ("The following are not valid kernel sources and could not be added to the kernel: ['me/s6t-r1-trian']\n"
+           "Kernel version 3 successfully pushed.  Please check progress at https://www.kaggle.com/code/me/r6-gold58\n")
+    ctx = _hook(plugin_root, "post_tool.py", "kaggle kernels push -p kernels/r6-gold58 -t 3600", ws,
+                stdout=out)["additionalContext"]
+    assert "left out inputs it could not attach (me/r6-gold58: kernel ['me/s6t-r1-trian'])" in ctx
+    assert "me/r6-gold58 v3 logged" in ctx  # it runs: its cap is reserved
+
+
+def test_gpu_push_end_to_end_prints_the_cause_after_the_output(ws, tmp_path, plugin_root):
+    """The issue's run: a refused push used to end with 'see output above' printed above the output, and no cause."""
+    k = _shaped_kernel(ws, "NvidiaTeslaT4Highmem")
+    calls = tmp_path / "calls.txt"
+    fake = tmp_path / "fake_kaggle.py"
+    fake.write_text("import sys\n"
+                    f"open({str(calls)!r}, 'a').write(' '.join(sys.argv[1:]) + '\\n')\n"
+                    "if sys.argv[1:3] == ['kernels', 'push']:\n"
+                    f"    print({SAVE_400!r}, file=sys.stderr)\n"
+                    "sys.exit(1)\n")
+    env = {**os.environ, "PYTHONPATH": str(plugin_root), "KGKIT_KAGGLE": f'"{sys.executable}" "{fake}"'}
+    run = [sys.executable, "-m", "kgkit", "gpu", "push", str(k), "--hours", "5.6", "--no-session-check"]
+    r = subprocess.run(run, cwd=ws, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=120)
+    assert r.returncode == 1 and "ask for NvidiaTeslaT4" in r.stdout and not calls.exists()  # refused at once
+    r = subprocess.run([*run, "--force"], cwd=ws, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                       text=True, timeout=120)
+    out = r.stdout
+    assert r.returncode == 1 and "kernels push" in calls.read_text()
+    assert out.index("warning: machine_shape") < out.index(SAVE_400) < out.index("kernel push failed (see output above)")
+    assert "Kaggle refused the push: machine_shape 'NvidiaTeslaT4Highmem'" in out

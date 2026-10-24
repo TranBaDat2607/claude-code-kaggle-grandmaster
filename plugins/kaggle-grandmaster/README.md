@@ -47,8 +47,8 @@ submissions and experiments, leaving your layout alone.
     script), `discussions sync / top / search / solutions / read`
     (forum, live via the Kaggle CLI)
   - `gpu` for quota-aware training on Kaggle GPUs and TPUs (reservations released when runs finish,
-    any kernel folder pushable with a cap, busy-session and input checks); `datasets pull` (per-file
-    fallback when a dataset archive 404s); `whoami`; `config` (e.g. `validation=holdout+lb
+    any kernel folder pushable with a cap, busy-session, input and machine-shape checks); `datasets pull`
+    (per-file fallback when a dataset archive 404s); `whoami`; `config` (e.g. `validation=holdout+lb
     eval_truth=data/holdout.csv:a,b,c`)
 - `templates/`: tabular (GBDTs + linear / kNN / SVM / MLP), image and transformer training, remote GPU
   training runner, offline inference kernel, workspace CLAUDE.md

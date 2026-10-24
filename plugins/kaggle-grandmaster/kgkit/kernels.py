@@ -39,7 +39,7 @@ import sys
 import tokenize
 from pathlib import Path
 
-from . import safety
+from . import gpu, safety
 
 CV_PATTERNS = {
     "StratifiedGroupKFold": r"StratifiedGroupKFold",
@@ -112,18 +112,9 @@ def parse_list_csv(text: str) -> list[dict]:
 
 
 def _search_python() -> str:
-    """The interpreter the kaggle CLI runs on (its script's #! line), so the search child finds kagglesdk when the
-    CLI lives in another environment (pipx); this interpreter otherwise (and for Windows .exe launchers)."""
-    exe = shutil.which("kaggle")
-    try:
-        first = Path(exe).read_bytes()[:512].split(b"\n", 1)[0] if exe else b""
-    except OSError:
-        first = b""
-    if first.startswith(b"#!"):
-        cand = first[2:].decode("utf-8", "replace").strip()
-        if cand and Path(cand).is_file():
-            return cand
-    return sys.executable
+    """The interpreter the kaggle CLI runs on, so the search child finds kagglesdk when the CLI lives in another
+    environment (pipx); this interpreter when that cannot be told (Windows .exe launchers)."""
+    return gpu.kaggle_python() or sys.executable
 
 
 def public_scores(items: list[tuple[str, str]], competition: str | None = None) -> tuple[dict, str | None]:
