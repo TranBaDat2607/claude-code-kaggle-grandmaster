@@ -13,7 +13,7 @@ Arguments: `$ARGUMENTS`
    `data/folds.csv` is missing).
 2. Choose the template from `${CLAUDE_PLUGIN_ROOT}/templates/` by task: tabular → `train_gbdt.py`;
    images → `train_image.py`; text → `train_transformer.py`. Copy into `src/`, vendor kgkit with
-   `python -m kgkit vendor src/` so `from kgkit import ...` works, and adapt the CONFIG block
+   `PYTHONPATH="$KGKIT_HOME" python -m kgkit vendor src/` so `from kgkit import ...` works, and adapt the CONFIG block
    (paths, target, id, metric, features, model).
 3. Smoke test (1 fold, tiny settings), then the full run. Keep the baseline simple and fast — its
    job is to be correct and to calibrate CV vs LB. With a local NVIDIA GPU, train XGBoost / CatBoost

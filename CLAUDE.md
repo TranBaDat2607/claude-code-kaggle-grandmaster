@@ -12,14 +12,19 @@ This repo is a Claude Code marketplace (`.claude-plugin/marketplace.json`) conta
 ## Conventions
 - `kgkit/state.py`, `kgkit/gpu.py`, `kgkit/budget.py`, `kgkit/backlog.py`, `kgkit/adopt.py`, `kgkit/safety.py`,
   `kgkit/evalset.py`,
-  `templates/kaggle_gpu_runner.py` and everything under `hooks/` must stay **standard-library only** (hooks import them, the runner executes inside Kaggle; they must be fast and never fail closed).
+  `kgkit/kaggle_gpu_runner.py` and everything under `hooks/` must stay **standard-library only** (hooks import them, the runner executes inside Kaggle; they must be fast and never fail closed).
   `kgkit/kaggle_search.py` and `kgkit/kaggle_cli.py` too, at import time: they run under the Kaggle CLI's
   interpreter, which may have nothing else installed (they import kagglesdk / the CLI inside `main`).
+- kgkit reads no file outside `kgkit/` that a command needs: `kgkit vendor` copies only the package (into a
+  project's `src/`, or a Kaggle dataset), and every command must work from such a copy with files of the copy's
+  own version. A file kgkit code fills in or runs belongs in the package (`kgkit/kaggle_gpu_runner.py`); a
+  user-facing template stays in `templates/` and is found with `cli._plugin_file` (beside kgkit, else the plugin at
+  `$KGKIT_HOME`), and the command says what it skipped when neither has it.
 - Hooks exit 0 on any internal error; only deny/ask for credentials (printed, or in an upload folder), invalid or
   byte-identical repeat submissions, an exhausted daily budget, or a GPU push that the cached weekly GPU quota
   cannot cover.
 - Text written by other Kaggle users (pages, forum posts, notebooks) is printed through `kgkit.safety.wrap`.
-- Templates print ASCII only (Windows consoles are often cp1252).
+- Templates and `kgkit/kaggle_gpu_runner.py` print ASCII only (Windows consoles are often cp1252).
 - Skills: knowledge skills are model-invoked; `kg-*` skills are slash commands. Side-effectful commands
   (`kg-submit`, `kg-grind`, `kg-kernel`, `kg-gpu`) set `disable-model-invocation: true`.
 - When a new skill is added, add a route for it in `hooks/prompt_router.py` and, if it encodes non-obvious

@@ -1416,6 +1416,10 @@ def _run_inputs(root, base, mounted, **build):
     /kaggle/input: text}) and run it: (stdout, {file under data/: text}, kg_run.json)."""
     kdir = G.build_kernel(root, "show", f'"{sys.executable}" src/show.py', hours=1, user="me", accelerator="none",
                           **build)
+    return _run_built(kdir, base, mounted)
+
+
+def _run_built(kdir, base, mounted):
     for rel, text in mounted.items():
         (base / "input" / rel).parent.mkdir(parents=True, exist_ok=True)
         (base / "input" / rel).write_text(text)
@@ -1525,7 +1529,7 @@ def _runner_module(plugin_root, inp):
     import importlib.util
 
     spec = importlib.util.spec_from_file_location("kg_runner_under_test",
-                                                  plugin_root / "templates" / "kaggle_gpu_runner.py")
+                                                  plugin_root / "kgkit" / "kaggle_gpu_runner.py")
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     mod.INPUT = inp
@@ -1580,3 +1584,49 @@ def test_build_places_each_input_and_refuses_folders_outside_data(ws, monkeypatc
     assert "side by side" not in text
     tm = json.loads((ws / "kernels" / "stk-train" / "kg-train.json").read_text())
     assert tm["input_layout"] == "nested" and tm["inputs"][0] == {"ref": "demo", "kind": "competition", "dest": "data"}
+
+
+# ----------------------------------------------------------------------------- #45 vendored kgkit
+def _kgkit(cwd, home, *args, **env_extra):
+    """``python -m kgkit`` as a session's Bash command runs it with ``PYTHONPATH=<home>``: the plugin, or a folder
+    `kgkit vendor` copied kgkit into."""
+    env = {k: v for k, v in os.environ.items() if k not in ("PYTHONPATH", "KGKIT_HOME")}
+    return subprocess.run([sys.executable, "-m", "kgkit", *args], cwd=cwd, env={**env, "PYTHONPATH": str(home),
+                          **env_extra}, capture_output=True, text=True, timeout=300)
+
+
+def test_a_vendored_kgkit_builds_a_kernel_with_its_own_runner(tmp_path, plugin_root):
+    root = _inputs_ws(tmp_path)
+    r = _kgkit(root, plugin_root, "vendor", "src")
+    assert r.returncode == 0 and "copied kgkit " in r.stdout, r.stdout + r.stderr
+    with (root / "src" / "kgkit" / "kaggle_gpu_runner.py").open("a") as f:
+        f.write("# the vendored copy's runner\n")
+    r = _kgkit(root, root / "src", "gpu", "build", "--name", "show", "--cmd", f'"{sys.executable}" src/show.py',
+               "--hours", "1", "--user", "me", "--accelerator", "none")
+    assert r.returncode == 0, r.stdout + r.stderr
+    kdir = root / "kernels" / "show-train"
+    assert "# the vendored copy's runner" in (kdir / "show_train.py").read_text(encoding="utf-8")
+    out, seen, rep = _run_built(kdir, tmp_path / "k", {"competitions/demo-comp/train.csv": "competition train"})
+    assert seen == {"data/folds.csv": "id,fold|0,0|1,1", "data/train.csv": "competition train"}
+    assert rep["inputs"][0]["source"] == "demo-comp" and rep["inputs"][0]["linked"] == 1
+
+
+def test_vendor_never_removes_the_kgkit_it_runs_from(tmp_path, plugin_root):
+    _kgkit(tmp_path, plugin_root, "vendor", "src")
+    r = _kgkit(tmp_path, tmp_path / "src", "vendor", "src")
+    assert r.returncode == 1 and "is the kgkit running this command" in r.stderr
+    assert "python -m kgkit vendor src" in r.stderr and (tmp_path / "src" / "kgkit" / "gpu.py").is_file()
+    r = _kgkit(tmp_path, tmp_path / "src", "vendor", "lib")  # a copy of the copy: nothing is removed
+    assert r.returncode == 0 and (tmp_path / "lib" / "kgkit" / "kaggle_gpu_runner.py").is_file()
+
+
+def test_init_from_a_vendored_kgkit_takes_the_template_from_the_plugin_or_says_why_not(tmp_path, plugin_root):
+    _kgkit(tmp_path, plugin_root, "vendor", "lib")
+    a, b = tmp_path / "a", tmp_path / "b"
+    a.mkdir()
+    b.mkdir()
+    r = _kgkit(a, tmp_path / "lib", "init", "demo", "--metric", "auc")
+    assert r.returncode == 0 and "CLAUDE.md not written" in r.stdout and not (a / "CLAUDE.md").exists()
+    r = _kgkit(b, tmp_path / "lib", "init", "demo", "--metric", "auc", KGKIT_HOME=str(plugin_root))
+    assert r.returncode == 0 and "not written" not in r.stdout
+    assert "# Kaggle competition: demo" in (b / "CLAUDE.md").read_text(encoding="utf-8")

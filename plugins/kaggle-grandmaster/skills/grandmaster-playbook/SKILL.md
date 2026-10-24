@@ -124,8 +124,11 @@ Across competitions (which ones to enter, solo gold, teaming and merging): `comp
 The plugin ships `kgkit` (Python, numpy/pandas/sklearn/scipy). Locate it via the
 `KGKIT_HOME` environment variable (set by the plugin's SessionStart hook) — otherwise it is
 the `kgkit/` folder inside the plugin root. Run it as
-`PYTHONPATH="$KGKIT_HOME" python -m kgkit <cmd>`, or vendor it into the project with
-`python -m kgkit vendor src/` so training scripts can `from kgkit import ...`.
+`PYTHONPATH="$KGKIT_HOME" python -m kgkit <cmd>` (the installed version). To let training scripts
+`from kgkit import ...`, copy it into the project with `PYTHONPATH="$KGKIT_HOME" python -m kgkit vendor src/`:
+a snapshot that a plugin update leaves as it is (commands run from it run its version). Vendor again to
+update it — the session brief says when its version is not the plugin's — knowing that later experiments
+then run the new code.
 
 Key commands: `init`, `status`, `folds`, `eda`, `adv`, `ledger` (`compare`, `decide`, `baseline`,
 `lineage`, `import`), `backlog`, `features search`, `kernels top/pull`, `blend` (hill / weights /

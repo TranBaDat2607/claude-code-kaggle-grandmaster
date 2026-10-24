@@ -29,11 +29,24 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import shutil
 import sys
 from pathlib import Path
 
+from . import __version__
+
 PLUGIN_ROOT = Path(__file__).resolve().parents[1]
+
+
+def _plugin_file(rel: str) -> Path | None:
+    """A file of the plugin outside kgkit (a user-facing template such as templates/CLAUDE.competition.md): beside
+    this kgkit, else in the plugin at $KGKIT_HOME (exported by its SessionStart hook), which is where it is when this
+    kgkit is a copy made by `kgkit vendor` (only the package is copied). None when neither has it."""
+    for base in (PLUGIN_ROOT, os.environ.get("KGKIT_HOME")):
+        if base and (Path(base) / rel).is_file():
+            return Path(base) / rel
+    return None
 
 
 def _read(path: str):
@@ -200,9 +213,13 @@ def cmd_init(a):
     if not gi.exists():
         gi.write_text("data/\nartifacts/\nsubs/*.csv\n*.npy\n*.pkl\n*.pt\n*.pth\n*.ckpt\n*.safetensors\nkaggle.json\n"
                       "__pycache__/\n.ipynb_checkpoints/\nwandb/\n", encoding="utf-8")
-    tmpl = PLUGIN_ROOT / "templates" / "CLAUDE.competition.md"
+    tmpl = _plugin_file("templates/CLAUDE.competition.md")
     cm = root / "CLAUDE.md"
-    if tmpl.exists() and not cm.exists():
+    if not cm.exists() and tmpl is None:
+        print(f"note: CLAUDE.md not written: there is no templates/ beside this kgkit ({PLUGIN_ROOT / 'kgkit'}, a copy "
+              "made by `kgkit vendor`?) and KGKIT_HOME is not the plugin's folder. Run this init again with --force "
+              "and the plugin's kgkit: `PYTHONPATH=\"$KGKIT_HOME\" python -m kgkit init ...`")
+    elif not cm.exists():
         text = tmpl.read_text(encoding="utf-8")
         for k, v in {"{{SLUG}}": st.slug, "{{METRIC}}": st.metric or "TBD",
                      "{{DIRECTION}}": "higher" if st.greater_is_better else "lower",
@@ -1169,11 +1186,14 @@ def cmd_validate(a):
 
 
 def cmd_vendor(a):
-    dest = Path(a.dest) / "kgkit"
+    src, dest = PLUGIN_ROOT / "kgkit", Path(a.dest) / "kgkit"
+    if dest.resolve() == src or dest.resolve() in src.parents:  # dest is removed before copying: it holds the source
+        raise SystemExit(f"{dest} is the kgkit running this command ({__version__}): nothing to copy. A copy is "
+                         f"refreshed from the plugin's kgkit: `PYTHONPATH=\"$KGKIT_HOME\" python -m kgkit vendor {a.dest}`")
     if dest.exists():
         shutil.rmtree(dest)
-    shutil.copytree(PLUGIN_ROOT / "kgkit", dest, ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
-    print(f"copied kgkit to {dest}")
+    shutil.copytree(src, dest, ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
+    print(f"copied kgkit {__version__} from {src} to {dest}")
 
 
 def cmd_datasets(a):
@@ -1602,7 +1622,8 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--metric", help="kgkit metric name (default: from competition.json)")
     s.set_defaults(fn=cmd_validate)
 
-    s = sub.add_parser("vendor", help="copy kgkit into DEST/kgkit")
+    s = sub.add_parser("vendor", help="copy this kgkit into DEST/kgkit (a snapshot of this version: vendor again "
+                       "to update it)")
     s.add_argument("dest")
     s.set_defaults(fn=cmd_vendor)
 
