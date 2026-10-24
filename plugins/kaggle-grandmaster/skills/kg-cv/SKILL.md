@@ -30,5 +30,7 @@ scored on the same rows differ far less by chance than one score varies.
    `kgkit.cv.time_series_splits` with gap ≥ horizon, saved as `src/splits.py`).
 4. Verify with the fold report (balance, group confinement, temporal order).
 5. Freeze: commit the script/seed (folds.csv itself may be in data/ which is git-ignored — record
-   the exact command in CLAUDE.md so it is reproducible).
+   the exact command in CLAUDE.md so it is reproducible). Regenerated on another machine or OS, it
+   keeps its `folds_hash` when every row gets the same fold (the ledger fingerprints the fold column,
+   not the file's bytes); if `ledger compare` then warns of different fold splits, the split changed.
 6. If a previous fold scheme existed, warn that old OOFs are no longer blendable with new ones.

@@ -36,6 +36,7 @@ import time
 import zipfile
 from pathlib import Path, PurePosixPath
 
+from . import evalset as E
 from . import kaggle_cli as KC
 from . import safety
 from . import state as S
@@ -760,9 +761,10 @@ def build_kernel(root: str | Path | None, name: str, cmd: str, hours: float, fol
     fp = root / "data" / "folds.csv"
     all_folds = None
     if fp.is_file():
-        rows = fp.read_text(encoding="utf-8").splitlines()
-        idx = rows[0].split(",").index("fold")
-        all_folds = sorted({int(l.split(",")[idx]) for l in rows[1:] if l.strip()})
+        try:
+            all_folds = E.fold_ids(fp.read_bytes())
+        except ValueError as e:
+            raise SystemExit(f"data/folds.csv: {e}")
     if folds is None:
         if "{fold}" in cmd and all_folds is None:
             raise SystemExit("--folds not given and data/folds.csv missing")
