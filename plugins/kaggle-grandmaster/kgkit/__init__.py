@@ -37,4 +37,4 @@ parts of a competition that are easy to get subtly wrong:
 Run ``python -m kgkit --help`` for the command line interface.
 """
 
-__version__ = "1.7.0"
+__version__ = "1.7.1"
