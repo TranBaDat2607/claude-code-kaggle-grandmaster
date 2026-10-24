@@ -25,7 +25,6 @@ Only the ledger (not the artefacts) should be committed to git.
 
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 import random
@@ -72,6 +71,7 @@ DECISIONS = ("baseline", "keep", "discard", "inconclusive")
 ACCEPTED = ("baseline", "keep")
 LB_ONLY_TAGS = E.LB_ONLY_TAGS  # LB score only: blends with public files, forks of public inference notebooks
 MIN_DISTINCT_CV = 4
+KEY_FIELDS = ("folds_hash", "eval_hash")  # fingerprints of the evaluation set a record was scored on
 
 
 def has_own_cv(r: dict, holdout: bool = False) -> bool:
@@ -130,6 +130,8 @@ class Ledger:
         self.dir = self.root / S.STATE_DIR
         self.path = self.dir / "ledger.jsonl"
         self.artifacts = self.root / "artifacts"
+        self._upgrades: dict[str, str] = {}
+        self._checked: set[str] = set()
 
     # ------------------------------------------------------------------ io
     def records(self) -> list[dict]:
@@ -143,7 +145,21 @@ class Ledger:
                     out.append(json.loads(line))
                 except json.JSONDecodeError:
                     continue
-        return out
+        return self._upgraded(out)
+
+    def _upgraded(self, recs: list[dict]) -> list[dict]:
+        """Fingerprints kgkit <= 1.7.1 took of the bytes of the current split file (or holdout labels) become the
+        content fingerprint (``kgkit.evalset.upgrades``); the next ``update`` writes them back."""
+        keys = {r.get(k) for r in recs for k in KEY_FIELDS if isinstance(r.get(k), str)} - self._checked
+        if keys:
+            self._upgrades.update(E.upgrades(self.root, keys))
+            self._checked |= keys
+        if self._upgrades:
+            for r in recs:
+                for k in KEY_FIELDS:
+                    if isinstance(r.get(k), str) and r[k] in self._upgrades:
+                        r[k] = self._upgrades[r[k]]
+        return recs
 
     def _write_all(self, recs: list[dict]) -> None:
         self.dir.mkdir(parents=True, exist_ok=True)
@@ -178,8 +194,8 @@ class Ledger:
         holdout_pred: np.ndarray | None = None,
         **extra,
     ) -> dict:
-        """Append an experiment. ``folds_hash`` fingerprints the CV split (from ``folds`` if given,
-        else the bytes of ``data/folds.csv``) so blends can detect members trained on different splits.
+        """Append an experiment. ``folds_hash`` fingerprints the CV split (``folds`` if given, else the fold
+        column of ``data/folds.csv``: the same digest) so blends can detect members trained on different splits.
         ``cv=None`` logs an LB-only record (tagged ``lb-only``): something that cannot be cross-validated,
         such as a blend with public submission files. ``holdout_pred`` stores per-row predictions on the
         workspace's labelled holdout (``eval_truth``), fingerprinted by ``eval_hash``, so two records can be
@@ -239,7 +255,7 @@ class Ledger:
 
     def _folds_hash(self, folds: Sequence[int] | None) -> str | None:
         if folds is not None:
-            return hashlib.sha1(np.asarray(folds, dtype=np.int64).tobytes()).hexdigest()[:12]
+            return E.split_digest([np.asarray(folds, dtype="<i8").tobytes()])
         return E.folds_file_hash(self.root)  # recheck runs use a re-drawn split (KG_FOLDS_FILE)
 
     def update(self, exp_id: str, **fields) -> dict:

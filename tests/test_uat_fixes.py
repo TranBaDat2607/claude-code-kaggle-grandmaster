@@ -1630,3 +1630,127 @@ def test_init_from_a_vendored_kgkit_takes_the_template_from_the_plugin_or_says_w
     r = _kgkit(b, tmp_path / "lib", "init", "demo", "--metric", "auc", KGKIT_HOME=str(plugin_root))
     assert r.returncode == 0 and "not written" not in r.stdout
     assert "# Kaggle competition: demo" in (b / "CLAUDE.md").read_text(encoding="utf-8")
+
+
+# ----------------------------------------------------------------------------- #46 fold-split fingerprint
+from kgkit import evalset as EV  # noqa: E402
+
+
+def _old_hash(data: bytes, suffix: bytes = b"") -> str:
+    """The fingerprint kgkit 1.7.1 took: sha1 of the file's bytes (then '|' and the columns of an eval spec)."""
+    import hashlib
+
+    return hashlib.sha1(data + suffix).hexdigest()[:12]
+
+
+def _split_files(folds) -> dict[str, bytes]:
+    """One split as different tools and platforms write it."""
+    df = pd.DataFrame({"id": np.arange(len(folds)), "fold": folds})
+    rows = list(zip(df["id"], df["fold"]))
+    return {
+        "pandas on Linux": df.to_csv(index=False, lineterminator="\n").encode(),
+        "pandas on Windows": df.to_csv(index=False, lineterminator="\r\n").encode(),
+        "no newline at the end": df.to_csv(index=False, lineterminator="\n").rstrip("\n").encode(),
+        "quoted": ('"id","fold"\r\n' + "".join(f'"{i}","{f}"\r\n' for i, f in rows)).encode(),
+        "BOM, columns reordered, one more": ("\ufefffold,id,note\n" + "".join(f"{f},{i},x\n" for i, f in rows)).encode(),
+        "folds written as floats": ("id,fold\n" + "".join(f"{i},{f}.0\n" for i, f in rows)).encode(),
+        "no id column": ("fold\n" + "".join(f"{f}\n" for _, f in rows)).encode(),
+        "blank lines": ("id,fold\n\n" + "".join(f"{i},{f}\n" for i, f in rows) + "\n\n").encode(),
+    }
+
+
+def test_folds_hash_is_of_the_split_not_of_the_file_bytes(tmp_path):
+    folds = np.arange(70_000) % 4  # more rows than one batch of the reader
+    (tmp_path / "data").mkdir()
+    f = tmp_path / "data" / "folds.csv"
+    want = Ledger(tmp_path)._folds_hash(folds)  # what Ledger.log(folds=...) records for the array
+    for what, data in _split_files(folds).items():
+        f.write_bytes(data)
+        assert EV.folds_file_hash(tmp_path) == want, what
+        assert EV.fold_ids(data) == [0, 1, 2, 3], what
+    moved = folds.copy()
+    moved[0] = 1
+    f.write_bytes(_split_files(moved)["pandas on Linux"])
+    assert EV.folds_file_hash(tmp_path) != want  # one row in another fold: another split
+    f.write_bytes(_split_files(folds[::-1])["no id column"])
+    assert EV.folds_file_hash(tmp_path) != want  # without ids, the row order is the assignment
+    f.write_bytes(b"id,split\r\n0,a\r\n")  # not a split kgkit can read: still one fingerprint for both line endings
+    other = EV.folds_file_hash(tmp_path)
+    f.write_bytes(b"id,split\n0,a\n")
+    assert EV.folds_file_hash(tmp_path) == other and other != want
+    with pytest.raises(ValueError, match="no 'fold' column"):
+        EV.fold_ids(b"id,split\n0,a\n")
+    with pytest.raises(ValueError, match="fold 'x' is not an integer"):
+        EV.fold_ids(b"id,fold\n0,1\n1,x\n")
+
+
+def test_records_from_older_kgkit_stay_on_their_split_after_a_move_to_linux(ws, monkeypatch, capsys):
+    """The issue: records logged on Windows carry sha1 of the CRLF bytes of data/folds.csv; on Linux the same split
+    was regenerated with LF."""
+    from kgkit import cli
+
+    monkeypatch.chdir(ws)
+    rng = np.random.default_rng(0)
+    folds = np.arange(60) % 5
+    y = (rng.random(60) < 0.5).astype(int)
+    (ws / "data").mkdir()
+    pd.DataFrame({"id": np.arange(60), "target": y}).to_csv(ws / "data" / "train.csv", index=False)
+    linux, windows = _split_files(folds)["pandas on Linux"], _split_files(folds)["pandas on Windows"]
+    (ws / "data" / "folds.csv").write_bytes(linux)
+    led = Ledger(ws)
+    win = led.log("win", 0.7, fold_scores=[0.7] * 5, oof=rng.random(60), decision="keep")
+    gone = led.log("gone", 0.7, fold_scores=[0.7] * 5, oof=rng.random(60))
+    lp = ws / ".kaggle-gm" / "ledger.jsonl"
+    old = {win["id"]: _old_hash(windows), gone["id"]: _old_hash(b"id,fold\r\n0,1\r\n")}  # a split no longer on disk
+    lp.write_text("".join(json.dumps({**r, "folds_hash": old[r["id"]]}) + "\n" for r in map(json.loads, lp.read_text(
+        encoding="utf-8").splitlines())), encoding="utf-8")
+    EV.log_comparison(ws, {"new": win["id"], "base": "0000", "eval": _old_hash(windows), "question": "paired",
+                           "gain": 0.01, "se": 0.004, "decision": "keep", "method": "bootstrap"})
+
+    new = Ledger(ws).log("linux", 0.71, fold_scores=[0.71] * 5, oof=rng.random(60))
+    led = Ledger(ws)
+    assert new["folds_hash"] == EV.folds_file_hash(ws) == led.get(win["id"])["folds_hash"]
+    assert led.get(gone["id"])["folds_hash"] == old[gone["id"]]  # another split stays another split
+    assert led.decisions_on_evalset() == 1
+    assert EV.recent_noise(ws, led.eval_key())["se"] == 0.004
+    cli.main(["ledger", "compare", new["id"], win["id"], "--truth", "data/train.csv:target", "--boot", "50"])
+    assert "different fold splits" not in capsys.readouterr().out
+    cli.main(["ledger", "compare", new["id"], gone["id"], "--truth", "data/train.csv:target", "--boot", "50"])
+    assert "different fold splits" in capsys.readouterr().out
+    cli.main(["ledger", "decide", new["id"], "discard", "no gain"])  # a rewrite of the ledger stores the upgrade
+    on_disk = {r["id"]: r["folds_hash"] for r in map(json.loads, lp.read_text(encoding="utf-8").splitlines())}
+    assert on_disk[win["id"]] == new["folds_hash"] and on_disk[gone["id"]] == old[gone["id"]]
+
+
+def test_eval_hash_is_of_the_labels_not_of_the_file_bytes(tmp_path):
+    st = S.CompetitionState(slug="x", validation="holdout+lb", eval_truth="h.csv:y,z")
+    rows = [(f"s{i}", i % 2, i % 3) for i in range(30)]
+    lf = "id,y,z\n" + "".join(f"{i},{y},{z}\n" for i, y, z in rows)
+
+    def key(text: str) -> str:
+        (tmp_path / "h.csv").write_bytes(text.encode())
+        return EV.current_key(tmp_path, st)
+
+    want = key(lf)
+    assert key(lf.replace("\n", "\r\n")) == want
+    assert key('"id","y","z"\n' + "".join(f'"{i}","{y}","{z}"\n' for i, y, z in rows)) == want
+    assert key("z,note,y,id\n" + "".join(f"{z},x,{y},{i}\n" for i, y, z in rows)) == want
+    assert key("id,y,z\n" + "".join(f"{i},{y}.0,{z}\n" for i, y, z in rows)) == want
+    assert key(lf.replace("s0,0,0", "s0,1,0")) != want  # one label changed
+    assert key("id,y,z\n" + "".join(f"{i},{z},{y}\n" for i, y, z in rows)) != want  # y and z swapped
+    key(lf)
+    old = _old_hash(lf.replace("\n", "\r\n").encode(), b"|y,z")  # 1.7.1, holdout file written on Windows
+    assert EV.upgrades(tmp_path, [old, "zz"], st) == {old: want}
+    (tmp_path / "h.parquet").write_bytes(b"PAR1 binary")  # no line endings: still the bytes
+    assert EV.spec_hash(tmp_path, "h.parquet:y") == _old_hash(b"PAR1 binary", b"|y")
+
+
+def test_gpu_build_reads_the_folds_of_any_csv_writer(tmp_path):
+    root = _inputs_ws(tmp_path)
+    folds = np.arange(12) % 3
+    (root / "data" / "folds.csv").write_bytes(_split_files(folds)["quoted"])
+    kdir = G.build_kernel(root, "q", "python src/train.py --folds {fold}", hours=1, user="me", accelerator="none")
+    assert json.loads((kdir / "kg-train.json").read_text())["folds"] == [0, 1, 2]
+    (root / "data" / "folds.csv").write_bytes(b"id,split\n0,a\n")
+    with pytest.raises(SystemExit, match="data/folds.csv: no 'fold' column"):
+        G.build_kernel(root, "q", "python src/train.py --folds {fold}", hours=1, user="me", accelerator="none")
