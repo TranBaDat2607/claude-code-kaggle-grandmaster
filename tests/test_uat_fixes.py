@@ -1338,7 +1338,7 @@ def test_kaggle_python_reads_the_cli_script(tmp_path, monkeypatch):
                          (f"#!/bin/sh\n'''exec' \"{py}\" \"$0\" \"$@\"\n' '''\n", py),  # pip, for long paths
                          ("#!/bin/sh\nexec python3 -m kaggle \"$@\"\n", None),  # a shell must never get the .py file
                          ("MZ\x90\x00 a Windows .exe launcher", None)]:
-        cli.write_text(script)
+        cli.write_text(script, encoding="utf-8")  # Windows' cp1252 cannot write the .exe header's \x90
         assert G.kaggle_python() == want, script
 
 
@@ -1374,7 +1374,13 @@ def test_gpu_push_end_to_end_prints_the_cause_after_the_output(ws, tmp_path, plu
                     "if sys.argv[1:3] == ['kernels', 'push']:\n"
                     f"    print({SAVE_400!r}, file=sys.stderr)\n"
                     "sys.exit(1)\n")
-    env = {**os.environ, "PYTHONPATH": str(plugin_root), "KGKIT_KAGGLE": f'"{sys.executable}" "{fake}"'}
+    import shlex
+
+    cli = [sys.executable, str(fake)]
+    if os.name == "nt" and any(" " in a for a in cli):
+        pytest.skip("KGKIT_KAGGLE is split without quote handling on Windows")
+    env = {**os.environ, "PYTHONPATH": str(plugin_root),
+           "KGKIT_KAGGLE": " ".join(cli) if os.name == "nt" else shlex.join(cli)}
     run = [sys.executable, "-m", "kgkit", "gpu", "push", str(k), "--hours", "5.6", "--no-session-check"]
     r = subprocess.run(run, cwd=ws, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=120)
     assert r.returncode == 1 and "ask for NvidiaTeslaT4" in r.stdout and not calls.exists()  # refused at once
