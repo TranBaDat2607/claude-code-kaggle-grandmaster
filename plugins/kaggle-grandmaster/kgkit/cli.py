@@ -1224,9 +1224,10 @@ def cmd_gpu(a):
         rec = G.push(None, a.dir, force=a.force, hours=a.hours, check_sources=not a.no_source_check,
                      check_sessions=not a.no_session_check)
         built = rec.get("jobs") != ["notebook"]
-        print(f"pushed {rec['kernel']} v{rec['version']} ({rec['accelerator']}, cap {rec['hours']}h). Next: "
-              f"python -m kgkit gpu wait {rec['kernel']}  (run it in the background)"
-              + (", then gpu collect" if built else "; `kaggle kernels output` for its files"))
+        print(f"pushed {rec['kernel']} v{rec['version']} ({rec['accelerator']}, cap {rec['hours']}h). "
+              + ("It runs without some of its inputs: see the WARNING above." if rec.get("dropped_sources") else
+                 f"Next: python -m kgkit gpu wait {rec['kernel']}  (run it in the background)"
+                 + (", then gpu collect" if built else "; `kaggle kernels output` for its files")))
     elif a.gpu_cmd == "status":
         root = G._root(None)
         confirmed = {r["kernel"] for r in G.confirm_pending(root, a.kernel or None)}
@@ -1627,7 +1628,8 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--hours", type=float, required=True, help="session cap (~1.3x the estimate, <= 12; TPU <= 9)")
     s.add_argument("--folds", type=int, nargs="+", help="folds to run (default: all in data/folds.csv)")
     s.add_argument("--accelerator", default="NvidiaTeslaT4",
-                   help="NvidiaTeslaT4 (2x T4) | NvidiaTeslaP100 | TpuV5E8 (TPU quota, one process per chip) | none")
+                   help="NvidiaTeslaT4 (2x T4) | NvidiaTeslaP100 | TpuV5E8 (TPU quota, one process per chip) | "
+                        "TpuV6E8 | none")
     s.add_argument("--user", help="Kaggle username (default: KAGGLE_USERNAME / kaggle.json / `kaggle config view`)")
     s.add_argument("--dataset", nargs="*", default=[], help="owner/slug datasets linked into data/")
     s.add_argument("--kernel", nargs="*", default=[], help="owner/slug kernel outputs linked into data/")
@@ -1650,8 +1652,8 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("dir", help="a `gpu build` folder, or any kernel folder with kernel-metadata.json (needs --hours)")
     s.add_argument("--hours", type=float, help="session cap (-t); required for folders not made by `gpu build`")
     s.add_argument("--force", action="store_true",
-                   help="push even if the cap exceeds the plannable quota, an input kernel is still running, or "
-                        "the session slots look full")
+                   help="push even if the cap exceeds the plannable quota, an input kernel is still running, "
+                        "the session slots look full, or the machine shape is not one Kaggle is known to accept")
     s.add_argument("--no-source-check", action="store_true", help="skip the check that input kernels have finished")
     s.add_argument("--no-session-check", action="store_true", help="skip the busy-session preflight")
     s = gs.add_parser("status", help="status of active remote runs")
@@ -1676,9 +1678,11 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv=None):
+    # Line-buffered: piped stdout is otherwise written at exit, after a SystemExit message on stderr that points
+    # to the output "above".
     for stream in (sys.stdout, sys.stderr):
         try:
-            stream.reconfigure(encoding="utf-8", errors="replace")
+            stream.reconfigure(encoding="utf-8", errors="replace", line_buffering=True)
         except (AttributeError, ValueError):
             pass
     args = build_parser().parse_args(argv)

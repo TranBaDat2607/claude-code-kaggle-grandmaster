@@ -29,7 +29,9 @@ Unused quota expires at the weekly reset, so hours you don't spend are also lost
   fp16 tensor cores, no bf16); **`NvidiaTeslaP100`** = 1× P100 16 GB (sm_60, faster fp32/HBM, no tensor
   cores, no Triton → no `torch.compile`). The quota is charged per session-hour either way, so
   **T4×2 is the default**. One quota hour buys two GPUs, but only if both are busy. Choose P100 only for
-  fp32-bound or single-process jobs that cannot be split (verify by measuring step time).
+  fp32-bound or single-process jobs that cannot be split (verify by measuring step time). Kaggle answers a
+  shape it does not take with a bare 400, e.g. `NvidiaTeslaT4Highmem`, which `kernels pull -m` can record for
+  a past session. `kgkit gpu push` checks the shape before pushing (`--force` if Kaggle has added a new one).
 - GPU sessions have few CPU cores (typically 4) and ~29 GB RAM. JPEG/DICOM decoding plus heavy CPU augmentation
   starves the GPUs.
 - An interactive GPU session burns quota while it is open, even when idle. Batch runs (`kaggle kernels
@@ -164,7 +166,8 @@ step, bf16 losses matching the T4 run to 3-4 decimals. The catch is the queue:
   with GPU hours left, the GPU usually wins on wall time. Queue about half a day before you need it,
   and keep a GPU fallback scheduled for after the reset.
 - `machine_shape`: ask for `TpuV5E8`. `TpuV5E1`/`TpuV5E4`/`TpuV6E1` are silently stored as `TpuV5E8`;
-  `TpuV6E8` is a separate pool that often has no capacity.
+  `TpuV6E8` (often no capacity) and `Tpu1VmV38` (v3-8) are separate pools, queued too. `gpu build` targets
+  v5e-8 and v6e-8.
 - A queued job cannot be cancelled through the API (it has no session id yet). The only way to free the
   slot is `kaggle kernels delete` (irreversible; ask the user), then a re-push, which starts the queue
   again from zero. So **validate before queueing**: run the XLA path locally on PJRT CPU, then the same

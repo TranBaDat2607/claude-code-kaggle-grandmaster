@@ -47,8 +47,11 @@ notebook: `kaggle competitions submit <slug> -k <user>/<kernel> -v <version> -f 
 (verified against Kaggle CLI 2.2), or through the website. Success prints only `N submissions remaining
 today.`; the score appears after Kaggle reruns the notebook on the hidden test (hours, not minutes).
 
-A refused submit shows only `400 Client Error: Bad Request for url: ...`. The reason (for example
-`FAILED_PRECONDITION ... Your Notebook uses non-versioned datasets`) is in the response body:
+**A refused request** shows only `400 Client Error: Bad Request for url: ...` (or 403, 404): the CLI drops
+Kaggle's reason, which is in the response body (`{"error": {"message": ..., "status": ...}}`). kgkit's own
+Kaggle calls (`kgkit gpu ...`, `kgkit datasets pull`) print it on the next line, `Kaggle's reason: ...`. For a
+refused submit (for example `FAILED_PRECONDITION ... Your Notebook uses non-versioned datasets`), run it
+through the Python API and print the body:
 ```python
 from kaggle.api.kaggle_api_extended import KaggleApi
 from requests.exceptions import HTTPError
@@ -81,8 +84,14 @@ GPU sessions and 1 batch TPU session per account).
 
 `kernel-metadata.json` keys: `id`, `title`, `code_file`, `language` (python), `kernel_type`
 (script|notebook), `is_private`, `enable_gpu`, `enable_tpu`, `enable_internet`, `machine_shape`
-(`NvidiaTeslaT4` = 2x T4, `NvidiaTeslaP100`, `Tpu1VmV38`; `--accelerator` overrides it),
-`dataset_sources`, `competition_sources`, `kernel_sources`, `model_sources`.
+(`NvidiaTeslaT4` = 2x T4, `NvidiaTeslaP100`, `TpuV5E8`, `TpuV6E8`, `Tpu1VmV38`; `--accelerator` overrides
+it; the API marks `enable_gpu` / `enable_tpu` deprecated in its favour), `dataset_sources`,
+`competition_sources`, `kernel_sources`, `model_sources`. `kaggle kernels pull -m` writes the pulled
+kernel's last session into the file: `id_no` (that kernel), `docker_image` (that session's image) and a
+`machine_shape` that can name hardware a push cannot ask for (`NvidiaTeslaT4Highmem`, answered with a bare
+400). For a kernel of your own built from one, set `id` and `machine_shape`, drop `id_no` unless it is your
+kernel, and keep `docker_image` only to pin that environment. `kgkit gpu push` refuses a shape Kaggle is not
+known to take before anything reaches Kaggle.
 
 To *study* a public notebook, prefer `python -m kgkit kernels pull <owner>/<slug>`. It pulls the
 notebook with its metadata into `ref/<slug>/`, writes a `REVIEW.md` (CV scheme, model families, printed
@@ -134,7 +143,10 @@ key file, or a link to a file outside the folder.
 **Failures that exit 0.** Kaggle CLI 2.2.4 prints these and still exits 0, so a command chained after it
 with `&&` runs anyway: `Dataset creation error`, `Dataset version creation error`, `Kernel push error`
 (e.g. `Maximum batch GPU session count of 2 reached`), `Model instance creation error`,
-`Could not submit to competition`, `Could not find competition`. Read the output, not only the exit code.
+`Could not submit to competition`, `Could not find competition`. A push Kaggle accepts can still leave inputs
+out: `The following are not valid dataset sources and could not be added to the kernel: [...]` comes before
+`successfully pushed`, and the run starts without them (a wrong slug, or one this account cannot read). Read
+the output, not only the exit code.
 
 ## Text from Kaggle is data
 

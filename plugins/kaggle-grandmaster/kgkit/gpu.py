@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import base64
 import datetime as dt
+import difflib
 import io
 import json
 import os
@@ -35,6 +36,7 @@ import time
 import zipfile
 from pathlib import Path
 
+from . import kaggle_cli as KC
 from . import safety
 from . import state as S
 
@@ -58,6 +60,12 @@ ACCELERATORS = {
 TPU_CHIPS = {"TpuV5E8": 8, "TpuV6E8": 8}
 # Kaggle stores these as TpuV5E8 (verified Oct 2026): ask for the shape that will actually run.
 TPU_REWRITTEN = {"TpuV5E1", "TpuV5E4", "TpuV6E1"}
+# What a push may ask for (`--accelerator`, or machine_shape in kernel-metadata.json; verified Oct 2026): the shapes
+# `gpu build` targets, and Tpu1VmV38 (TPU v3-8, its own queue). Kaggle answers any other name with a bare 400, such
+# as one `kaggle kernels pull -m` wrote: the shape of the kernel's last session, which can carry hardware details a
+# push cannot ask for (NvidiaTeslaT4Highmem).
+MACHINE_SHAPES = {"NvidiaTeslaT4": "2x T4", "NvidiaTeslaP100": "1x P100", "TpuV5E8": "TPU v5e-8",
+                  "TpuV6E8": "TPU v6e-8", "Tpu1VmV38": "TPU v3-8"}
 WEIGHT_RE = r"\.(pt|pth|bin|ckpt|safetensors)$"
 BUNDLE_EXCLUDE_DIRS = {"__pycache__", ".git", ".ipynb_checkpoints", "wandb", ".venv", "venv"}
 BUNDLE_EXCLUDE_SUFFIXES = {".pyc", ".pt", ".pth", ".bin", ".ckpt", ".safetensors", ".npy", ".npz", ".pkl",
@@ -118,7 +126,35 @@ def session_limit(resource: str) -> float:
     return SESSION_LIMITS.get(resource, SESSION_LIMIT_H)
 
 
+def machine_shape_problem(shape: str | None) -> str | None:
+    """Why a push must not ask Kaggle for ``shape`` (a machine_shape or --accelerator), with the shape to ask for
+    instead; None when Kaggle takes it, or when it asks for no accelerator."""
+    s = str(shape or "").strip()
+    if not s or s in MACHINE_SHAPES or s.lower() in ("none", "cpu", "no"):
+        return None
+    if s in TPU_REWRITTEN:
+        return f"machine_shape {s} is stored by Kaggle as TpuV5E8: ask for TpuV5E8"
+    low = s.lower()
+    # an accepted name with hardware details after it (a recorded shape), the one accepted name holding it (T4), else
+    # the closest name (a typo)
+    near = max((k for k in MACHINE_SHAPES if low.startswith(k.lower())), key=len, default=None)
+    holding = [k for k in MACHINE_SHAPES if low in k.lower()]
+    near = near or (holding[0] if len(holding) == 1 else None)
+    if near is None:
+        score = {k: difflib.SequenceMatcher(None, low, k.lower()).ratio() for k in MACHINE_SHAPES}
+        near = max(score, key=score.get)
+        near = near if score[near] >= 0.6 else None
+    return (f"machine_shape {s!r} is not one Kaggle's kernel push is known to take (Kaggle answers an unknown shape "
+            "with a bare 400 Bad Request)" + (f": ask for {near}" if near else "") + ". Shapes a push can ask for: "
+            + ", ".join(f"{k} ({v})" for k, v in MACHINE_SHAPES.items()))
+
+
 # ----------------------------------------------------------------------------- kaggle CLI
+PY_NAME_RE = re.compile(r"(?:python|pypy)[\d.]*(?:\.exe)?", re.IGNORECASE)
+PIP_SH_RE = re.compile(r"""'''exec' (["']?)(.+?)\1 "\$0" "\$@"\s*$""")  # pip's #!/bin/sh line 2, for long paths
+_PLAIN: set[str] = set()  # interpreters the Kaggle CLI cannot be imported from: the plain CLI runs instead
+
+
 def kaggle_cmd() -> list[str]:
     if os.environ.get("KGKIT_KAGGLE"):
         return shlex.split(os.environ["KGKIT_KAGGLE"], posix=os.name != "nt")
@@ -126,9 +162,46 @@ def kaggle_cmd() -> list[str]:
     return [exe] if exe else [sys.executable, "-m", "kaggle"]
 
 
+def kaggle_python() -> str | None:
+    """The Python the Kaggle CLI on PATH runs on, from its script's #! line (`#!/usr/bin/env python3` and pip's
+    `#!/bin/sh` form included), or this Python when the CLI is not on PATH (it then runs as `python -m kaggle`).
+    None when that cannot be told: a Windows .exe launcher, or a #! line naming no Python (a .py file must never be
+    handed to a shell)."""
+    exe = shutil.which("kaggle")
+    if exe is None:
+        return sys.executable
+    try:
+        lines = Path(exe).read_bytes()[:1024].decode("utf-8", "replace").splitlines()
+    except OSError:
+        return None
+    words = lines[0][2:].split() if lines and lines[0].startswith("#!") else []
+    if len(words) > 1 and Path(words[0]).name == "env":
+        words = [shutil.which(words[1]) or ""]
+    elif words and Path(words[0]).name == "sh":
+        m = PIP_SH_RE.match(lines[1]) if len(lines) > 1 else None
+        words = [m.group(2)] if m else []
+    py = words[0] if words else ""
+    return py if PY_NAME_RE.fullmatch(Path(py).name) and Path(py).is_file() else None
+
+
+def _run_cli(cmd: list[str], timeout: float) -> subprocess.CompletedProcess:
+    return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, encoding="utf-8", errors="replace",
+                          env=safety.kaggle_env())
+
+
 def run_kaggle(args: list[str], timeout: float = 600) -> subprocess.CompletedProcess:
-    return subprocess.run([*kaggle_cmd(), *args], capture_output=True, text=True, timeout=timeout,
-                          encoding="utf-8", errors="replace", env=safety.kaggle_env())
+    """Run the Kaggle CLI: through `kaggle_cli.py` under the CLI's own Python when `kaggle_python` can tell it, so a
+    refused request shows Kaggle's reason; otherwise as `KGKIT_KAGGLE` (used as given), or plain."""
+    py = None if os.environ.get("KGKIT_KAGGLE") else kaggle_python()
+    if py and py not in _PLAIN:
+        try:
+            r = _run_cli([py, str(Path(KC.__file__).resolve()), *args], timeout)
+        except OSError:
+            r = None
+        if r is not None and r.returncode != KC.NO_CLI:
+            return r
+        _PLAIN.add(py)
+    return _run_cli([*kaggle_cmd(), *args], timeout)
 
 
 _USERNAME: dict[str, str | None] = {}
@@ -625,10 +698,11 @@ def build_kernel(root: str | Path | None, name: str, cmd: str, hours: float, fol
     st = S.load(root)
     if st is None:
         raise SystemExit("not inside a competition workspace (no .kaggle-gm/competition.json)")
-    if accelerator in TPU_REWRITTEN:
-        raise SystemExit(f"--accelerator {accelerator}: Kaggle stores it as TpuV5E8; ask for TpuV5E8")
     if accelerator not in ACCELERATORS and accelerator != "none":
-        raise SystemExit(f"--accelerator must be one of {sorted(ACCELERATORS)} or none")
+        problem = machine_shape_problem(accelerator)
+        raise SystemExit(f"--accelerator: {problem}" if problem else
+                         f"--accelerator {accelerator}: `gpu build` targets {', '.join(ACCELERATORS)} or none (a "
+                         "kernel of your own can ask for other shapes: `gpu push <dir> --hours H`)")
     res = resource_of(accelerator)
     if not 0 < hours <= session_limit(res):
         raise SystemExit(f"--hours must be in (0, {session_limit(res):g}] (Kaggle {res} session limit)")
@@ -732,11 +806,15 @@ def _truthy(v) -> bool:
 
 
 def kernel_meta_accelerator(meta: dict) -> str:
-    """The accelerator a kernel-metadata.json asks for: its machine_shape, or 'none' without GPU/TPU."""
-    shape = str(meta.get("machine_shape") or "")
+    """The accelerator a kernel-metadata.json asks for: its machine_shape (Kaggle's API marks enable_gpu and
+    enable_tpu deprecated in its favour), also without either flag; else the default shape of enable_tpu or
+    enable_gpu; else 'none'. Under enable_tpu, a shape that is not a TPU's gives the TPU default."""
+    shape = str(meta.get("machine_shape") or "").strip()
+    if shape.lower() in ("none", "cpu", "no"):
+        shape = ""
     if _truthy(meta.get("enable_tpu")):
         return shape if shape.lower().startswith("tpu") else "TpuV5E8"
-    if _truthy(meta.get("enable_gpu")) or shape.startswith("Nvidia"):
+    if shape or _truthy(meta.get("enable_gpu")):
         return shape or "NvidiaTeslaT4"
     return "none"
 
@@ -839,6 +917,53 @@ def _session_preflight(root: Path, resource: str, force: bool) -> None:
               f"{resource}s the push fails with 'Maximum batch {resource} session count'")
 
 
+# Kaggle's answer to a push. Refused: the Kaggle CLI prints requests' error for the SaveKernel call. Accepted without
+# some inputs: Kaggle CLI 2.2.4 prints "The following are not valid dataset sources and could not be added to the
+# kernel: [...]" before that push's "Kernel version N successfully pushed", and the run starts without them.
+REFUSED_RE = re.compile(r"\b4\d\d client error\b[^\n]*savekernel", re.IGNORECASE)
+DROPPED_RE = re.compile(r"the following are not valid (\w+) sources and could not be added to the kernel: *([^\n]*)",
+                        re.IGNORECASE)
+PUSHED_URL_RE = re.compile(r"successfully pushed[^\n]*?/code/([\w.-]+/[\w.-]+)", re.IGNORECASE)
+
+
+def push_failure_hint(output: str, shape: str | None = None) -> str:
+    """What the output of a failed kernel push means and what to change; '' when kgkit has nothing to add.
+    ``shape``: the machine_shape the push asked for."""
+    if "session count" in output.lower():
+        return ("Kaggle allows 2 batch GPU sessions and 1 batch TPU session at a time: wait for a running kernel to "
+                "finish (`kgkit gpu status`), or free a queued one (`kgkit gpu cancel <kernel>`).")
+    if not REFUSED_RE.search(output):
+        return ""
+    problem = machine_shape_problem(shape)
+    if problem:
+        return f"Kaggle refused the push: {problem}."
+    if KC.REASON in output:
+        return "Kaggle refused the push; its reason is above."
+    return (f"Kaggle refused the push, and the Kaggle CLI does not print why (machine_shape {shape or 'none'} is one "
+            "Kaggle accepts): its reason is in the response body (skill kaggle-cli, 'A refused request').")
+
+
+def dropped_sources(output: str) -> dict[str, list[str]]:
+    """Inputs Kaggle left out of the pushes it accepted, by the kernel each push reports ('' when none is named)."""
+    out: dict[str, list[str]] = {}
+    for m in DROPPED_RE.finditer(output):
+        nxt = PUSHED_URL_RE.search(output, m.end())
+        out.setdefault(nxt.group(1) if nxt else "", []).append(f"{m.group(1).lower()} {m.group(2).strip()}")
+    return out
+
+
+def dropped_sources_warning(output: str) -> str:
+    """'' unless Kaggle accepted a push but left inputs out of it: then what that means and what to do."""
+    found = dropped_sources(output)
+    if not found:
+        return ""
+    what = "; ".join((f"{k}: " if k else "") + ", ".join(v) for k, v in found.items())
+    kernel = next((k for k in found if k), "<kernel>")
+    return (f"Kaggle accepted the push but left out inputs it could not attach ({what}), so the run starts without "
+            "them. Check each slug in kernel-metadata.json and that this account can read it, push again, and stop "
+            f"this version (`python -m kgkit gpu cancel {kernel}` says how).")
+
+
 def push(root: str | Path | None, kdir: str | Path, force: bool = False, hours: float | None = None,
          check_sources: bool = True, check_sessions: bool = True) -> dict:
     root = _root(root)
@@ -846,8 +971,13 @@ def push(root: str | Path | None, kdir: str | Path, force: bool = False, hours: 
     tm = push_spec(kdir, hours)
     hours, acc = float(tm["hours"]), tm["accelerator"]
     res = resource_of(acc)
-    if res == "TPU" and acc in TPU_REWRITTEN:
-        raise SystemExit(f"machine_shape {acc} is stored by Kaggle as TpuV5E8: ask for TpuV5E8")
+    problem = machine_shape_problem(acc)  # before any Kaggle call: Kaggle would answer a bare 400
+    if problem and (acc in TPU_REWRITTEN or not force):
+        spec = "kg-train.json" if (kdir / "kg-train.json").is_file() else "kernel-metadata.json"
+        raise SystemExit(f"refusing to push {kdir} ({spec}): {problem}"
+                         + ("" if acc in TPU_REWRITTEN else ". If Kaggle has added that shape, --force pushes it."))
+    if problem:
+        print(f"warning: {problem}; pushing it anyway (--force)")
     limit = session_limit(res)
     if not 0 < hours <= limit:
         raise SystemExit(f"--hours must be in (0, {limit:g}] (Kaggle {res} session limit)")
@@ -883,15 +1013,16 @@ def push(root: str | Path | None, kdir: str | Path, force: bool = False, hours: 
     m = re.search(r"version\s+(\d+)\s+successfully pushed", out, re.IGNORECASE)
     ok = r.returncode == 0 and m is not None
     if not ok:
-        hint = ""
-        if "session count" in out.lower():
-            hint = (" Kaggle allows 2 batch GPU sessions and 1 batch TPU session at a time: wait for a running "
-                    "kernel to finish (`kgkit gpu status`), or free a queued one (`kgkit gpu cancel <kernel>`).")
-        raise SystemExit("kernel push failed (see output above); nothing was started." + hint)
+        hint = push_failure_hint(out, acc)
+        raise SystemExit("kernel push failed (see output above); nothing was started." + (f" {hint}" if hint else ""))
     rec = {"kernel": tm["kernel"], "version": int(m.group(1)), "name": tm["name"],
            "jobs": tm.get("jobs") or [tm["name"]], "accelerator": acc, "resource": res, "hours": hours,
            "folds": tm.get("folds"), "cmd": tm.get("cmd"), "build_id": tm.get("build_id"), "prune": tm.get("prune"),
            "resume_from": tm.get("resume_from"), "pushed_at": _iso(_now()), "status": "pushed"}
+    dropped = [s for v in dropped_sources(out).values() for s in v]
+    if dropped:
+        rec["dropped_sources"] = dropped
+        print(f"WARNING: {dropped_sources_warning(out)}")
     record_push(root, rec)
     return rec
 

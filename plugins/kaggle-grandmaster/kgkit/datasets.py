@@ -19,15 +19,19 @@ import subprocess
 import zipfile
 from pathlib import Path
 
+from . import kaggle_cli as KC
 from .gpu import run_kaggle
 
 FAILED_RE = re.compile(r"\b[45]\d\d (?:Client|Server) Error\b|^\s*(?:Traceback|\w*Error:)", re.IGNORECASE | re.MULTILINE)
 
 
 def _error_line(text: str) -> str:
-    """The line that says what went wrong (the CLI prints the dataset URL and licence around it)."""
+    """The line that says what went wrong (the CLI prints the dataset URL and licence around it), with Kaggle's
+    reason when `run_kaggle` printed it on the next line."""
     lines = [l.strip() for l in text.splitlines() if l.strip()]
-    return next((l for l in lines if FAILED_RE.search(l)), lines[0] if lines else "")
+    i = next((i for i, l in enumerate(lines) if FAILED_RE.search(l)), 0)
+    why = lines[i + 1] if i + 1 < len(lines) and lines[i + 1].startswith(KC.REASON) else ""
+    return (lines[i] + (f" ({why})" if why else "")) if lines else ""
 
 
 def list_files(ds: str, page_size: int = 200, max_pages: int = 100) -> list[dict]:

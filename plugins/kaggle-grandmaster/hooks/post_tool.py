@@ -8,7 +8,9 @@ reservation. `cwd` here is where the command left the shell: relative paths are 
 were at that point, and a push whose folder cannot be told is reported, not logged. A command that went on in
 the background has left `cwd` where it started, and Kaggle's reply comes after this hook: its pushes are logged
 as pending, their whole cap reserved, until `kgkit gpu status` / `gpu wait` see Kaggle run them. The Kaggle CLI
-exits 0 after several failed writes; say so when one shows up in the output."""
+exits 0 after several failed writes; say so when one shows up in the output. It prints a push Kaggle refused (a 4xx
+from SaveKernel) without Kaggle's reason: name the machine shape when Kaggle does not accept it. A push Kaggle accepted
+can still leave inputs out ("not valid dataset sources"): the run starts without them; say so."""
 
 from __future__ import annotations
 
@@ -211,6 +213,33 @@ def log_gpu_push(root: Path, push: dict, target: tuple, version: int) -> str | N
             f"collect {kernel}`.")
 
 
+def push_reply_notes(payload: dict, pushes: list[dict]) -> list[str]:
+    """Kaggle's answer to the command's pushes, where the Kaggle CLI leaves it unexplained: a push it refused (a 4xx
+    from SaveKernel, printed without Kaggle's reason), naming a machine shape Kaggle does not accept; and inputs it
+    left out of a push it accepted."""
+    if not pushes:
+        return []
+    text, notes = _response_text(payload), []
+    if C.G.REFUSED_RE.search(text):
+        found = []
+        for push in pushes:
+            target = C.push_target(payload, push, ran=not _backgrounded(payload))
+            meta = target[1] if target else {}
+            # the CLI sends --accelerator, else the folder's machine_shape
+            problem = C.G.machine_shape_problem(push.get("accelerator") or meta.get("machine_shape"))
+            if problem:
+                found.append(f"{meta.get('id') or 'the kernel'}: {problem}")
+        notes.append("kaggle-grandmaster: Kaggle refused the kernel push (a 4xx from SaveKernel), so nothing was "
+                     "started. " + ("; ".join(found) + "." if found else
+                                    "The Kaggle CLI does not print Kaggle's reason: push the folder with `python -m "
+                                    "kgkit gpu push <dir> --hours H`, which shows it (and checks the quota and logs "
+                                    "the run)."))
+    warning = C.G.dropped_sources_warning(text)
+    if warning:
+        notes.append(f"kaggle-grandmaster: {warning}")
+    return notes
+
+
 def silent_failure_note(payload: dict) -> str | None:
     """An upload or push that printed one of the CLI's exit-0 errors: say nothing was created."""
     cmd = C.command_of(payload)
@@ -360,7 +389,8 @@ def main() -> None:
     payload = C.read_input()
     cmd = C.command_of(payload)
     # One command can chain an upload, pushes and submits: report on each, in one message.
-    notes = [silent_failure_note(payload), *log_gpu_pushes(payload, C.parse_pushes(cmd)),
+    pushes = C.parse_pushes(cmd)
+    notes = [silent_failure_note(payload), *push_reply_notes(payload, pushes), *log_gpu_pushes(payload, pushes),
              *log_submissions(payload, C.parse_submits(cmd))]
     notes = [n for n in notes if n]
     if notes:

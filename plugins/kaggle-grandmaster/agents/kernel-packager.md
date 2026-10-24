@@ -20,8 +20,9 @@ environment and produce a valid submission on the hidden test set.
    never hardcodes row counts, installs wheels with `--no-index`, loads models with
    `local_files_only`, tracks elapsed time with a safe fallback, frees memory between models,
    asserts output validity, writes `/kaggle/working/submission.csv` (or the required format).
-4. Write `kernel-metadata.json` (`enable_internet: false`, `enable_gpu` per need, competition +
-   dataset + model sources). If the weights came from a remote training kernel (`kgkit gpu`), list
+4. Write `kernel-metadata.json` (`enable_internet: false`, `enable_gpu` per need with `machine_shape`
+   `NvidiaTeslaT4` for 2x T4, competition + dataset + model sources; skill `kaggle-cli` lists the shapes a
+   push takes). If the weights came from a remote training kernel (`kgkit gpu`), list
    that kernel in `kernel_sources` (its `artifacts/<name>/fold*.pt`) instead of re-uploading them.
    GPU inference pushes spend the weekly quota: check `python -m kgkit gpu quota` first.
 5. Locally: run the inference script against a synthetic test of the hidden-test size (or the
