@@ -22,9 +22,12 @@ Standard library only: hooks import it to read the cached quota and the run log.
 from __future__ import annotations
 
 import base64
+import csv
 import datetime as dt
 import difflib
+import hashlib
 import io
+import itertools
 import json
 import os
 import re
@@ -34,6 +37,7 @@ import subprocess
 import sys
 import time
 import zipfile
+import zlib
 from pathlib import Path, PurePosixPath
 
 from . import evalset as E
@@ -73,7 +77,14 @@ WEIGHT_RE = r"\.(pt|pth|bin|ckpt|safetensors)$"
 BUNDLE_EXCLUDE_DIRS = {"__pycache__", ".git", ".ipynb_checkpoints", "wandb", ".venv", "venv"}
 BUNDLE_EXCLUDE_SUFFIXES = {".pyc", ".pt", ".pth", ".bin", ".ckpt", ".safetensors", ".npy", ".npz", ".pkl",
                            ".parquet", ".feather", ".zip", ".png", ".jpg", ".jpeg", ".dcm"}
-BUNDLE_WARN_MB, BUNDLE_MAX_MB = 2.0, 20.0
+# Kaggle refuses a kernel source of 1 MB or more with a bare 400 Bad Request from SaveKernel (its editor says it "must
+# be less than 1 megabytes"; Oct 2026: a 2.6 MB `gpu build` script refused, the same kernel at 0.57 MB taken). The code
+# bundle is in the script as base64, 4/3 of its size.
+SOURCE_MAX_BYTES = 1_000_000
+# The fold split goes in the bundle column by column (`pack_split`); the runner writes data/folds.csv back from it.
+SPLIT_FILE, SPLIT_ARC = "data/folds.csv", "_kg/split"
+SPLIT_CODES_MAX = 256  # a column with at most this many distinct values (the folds) takes one byte per row
+SPLIT_REF_KB = 64  # a column bigger than this as (compressed) text is read from a training file in the session instead
 # Where `gpu build` links attached datasets and kernel outputs in the run (competition data is always in data/).
 INPUT_LAYOUTS = {"flat": "into data/, beside the competition data",
                  "nested": "each in its own folder: data/ext/<slug>/, kernel outputs data/ext/kout-<slug>/"}
@@ -631,15 +642,175 @@ def _add_tree(z: zipfile.ZipFile, src: Path, arc: str, base: Path | None = None)
     return n
 
 
-def build_bundle(root: Path, include: list[str], baseline_dir: Path | None = None) -> bytes:
-    """Zip of the code a remote run needs. Data never goes in here: attach it as a dataset/competition."""
+def _split_rows(data: bytes):
+    """The rows of a split file's bytes, blank lines skipped (kgkit's fingerprint and pandas skip them too). UTF-8 is
+    decoded strictly (UnicodeDecodeError), so no cell is changed on the way."""
+    return filter(None, csv.reader(io.TextIOWrapper(io.BytesIO(data), encoding="utf-8-sig", newline="")))
+
+
+def _batches(rows, size: int = 1 << 16):
+    while True:
+        batch = list(itertools.islice(rows, size))
+        if not batch:
+            return
+        yield batch
+
+
+def _cells(rows) -> bytes:
+    """Rows as the split's digest takes them: cells joined by \\x1f, each row ended by \\x1e. The runner takes the same
+    digest of the file it writes."""
+    return "".join("\x1f".join(r) + "\x1e" for r in rows).encode("utf-8")
+
+
+def _as_range(state, cells: tuple, n: int):
+    """(start, step) while a column, of which ``cells`` are rows n, n+1, ..., is the integers start, start + step, ...
+    written as Python writes them; False once it is not."""
+    if state is None:
+        try:
+            a, b = int(cells[0]), int(cells[1])
+        except (ValueError, IndexError):
+            return False
+        state = (a, b - a) if a != b else False
+    if state is False:
+        return False
+    lo = state[0] + state[1] * n
+    return state if cells == tuple(map(str, range(lo, lo + state[1] * len(cells), state[1]))) else False
+
+
+def _as_codes(values: dict | None, codes: bytearray, cells: tuple) -> dict | None:
+    """Add ``cells`` to a column's codes, one byte per row (``values``: cell -> code, in order of first appearance);
+    None once the column has more than SPLIT_CODES_MAX distinct values."""
+    if values is None:
+        return None
+    for v in dict.fromkeys(cells):
+        values.setdefault(v, len(values))
+    if len(values) > SPLIT_CODES_MAX:
+        codes.clear()
+        return None
+    codes.extend(map(values.__getitem__, cells))
+    return values
+
+
+def _training_files(root: Path) -> list[str]:
+    """CSV files under data/ that a split's columns can be read from in the session, where the competition data and
+    the inputs are linked into data/ too: the file `kgkit folds` read (.kaggle-gm/folds_spec.json), then
+    data/train.csv. Paths relative to the project root."""
+    names = []
+    try:
+        names.append(str(json.loads((root / S.STATE_DIR / "folds_spec.json").read_text(encoding="utf-8"))["train"]))
+    except (OSError, ValueError, KeyError, TypeError):
+        pass
+    out = []
+    for name in [*names, "data/train.csv"]:
+        p = Path(name)
+        if p.is_absolute():
+            try:
+                p = p.relative_to(root.absolute())
+            except ValueError:
+                continue
+        rel = PurePosixPath(os.path.normpath(p).replace("\\", "/"))
+        if (rel.parts[:1] == ("data",) and ".." not in rel.parts and rel.suffix.lower() == ".csv"
+                and rel.as_posix() not in (SPLIT_FILE, *out) and (root / rel).is_file()):
+            out.append(rel.as_posix())
+    return out
+
+
+def _same_columns(path: Path, data: bytes, want: dict[int, str]) -> set[int]:
+    """The split's columns ``want`` (index -> name) that the CSV at ``path`` has under the same name, cell for cell and
+    row for row (blank lines skipped in both)."""
+    try:
+        with path.open(encoding="utf-8-sig", newline="") as f:
+            theirs = filter(None, csv.reader(f))
+            head = next(theirs, [])
+            at = {j: head.index(name) for j, name in want.items() if name in head}
+            if not at:
+                return set()
+            mine = _split_rows(data)
+            next(mine)
+            for a, b in itertools.zip_longest(mine, theirs):
+                if a is None or b is None:
+                    return set()
+                at = {j: i for j, i in at.items() if i < len(b) and a[j] == b[i]}
+                if not at:
+                    return set()
+    except (OSError, UnicodeDecodeError, csv.Error):
+        return set()
+    return set(at)
+
+
+def pack_split(root: Path, data: bytes) -> tuple[dict, dict[str, bytes]] | None:
+    """The fold split file's bytes as the runner writes data/folds.csv back from them: a manifest (header, rows, a
+    digest of the cells, the form of each column) and the bundle members holding the columns. A column is an integer
+    range (nothing to store), one byte per row (at most SPLIT_CODES_MAX distinct values: the folds), or its cells as
+    text; a text column bigger than SPLIT_REF_KB is read in the session from a training file that has it, row for row
+    (`_training_files`), and the runner checks it there. Every cell comes back as it was; the file is written with LF
+    line endings and the quotes its cells need. None when the file is not such a table (not UTF-8, or rows of other
+    widths): it then goes in as it is."""
+    try:
+        rows = _split_rows(data)
+        header = next(rows)
+        digest = hashlib.sha1(_cells([header]))
+        ranges, values, codes, n = [None] * len(header), [{} for _ in header], [bytearray() for _ in header], 0
+        for batch in _batches(rows):
+            if any(len(r) != len(header) for r in batch):
+                return None
+            digest.update(_cells(batch))
+            for j, cells in enumerate(zip(*batch)):
+                ranges[j] = _as_range(ranges[j], cells, n)
+                values[j] = _as_codes(values[j], codes[j], cells)
+            n += len(batch)
+    except (StopIteration, UnicodeDecodeError, csv.Error):
+        return None
+    text = {j: [] for j in range(len(header)) if not ranges[j] and values[j] is None}
+    if text:
+        rows = _split_rows(data)
+        next(rows)
+        for batch in _batches(rows):
+            for j, parts in text.items():
+                parts.append(json.dumps([r[j] for r in batch]))
+        text = {j: "\n".join(parts).encode("ascii") for j, parts in text.items()}
+    big = {j: header[j] for j, t in text.items() if len(zlib.compress(t, 6)) > SPLIT_REF_KB * 1024}
+    refs = {}
+    for rel in _training_files(root) if big else []:
+        refs.update(dict.fromkeys(_same_columns(root / rel, data, {j: c for j, c in big.items() if j not in refs}), rel))
+    members, columns = {}, []
+    for j in range(len(header)):
+        member = f"{SPLIT_ARC}/{j}"
+        if ranges[j]:
+            columns.append({"range": list(ranges[j])})
+        elif values[j] is not None:
+            members[member] = bytes(codes[j])
+            columns.append({"codes": member, "values": list(values[j])})
+        elif j in refs:
+            columns.append({"ref": refs[j]})
+        else:
+            members[member] = text[j]
+            columns.append({"text": member})
+    return ({"file": SPLIT_FILE, "rows": n, "header": header, "columns": columns, "digest": digest.hexdigest()},
+            members)
+
+
+def split_summary(split: dict) -> str:
+    """How a fold split reaches the session: '700000 rows; id: a range, fold: 5 values' (`pack_split`), or the
+    dataset it is linked from (`--split-from`)."""
+    if split.get("from"):
+        return f"linked from the dataset {split['from']}"
+    how = [f"{name}: " + ("a range" if "range" in c else f"{len(c['values'])} values" if "codes" in c
+                          else f"read from {c['ref']}" if "ref" in c else "text")
+           for name, c in zip(split["header"], split["columns"])]
+    return f"{split['rows']} rows; " + ", ".join(how)
+
+
+def build_bundle(root: Path, include: list[str], baseline_dir: Path | None = None,
+                 extra: dict[str, bytes] | None = None) -> bytes:
+    """Zip of the code a remote run needs, and ``extra`` members (the fold split, `pack_split`). Data never goes in
+    here: attach it as a dataset/competition."""
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED, compresslevel=9) as z:
         _add_tree(z, KGKIT_DIR, "kgkit")
         z.write(root / S.STATE_DIR / S.STATE_FILE, f"{S.STATE_DIR}/{S.STATE_FILE}")
-        folds = root / "data" / "folds.csv"
-        if folds.is_file():  # the frozen split must be identical remotely (folds_hash matches the local ledger)
-            z.write(folds, "data/folds.csv")
+        for arc, blob in (extra or {}).items():
+            z.writestr(arc, blob)
         for inc in include:
             p = (root / inc)
             if not p.exists():
@@ -649,6 +820,63 @@ def build_bundle(root: Path, include: list[str], baseline_dir: Path | None = Non
             for c in sorted(baseline_dir.glob("curve_fold*.json")):
                 z.write(c, f"_kg/baseline/{c.name}")
     return buf.getvalue()
+
+
+def bundle_parts(payload: bytes) -> list[tuple[str, int]]:
+    """(part, bytes it takes in the kernel script) of a code bundle, biggest first: each top-level folder or file, with
+    the fold split and the baseline's learning curves as parts of their own."""
+    parts: dict[str, int] = {}
+    for i in zipfile.ZipFile(io.BytesIO(payload)).infolist():
+        name = i.filename
+        part = ("the fold split" if name.startswith(f"{SPLIT_ARC}/") or name == SPLIT_FILE
+                else "the baseline's learning curves" if name.startswith("_kg/baseline/")
+                else name.split("/")[0] + ("/" if "/" in name else ""))
+        parts[part] = parts.get(part, 0) + i.compress_size
+    return sorted(((p, b * 4 // 3) for p, b in parts.items()), key=lambda pb: -pb[1])
+
+
+def _size(b: float) -> str:
+    return f"{b / 1e6:.2f} MB" if b >= 1e6 else f"{b / 1e3:.0f} KB"
+
+
+def _csv_header(path: Path) -> list[str]:
+    try:
+        with path.open(encoding="utf-8-sig", newline="") as f:
+            return next(filter(None, csv.reader(f)), [])
+    except (OSError, UnicodeDecodeError, csv.Error):
+        return []
+
+
+def script_size_warning(root: Path, size: int, payload: bytes, split: dict | None) -> str:
+    """'' for a kernel script Kaggle takes; else what takes the space and how to make room. ``split``: the config's
+    (`pack_split`'s manifest, the dataset of --split-from, or None for data/folds.csv as it is)."""
+    if size < SOURCE_MAX_BYTES:
+        return ""
+    parts = bundle_parts(payload)
+    biggest = ", ".join(f"{p} {_size(b)}" for p, b in parts[:3] if b >= 1000)
+    dataset = ("put data/folds.csv in a private dataset (`kaggle datasets create`) and build with --split-from "
+               "<owner>/<slug>; the run links it from there, checked against yours")
+    packed = split is not None and "columns" in split
+    text = [name for name, c in zip(split["header"], split["columns"]) if "text" in c] if packed else []
+    if not parts or parts[0][0] != "the fold split" or (split is not None and not packed):
+        how = "Keep data out of --include and attach it as a dataset (--dataset)."
+    elif split is None:
+        how = (f"data/folds.csv goes in as it is (it is not UTF-8, or its rows differ in width): save it as a plain "
+               f"UTF-8 CSV to have it packed, or {dataset}.")
+    elif text:
+        held = {}  # text column -> the first training file with a column of that name
+        for rel in _training_files(root):
+            for name in _csv_header(root / rel):
+                if name in text:
+                    held.setdefault(name, rel)
+        order = "; ".join(f"{name!r} is not the column of {rel} row for row: written in {rel}'s row order with its "
+                          "values, it would be read from there in the session instead" for name, rel in held.items())
+        how = (f"Its column(s) {', '.join(map(repr, text))} go in as text" + (f" ({order})" if order else "")
+               + f". Or {dataset}.")
+    else:
+        how = f"It is too big even packed: {dataset}."
+    return (f"WARNING: the kernel script is {_size(size)}, and Kaggle refuses a kernel source of 1 MB or more with a "
+            f"bare 400 Bad Request (`gpu push` stops before sending it). Its biggest parts: {biggest}. {how}")
 
 
 def input_sources(datasets: list[str], kernels: list[str], layout: str = "flat") -> list[dict]:
@@ -730,12 +958,15 @@ def build_kernel(root: str | Path | None, name: str, cmd: str, hours: float, fol
                  wheel_sources: list[str] = (), assemble_cmd: str | None = None, post_cmds: list[str] = (),
                  prune_against: str | None = None, prune_margin: float | None = None,
                  prune_min_frac: float = 0.3, slug: str | None = None, out_dir: str | Path | None = None,
-                 public: bool = False, extra_jobs: list[tuple[str, str]] = (), input_layout: str = "flat") -> Path:
+                 public: bool = False, extra_jobs: list[tuple[str, str]] = (), input_layout: str = "flat",
+                 split_from: str | None = None) -> Path:
     """Write ``kernels/<slug>/`` (kernel-metadata.json + generated runner script + kg-train.json).
 
     ``extra_jobs`` ((name, cmd) pairs) share the session: e.g. two 1-fold screens of different ideas
     run side by side on the two T4s instead of leaving one GPU idle. ``datasets`` / ``kernels`` are linked
-    into the run as :func:`input_sources` places them."""
+    into the run as :func:`input_sources` places them. data/folds.csv goes in the code bundle as :func:`pack_split`
+    packs it, or, with ``split_from`` (a dataset holding a copy of it, for a split too big for a kernel script), is
+    linked from that dataset; either way the runner checks it against yours before anything runs."""
     root = _root(root)
     st = S.load(root)
     if st is None:
@@ -758,13 +989,17 @@ def build_kernel(root: str | Path | None, name: str, cmd: str, hours: float, fol
     if not user:
         raise SystemExit("cannot determine your Kaggle username (KAGGLE_USERNAME, kaggle.json and "
                          "`kaggle config view` gave none): pass --user")
-    fp = root / "data" / "folds.csv"
-    all_folds = None
-    if fp.is_file():
+    fp = root / SPLIT_FILE
+    all_folds, split_data = None, fp.read_bytes() if fp.is_file() else None
+    if split_data is not None:
         try:
-            all_folds = E.fold_ids(fp.read_bytes())
+            all_folds = E.fold_ids(split_data)
         except ValueError as e:
             raise SystemExit(f"data/folds.csv: {e}")
+    if split_from is not None and not re.fullmatch(r"[^/\s=]+/[^/\s=]+", split_from):
+        raise SystemExit(f"--split-from {split_from}: expected <owner>/<slug> of a dataset holding data/folds.csv")
+    if split_from is not None and split_data is None:
+        raise SystemExit("--split-from: there is no data/folds.csv here to check the dataset's copy against")
     if folds is None:
         if "{fold}" in cmd and all_folds is None:
             raise SystemExit("--folds not given and data/folds.csv missing")
@@ -797,6 +1032,12 @@ def build_kernel(root: str | Path | None, name: str, cmd: str, hours: float, fol
     resume_src = list(resume_from)
     commit, dirty = _git(root)
     built = _iso(_now())
+    split, split_members = None, {}
+    if split_from:
+        split = {"file": SPLIT_FILE, "from": split_from, "bytes": len(split_data),
+                 "sha1": hashlib.sha1(split_data).hexdigest()}
+    elif split_data is not None:  # the frozen split must be identical remotely (folds_hash matches the local ledger)
+        split, split_members = pack_split(root, split_data) or (None, {SPLIT_FILE: split_data})
     config = {
         "jobs": jobs, "post_cmds": list(post_cmds),
         "hours": hours, "accelerator": accelerator, "pip": list(pip), "wheel_sources": list(wheel_sources),
@@ -804,15 +1045,12 @@ def build_kernel(root: str | Path | None, name: str, cmd: str, hours: float, fol
         "resume_sources": resume_src, "prune": prune,
         "git_commit": commit, "git_dirty": dirty, "build_id": f"{kslug}@{built}",
         "allow_cpu": accelerator == "none", "resource": res, "tpu_chips": TPU_CHIPS.get(accelerator, 0),
+        "split": split,
     }
-    payload = build_bundle(root, list(include), baseline_dir)
-    mb = len(payload) / 1e6
-    if mb > BUNDLE_MAX_MB:
-        raise SystemExit(f"code bundle is {mb:.1f} MB: keep data out of --include (upload it as a dataset)")
-    if mb > BUNDLE_WARN_MB:
-        print(f"note: code bundle is {mb:.1f} MB; anything big belongs in a Kaggle dataset")
+    payload = build_bundle(root, list(include), baseline_dir, split_members)
     script = runner.replace("__KG_CONFIG_B64__", base64.b64encode(json.dumps(config).encode()).decode(), 1)
     script = script.replace("__KG_PAYLOAD_B64__", base64.b64encode(payload).decode(), 1)
+    size = len(script.encode("utf-8"))
 
     kdir = Path(out_dir) if out_dir else root / "kernels" / kslug
     kdir.mkdir(parents=True, exist_ok=True)
@@ -822,7 +1060,8 @@ def build_kernel(root: str | Path | None, name: str, cmd: str, hours: float, fol
         "id": f"{user}/{kslug}", "title": kslug.replace("-", " "), "code_file": code_file, "language": "python",
         "kernel_type": "script", "is_private": not public, "enable_gpu": res == "GPU",
         "enable_tpu": res == "TPU", "enable_internet": internet,
-        "dataset_sources": [*dict.fromkeys([*(s["ref"] for s in sources if s["kind"] == "dataset"), *wheel_sources])],
+        "dataset_sources": [*dict.fromkeys([*(s["ref"] for s in sources if s["kind"] == "dataset"), *wheel_sources,
+                                            *([split_from] if split_from else [])])],
         "competition_sources": [st.slug],
         "kernel_sources": [*dict.fromkeys([*(s["ref"] for s in sources if s["kind"] == "kernel"), *resume_src])],
         "model_sources": list(models),
@@ -833,8 +1072,18 @@ def build_kernel(root: str | Path | None, name: str, cmd: str, hours: float, fol
     train_meta = {"kernel": meta["id"], "name": name, "jobs": [j["name"] for j in jobs], "hours": hours,
                   "accelerator": accelerator, "resource": res, "folds": folds, "cmd": cmd, "build_id": config["build_id"], "prune": prune,
                   "resume_from": resume_src, "bundle_kb": round(len(payload) / 1024, 1),
+                  "script_kb": round(size / 1024, 1),
+                  "split": split_summary(split) if split else None if split_data is None else "in the bundle as it is",
                   "input_layout": input_layout, "inputs": config["sources"]}
     (kdir / "kg-train.json").write_text(json.dumps(train_meta, indent=2), encoding="utf-8")
+    warning = script_size_warning(root, size, payload, split)
+    if warning:
+        print(warning)
+    packed = split is not None and "columns" in split
+    refs = [f"{n!r} from {c['ref']}" for n, c in zip(split["header"], split["columns"]) if "ref" in c] if packed else []
+    if refs:
+        print(f"note: the run reads data/folds.csv's column(s) {', '.join(refs)} in the session (too big to pack "
+              "as text), and stops before training if they differ there from yours")
     flat = [s["ref"] for s in sources if s["dest"] == "data"]
     if len(flat) > 1:
         names = ", ".join(flat[:4]) + (f" and {len(flat) - 4} more" if len(flat) > 4 else "")
@@ -984,21 +1233,52 @@ DROPPED_RE = re.compile(r"the following are not valid (\w+) sources and could no
 PUSHED_URL_RE = re.compile(r"successfully pushed[^\n]*?/code/([\w.-]+/[\w.-]+)", re.IGNORECASE)
 
 
-def push_failure_hint(output: str, shape: str | None = None) -> str:
+def kernel_source(kdir: str | Path) -> tuple[str, int] | None:
+    """(name, bytes) of the source file of the kernel in ``kdir`` (kernel-metadata.json's code_file); None when it
+    cannot be told."""
+    try:
+        name = str(json.loads((Path(kdir) / "kernel-metadata.json").read_text(encoding="utf-8"))["code_file"])
+        return name, (Path(kdir) / name).stat().st_size
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+
+
+def source_problem(kdir: str | Path | None) -> str | None:
+    """Why Kaggle would refuse the source of the kernel in ``kdir``: 1 MB or more. None when it would not, or when the
+    size cannot be told."""
+    src = kernel_source(kdir) if kdir is not None else None
+    if src is None or src[1] < SOURCE_MAX_BYTES:
+        return None
+    return (f"its source {src[0]} is {_size(src[1])}, and Kaggle refuses a kernel source of 1 MB or more with a bare "
+            "400 Bad Request")
+
+
+def refusal_causes(kdir: str | Path | None, shape: str | None) -> list[str]:
+    """What Kaggle is known to answer with a bare 400 in a push of the kernel in ``kdir`` asking for machine_shape
+    ``shape``: a source of 1 MB or more, a shape it does not take."""
+    return [p for p in (source_problem(kdir), machine_shape_problem(shape)) if p]
+
+
+def push_failure_hint(output: str, shape: str | None = None, kdir: str | Path | None = None) -> str:
     """What the output of a failed kernel push means and what to change; '' when kgkit has nothing to add.
-    ``shape``: the machine_shape the push asked for."""
+    ``shape``: the machine_shape the push asked for; ``kdir``: the kernel folder pushed."""
     if "session count" in output.lower():
         return ("Kaggle allows 2 batch GPU sessions and 1 batch TPU session at a time: wait for a running kernel to "
                 "finish (`kgkit gpu status`), or free a queued one (`kgkit gpu cancel <kernel>`).")
     if not REFUSED_RE.search(output):
         return ""
-    problem = machine_shape_problem(shape)
-    if problem:
-        return f"Kaggle refused the push: {problem}."
+    causes = refusal_causes(kdir, shape)
+    if causes:
+        return f"Kaggle refused the push: {'; '.join(causes)}."
     if KC.REASON in output:
         return "Kaggle refused the push; its reason is above."
-    return (f"Kaggle refused the push, and the Kaggle CLI does not print why (machine_shape {shape or 'none'} is one "
-            "Kaggle accepts): its reason is in the response body (skill kaggle-cli, 'A refused request').")
+    src = kernel_source(kdir) if kdir is not None else None
+    fine = ([f"the source {src[0]} is {_size(src[1])}, under 1 MB"] if src else []) + [
+        f"machine_shape {shape or 'none'} is one Kaggle accepts"]
+    return ("Kaggle refused the push, and the Kaggle CLI does not print why. The causes kgkit can check are ruled out ("
+            + "; ".join(fine) + "). Check each source in kernel-metadata.json next: a competition, dataset, kernel or "
+            "model that does not exist, or that this account cannot read. Kaggle's reason is in the response body "
+            "(skill kaggle-cli, 'A refused request').")
 
 
 def dropped_sources(output: str) -> dict[str, list[str]]:
@@ -1036,6 +1316,17 @@ def push(root: str | Path | None, kdir: str | Path, force: bool = False, hours: 
                          + ("" if acc in TPU_REWRITTEN else ". If Kaggle has added that shape, --force pushes it."))
     if problem:
         print(f"warning: {problem}; pushing it anyway (--force)")
+    big = source_problem(kdir)  # before any Kaggle call too
+    if big and not force:
+        built = (kdir / "kg-train.json").is_file()
+        raise SystemExit(f"refusing to push {kdir}: {big}. "
+                         + ("Rebuild it: `gpu build` prints its biggest parts. Data belongs in a dataset (--dataset), "
+                            "not in --include; a fold split too big to pack, in --split-from. " if built else
+                            "Move data, weights and images out of the source into a dataset, and read them from "
+                            "/kaggle/input. ")
+                         + "If Kaggle takes bigger sources now, --force pushes it.")
+    if big:
+        print(f"warning: {big}; pushing it anyway (--force)")
     limit = session_limit(res)
     if not 0 < hours <= limit:
         raise SystemExit(f"--hours must be in (0, {limit:g}] (Kaggle {res} session limit)")
@@ -1071,7 +1362,7 @@ def push(root: str | Path | None, kdir: str | Path, force: bool = False, hours: 
     m = re.search(r"version\s+(\d+)\s+successfully pushed", out, re.IGNORECASE)
     ok = r.returncode == 0 and m is not None
     if not ok:
-        hint = push_failure_hint(out, acc)
+        hint = push_failure_hint(out, acc, kdir)
         raise SystemExit("kernel push failed (see output above); nothing was started." + (f" {hint}" if hint else ""))
     rec = {"kernel": tm["kernel"], "version": int(m.group(1)), "name": tm["name"],
            "jobs": tm.get("jobs") or [tm["name"]], "accelerator": acc, "resource": res, "hours": hours,

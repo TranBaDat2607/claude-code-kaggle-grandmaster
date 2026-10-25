@@ -32,6 +32,9 @@ Unused quota expires at the weekly reset, so hours you don't spend are also lost
   fp32-bound or single-process jobs that cannot be split (verify by measuring step time). Kaggle answers a
   shape it does not take with a bare 400, e.g. `NvidiaTeslaT4Highmem`, which `kernels pull -m` can record for
   a past session. `kgkit gpu push` checks the shape before pushing (`--force` if Kaggle has added a new one).
+- **A kernel source of 1 MB or more is refused with a bare 400 too** (a script or a notebook, its outputs and
+  pasted images included). Data goes in datasets, not in the source. `kgkit gpu build` warns and names the biggest
+  parts of the script, and `kgkit gpu push` stops before sending one that big.
 - GPU sessions have few CPU cores (typically 4) and ~29 GB RAM. JPEG/DICOM decoding plus heavy CPU augmentation
   starves the GPUs.
 - An interactive GPU session burns quota while it is open, even when idle. Batch runs (`kaggle kernels
@@ -44,6 +47,7 @@ Unused quota expires at the weekly reset, so hours you don't spend are also lost
 ```
 quota / plan        ->  how many hours (GPU and TPU), until when, what to reserve, what holds a reservation
 build               ->  kernels/<name>-train/: runner + your src/ + kgkit + competition.json + data/folds.csv
+                        (packed column by column: 700k rows of id,fold take ~0.3 MB of the script, not 2.4 MB)
 push                ->  input-kernel and busy-session checks, quota check, -t cap, --accelerator, run log
                         (.kaggle-gm/gpu_runs.jsonl). Also any other kernel folder: `gpu push <dir> --hours H`
                         reads kernel-metadata.json (notebooks, inference and holdout-diagnostic kernels)
@@ -68,6 +72,14 @@ The runner links the attached inputs into `./data` and points `./artifacts` and 
 `/kaggle/working`. Your training command then runs unchanged, with the same relative paths and the same frozen
 folds (so `folds_hash` matches the local ledger). It runs one process per (job, fold), one per GPU,
 sets `KG_DEADLINE` so the templates checkpoint before the session ends, and assembles each finished job once.
+
+The frozen split reaches the session cell for cell. `build` packs each column of `data/folds.csv` in the cheapest
+exact form: an integer range costs nothing, the folds take a byte per row, other columns go as text, and a big text
+column (hash-like ids) is read from `data/train.csv` in the session when that file has it row for row. The runner
+writes the file back and checks it against yours; if they differ (a `data/train.csv` that is not the competition's),
+it stops before anything runs. If the split is too big even packed (a few million rows), put `data/folds.csv` in a
+private dataset (ask the user first) and build with `--split-from <owner>/<slug>`: the run links it from there,
+checked byte for byte.
 
 ```bash
 # full 5-fold run of a promoted idea: folds 0-4 spread over both T4s

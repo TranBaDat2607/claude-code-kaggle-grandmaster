@@ -9,8 +9,9 @@ were at that point, and a push whose folder cannot be told is reported, not logg
 the background has left `cwd` where it started, and Kaggle's reply comes after this hook: its pushes are logged
 as pending, their whole cap reserved, until `kgkit gpu status` / `gpu wait` see Kaggle run them. The Kaggle CLI
 exits 0 after several failed writes; say so when one shows up in the output. It prints a push Kaggle refused (a 4xx
-from SaveKernel) without Kaggle's reason: name the machine shape when Kaggle does not accept it. A push Kaggle accepted
-can still leave inputs out ("not valid dataset sources"): the run starts without them; say so."""
+from SaveKernel) without Kaggle's reason: name the machine shape when Kaggle does not accept it, and a source of 1 MB
+or more. A push Kaggle accepted can still leave inputs out ("not valid dataset sources"): the run starts without them;
+say so."""
 
 from __future__ import annotations
 
@@ -215,8 +216,8 @@ def log_gpu_push(root: Path, push: dict, target: tuple, version: int) -> str | N
 
 def push_reply_notes(payload: dict, pushes: list[dict]) -> list[str]:
     """Kaggle's answer to the command's pushes, where the Kaggle CLI leaves it unexplained: a push it refused (a 4xx
-    from SaveKernel, printed without Kaggle's reason), naming a machine shape Kaggle does not accept; and inputs it
-    left out of a push it accepted."""
+    from SaveKernel, printed without Kaggle's reason), naming a machine shape Kaggle does not accept and a source of
+    1 MB or more; and inputs it left out of a push it accepted."""
     if not pushes:
         return []
     text, notes = _response_text(payload), []
@@ -224,11 +225,11 @@ def push_reply_notes(payload: dict, pushes: list[dict]) -> list[str]:
         found = []
         for push in pushes:
             target = C.push_target(payload, push, ran=not _backgrounded(payload))
-            meta = target[1] if target else {}
+            folder, meta = target if target else (None, {})
             # the CLI sends --accelerator, else the folder's machine_shape
-            problem = C.G.machine_shape_problem(push.get("accelerator") or meta.get("machine_shape"))
-            if problem:
-                found.append(f"{meta.get('id') or 'the kernel'}: {problem}")
+            causes = C.G.refusal_causes(folder, push.get("accelerator") or meta.get("machine_shape"))
+            if causes:
+                found.append(f"{meta.get('id') or 'the kernel'}: {'; '.join(causes)}")
         notes.append("kaggle-grandmaster: Kaggle refused the kernel push (a 4xx from SaveKernel), so nothing was "
                      "started. " + ("; ".join(found) + "." if found else
                                     "The Kaggle CLI does not print Kaggle's reason: push the folder with `python -m "
