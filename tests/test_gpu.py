@@ -181,8 +181,10 @@ def test_build_kernel(gws):
     assert cfg["sources"] == [{"ref": "demo-comp", "kind": "competition", "dest": "data"},
                               {"ref": "tester/demo-512", "kind": "dataset", "dest": "data"}]
     names = zipfile.ZipFile(io.BytesIO(_decode(script, "PAYLOAD_B64"))).namelist()
-    assert "src/fake_train.py" in names and "kgkit/gpu.py" in names and "data/folds.csv" in names
-    assert ".kaggle-gm/competition.json" in names and "src/big.npy" not in names
+    assert "src/fake_train.py" in names and "kgkit/gpu.py" in names and "_kg/split/1" in names
+    assert cfg["split"]["rows"] == 40 and cfg["split"]["columns"] == [  # the split, packed: ids a range, folds a byte
+        {"range": [0, 1]}, {"codes": "_kg/split/1", "values": ["0", "1", "2", "3"]}]
+    assert "data/folds.csv" not in names and ".kaggle-gm/competition.json" in names and "src/big.npy" not in names
     assert not any(n.startswith("data/train") for n in names)
     with pytest.raises(SystemExit):
         G.build_kernel(gws, "fk", _cmd("fk"), hours=13, user="tester")

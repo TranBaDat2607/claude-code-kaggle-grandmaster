@@ -1233,10 +1233,10 @@ def cmd_gpu(a):
             internet=not a.no_internet, pip=a.pip, wheel_sources=a.wheels, assemble_cmd=a.assemble_cmd,
             post_cmds=a.post_cmd, prune_against=a.prune_against, prune_margin=a.prune_margin,
             prune_min_frac=a.prune_min_frac, slug=a.slug, public=a.public,
-            extra_jobs=[tuple(j) for j in a.extra_job or []], input_layout=a.input_layout)
+            extra_jobs=[tuple(j) for j in a.extra_job or []], input_layout=a.input_layout, split_from=a.split_from)
         tm = json.loads((kdir / "kg-train.json").read_text(encoding="utf-8"))
         print(f"wrote {kdir} (kernel {tm['kernel']}, jobs {tm['jobs']}, {tm['accelerator']}, cap {tm['hours']}h, "
-              f"folds {tm['folds']}, code bundle {tm['bundle_kb']} KB)")
+              f"folds {tm['folds']}, code bundle {tm['bundle_kb']} KB, script {tm['script_kb']} KB)")
         folders = {}
         for s in tm["inputs"]:
             folders.setdefault(s["dest"], []).append(s["ref"])
@@ -1244,7 +1244,10 @@ def cmd_gpu(a):
             print("inputs: " + "; ".join(f"{d}/ <- {', '.join(refs)}" for d, refs in folders.items()))
         if tm.get("prune"):
             print(f"pruning against {tm['prune']['baseline']} with margin {tm['prune']['margin']:.5f}")
-        print(f"next: smoke-test the command locally, then  python -m kgkit gpu push {kdir.as_posix()}")
+        if G.source_problem(kdir):
+            print("next: make room as the WARNING above says and build again (`gpu push` refuses this script)")
+        else:
+            print(f"next: smoke-test the command locally, then  python -m kgkit gpu push {kdir.as_posix()}")
     elif a.gpu_cmd == "push":
         rec = G.push(None, a.dir, force=a.force, hours=a.hours, check_sources=not a.no_source_check,
                      check_sessions=not a.no_session_check)
@@ -1669,6 +1672,9 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--model", nargs="*", default=[], help="Kaggle model sources")
     s.add_argument("--resume-from", nargs="*", default=[], help="previous training kernel(s) to resume from")
     s.add_argument("--include", nargs="*", default=["src"], help="code paths bundled into the kernel")
+    s.add_argument("--split-from", metavar="OWNER/SLUG",
+                   help="a dataset holding a copy of data/folds.csv, for a split too big to pack into the kernel "
+                        "(default: packed into it); the run links it from there, checked against yours")
     s.add_argument("--no-internet", action="store_true")
     s.add_argument("--pip", nargs="*", default=[], help="extra packages to pip install in the session")
     s.add_argument("--wheels", nargs="*", default=[], help="datasets holding wheels for offline pip installs")

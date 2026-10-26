@@ -4,6 +4,7 @@ credential guard and public notebooks' scores on record."""
 
 import ast
 import datetime as dt
+import hashlib
 import io
 import json
 import os
@@ -1208,7 +1209,9 @@ def test_push_refuses_a_machine_shape_kaggle_does_not_take_before_any_kaggle_cal
     ("NvidiaTeslaT4Highmem", SAVE_400, "Kaggle refused the push: machine_shape 'NvidiaTeslaT4Highmem' "),
     ("NvidiaTeslaT4", f"{SAVE_400}\nKaggle's reason: Invalid docker image (INVALID_ARGUMENT)",
      "Kaggle refused the push; its reason is above."),
-    ("NvidiaTeslaT4", SAVE_400, "the Kaggle CLI does not print why (machine_shape NvidiaTeslaT4 is one Kaggle accepts)"),
+    ("NvidiaTeslaT4", SAVE_400, "the Kaggle CLI does not print why. The causes kgkit can check are ruled out (the "
+     "source nb.ipynb is 0 KB, under 1 MB; machine_shape NvidiaTeslaT4 is one Kaggle accepts). Check each source in "
+     "kernel-metadata.json next: a competition, dataset, kernel or model that does not exist"),
     ("NvidiaTeslaT4", "Kernel push error: Maximum batch GPU session count of 2 reached", "2 batch GPU sessions")])
 def test_a_failed_push_says_why(ws, monkeypatch, shape, output, hint):
     k = _shaped_kernel(ws, shape)
@@ -1754,3 +1757,216 @@ def test_gpu_build_reads_the_folds_of_any_csv_writer(tmp_path):
     (root / "data" / "folds.csv").write_bytes(b"id,split\n0,a\n")
     with pytest.raises(SystemExit, match="data/folds.csv: no 'fold' column"):
         G.build_kernel(root, "q", "python src/train.py --folds {fold}", hours=1, user="me", accelerator="none")
+
+
+# ----------------------------------------------------------------------------- #47 kernel source size
+SPLIT_SHA = ("import hashlib\n"
+             "from kgkit import evalset\n"
+             "print('SEE data/folds.csv', hashlib.sha1(open('data/folds.csv', 'rb').read()).hexdigest())\n"
+             "print('SEE folds_hash', evalset.folds_file_hash('.'))\n")
+
+
+def _split_ws(tmp_path, ids, folds, train_ids=None):
+    """A workspace with data/train.csv (``train_ids``, default ``ids``) and data/folds.csv (``ids``, ``folds``), both
+    as pandas writes them on Linux; its command prints the sha1 of data/folds.csv and its folds_hash."""
+    root = tmp_path / "ws"
+    (root / "src").mkdir(parents=True)
+    (root / "data").mkdir()
+    S.CompetitionState(slug="demo-comp", metric="auc", id_col="id").save(root)
+    train_ids = ids if train_ids is None else train_ids
+    pd.DataFrame({"id": train_ids, "y": np.arange(len(train_ids)) % 2}).to_csv(root / "data" / "train.csv",
+                                                                               index=False, lineterminator="\n")
+    pd.DataFrame({"id": ids, "fold": folds}).to_csv(root / "data" / "folds.csv", index=False, lineterminator="\n")
+    (root / "src" / "split.py").write_text(SPLIT_SHA)
+    return root
+
+
+def _build_split(root, **build):
+    return G.build_kernel(root, "split", f'"{sys.executable}" src/split.py', hours=1, user="me", accelerator="none",
+                          **build)
+
+
+def _session(kdir, base, mounted):
+    """Run the kernel in ``kdir`` with ``mounted`` ({path under /kaggle/input: bytes}): (process, what its command
+    printed with SEE)."""
+    for rel, data in mounted.items():
+        (base / "input" / rel).parent.mkdir(parents=True, exist_ok=True)
+        (base / "input" / rel).write_bytes(data)
+    meta = json.loads((kdir / "kernel-metadata.json").read_text())
+    env = dict(os.environ, KAGGLE_INPUT=str(base / "input"), KAGGLE_WORKING=str(base / "working"),
+               KG_RUN_DIR=str(base / "run"), KG_FAKE_GPUS="0")
+    env.pop("PYTHONPATH", None)
+    r = subprocess.run([sys.executable, str(kdir / meta["code_file"])], env=env, capture_output=True, text=True,
+                       timeout=300)
+    return r, dict(l[len("[train] SEE "):].split(" ", 1) for l in r.stdout.splitlines() if l.startswith("[train] SEE "))
+
+
+def _sha1(path):
+    return hashlib.sha1(path.read_bytes()).hexdigest()
+
+
+def _hex_ids(rng, n):
+    return np.array([f"{x:016x}" for x in rng.integers(0, 2 ** 62, n)])
+
+
+def test_the_issues_split_goes_in_a_kernel_script_kaggle_takes(tmp_path):
+    """The issue: data/folds.csv as `kgkit folds` writes it (id,fold; 700k rows) went in the bundle as it was, and made
+    a 2.6 MB script that Kaggle refused with a bare 400. Packed, it takes a few hundred KB, and the session gets the
+    same file."""
+    n = 700_000
+    root = _split_ws(tmp_path, np.arange(n), np.random.default_rng(0).permutation(np.arange(n) % 5))
+    kdir = _build_split(root)
+    tm = json.loads((kdir / "kg-train.json").read_text())
+    assert tm["split"] == "700000 rows; id: a range, fold: 5 values" and tm["script_kb"] < 600
+    assert G.source_problem(kdir) is None
+    r, seen = _session(kdir, tmp_path / "k", {})
+    assert r.returncode == 0, r.stdout[-3000:] + r.stderr[-3000:]
+    assert "data/folds.csv written from the code bundle (700000 rows; id: a range, fold: 5 values)" in r.stdout
+    assert seen["data/folds.csv"] == _sha1(root / "data" / "folds.csv")  # byte for byte
+    assert seen["folds_hash"] == EV.folds_file_hash(root)  # remote ledger records stay on the local split
+
+
+def test_the_session_gets_the_cells_of_any_csv_writer(tmp_path, plugin_root):
+    """Every cell of the split comes back as it was, whatever wrote the file: so does its folds_hash. A file written
+    with LF line endings and no quotes its cells do not need (pandas on Linux) comes back byte for byte; any other is
+    written so, without a BOM or blank lines."""
+    (tmp_path / "data").mkdir()
+    R = _runner_module(plugin_root, tmp_path / "input")
+    folds = np.random.default_rng(1).permutation(np.arange(70_001) % 4)  # more rows than one batch
+    as_written = {"pandas on Linux", "folds written as floats", "no id column"}
+    for i, (what, data) in enumerate(_split_files(folds).items()):
+        R.RUN = tmp_path / f"run{i}"
+        split, members = G.pack_split(tmp_path, data)
+        for arc, blob in members.items():
+            (R.RUN / arc).parent.mkdir(parents=True, exist_ok=True)
+            (R.RUN / arc).write_bytes(blob)
+        (R.RUN / "data").mkdir(exist_ok=True)
+        assert R.write_split(split) is None, what
+        back = (R.RUN / "data" / "folds.csv").read_bytes()
+        assert list(G._split_rows(back)) == list(G._split_rows(data)), what
+        assert EV._content_digest(back) == EV._content_digest(data), what
+        assert (back == data) == (what in as_written), what
+
+
+def test_each_column_of_the_split_takes_its_cheapest_exact_form(tmp_path):
+    rng = np.random.default_rng(2)
+    n = 20_000
+    ids, folds = _hex_ids(rng, n), rng.permutation(np.arange(n) % 5)
+    (tmp_path / "data").mkdir()
+    pd.DataFrame({"image_id": ids, "y": folds % 2}).to_csv(tmp_path / "data" / "train.csv", index=False)
+
+    def forms(**cols):
+        split, _ = G.pack_split(tmp_path, pd.DataFrame(cols).to_csv(index=False).encode())
+        return [next(iter(c)) for c in split["columns"]]
+
+    assert forms(id=np.arange(5, 5 + 3 * n, 3), fold=folds) == ["range", "codes"]
+    assert forms(image_id=ids, fold=folds) == ["ref", "codes"]  # too big as text, and data/train.csv has it
+    assert forms(image_id=ids[::-1], fold=folds) == ["text", "codes"]  # not in data/train.csv's row order
+    assert forms(image_id=ids[:2000], fold=folds[:2000]) == ["text", "codes"]  # small: no file of the session needed
+    assert forms(id=[f"{i:06d}" for i in range(n)], fold=folds) == ["text", "codes"]  # not as Python writes integers
+    assert forms(fold=folds.astype(float), note=["x"] * n) == ["codes", "codes"]  # '3.0', a constant
+    # the file `kgkit folds` read comes first
+    (tmp_path / ".kaggle-gm").mkdir()
+    pd.DataFrame({"image_id": ids[::-1]}).to_csv(tmp_path / "data" / "train_clean.csv", index=False)
+    (tmp_path / ".kaggle-gm" / "folds_spec.json").write_text(json.dumps({"train": "data/train_clean.csv"}))
+    split, _ = G.pack_split(tmp_path, pd.DataFrame({"image_id": ids[::-1], "fold": folds}).to_csv(index=False).encode())
+    assert split["columns"][0] == {"ref": "data/train_clean.csv"}
+    # not a table all rows of which have every column, or not UTF-8: it goes in as it is
+    assert G.pack_split(tmp_path, b"id,fold\n0,1\n1\n") is None
+    assert G.pack_split(tmp_path, "id,fold\n\xe9,1\n".encode("latin-1")) is None
+
+
+def test_a_split_column_read_in_the_session_stops_the_run_where_it_differs(tmp_path, capsys):
+    rng = np.random.default_rng(3)
+    n = 20_000
+    ids = _hex_ids(rng, n)
+    root = _split_ws(tmp_path, ids, rng.permutation(np.arange(n) % 5))
+    kdir = _build_split(root)
+    assert ("note: the run reads data/folds.csv's column(s) 'id' from data/train.csv in the session (too big to pack as "
+            "text), and stops before training if they differ there from yours") in capsys.readouterr().out
+    train = (root / "data" / "train.csv").read_bytes()
+    r, seen = _session(kdir, tmp_path / "same", {"competitions/demo-comp/train.csv": train})
+    assert r.returncode == 0 and seen["data/folds.csv"] == _sha1(root / "data" / "folds.csv")
+    for what, data in [("other values here", train.replace(ids[7].encode(), b"0" * 16)),
+                       ("fewer rows here", train[:train.rindex(b"\n", 0, len(train) - 1) + 1]),
+                       ("more rows here", train + b"ffff,0\n")]:
+        r, seen = _session(kdir, tmp_path / what.replace(" ", "-"), {"competitions/demo-comp/train.csv": data})
+        assert r.returncode == 1 and not seen, what  # stopped before the command ran
+        assert ("ERROR: data/folds.csv not written: its column(s) 'id' are read from data/train.csv, which in this "
+                f"session is not the file on your machine ({what}). Rebuild once your data/train.csv is the session's "
+                "(the competition's), or put data/folds.csv in a private dataset and build with --split-from "
+                "<owner>/<slug>. Nothing was run.") in r.stdout
+    r, _ = _session(kdir, tmp_path / "none", {})
+    assert r.returncode == 1 and "its column 'id' is read from data/train.csv, which this session does not have" in r.stdout
+
+
+def test_a_split_too_big_to_pack_is_linked_from_a_dataset_and_checked(tmp_path, capsys):
+    """Hash-like ids in another row order than data/train.csv's go in as text: 100k of them make a script Kaggle
+    refuses. --split-from links data/folds.csv from a dataset instead, checked against yours."""
+    rng = np.random.default_rng(5)
+    n = 100_000
+    ids = _hex_ids(rng, n)
+    root = _split_ws(tmp_path, ids, rng.permutation(np.arange(n) % 5), train_ids=ids[::-1])
+    tm = json.loads((_build_split(root) / "kg-train.json").read_text())
+    out = capsys.readouterr().out
+    assert tm["script_kb"] > 1000 and "WARNING: the kernel script is 1." in out
+    assert "Its biggest parts: the fold split 1." in out and ", kgkit/ 2" in out
+    assert ("Its column(s) 'id' go in as text ('id' is not the column of data/train.csv row for row: written in "
+            "data/train.csv's row order with its values, it would be read from there in the session instead). Or put "
+            "data/folds.csv in a private dataset (`kaggle datasets create`) and build with --split-from "
+            "<owner>/<slug>; the run links it from there, checked against yours.") in out
+
+    kdir = _build_split(root, split_from="me/s47-folds", datasets=["thisray/s6e10-stack"])
+    meta, tm = (json.loads((kdir / f).read_text()) for f in ("kernel-metadata.json", "kg-train.json"))
+    assert meta["dataset_sources"] == ["thisray/s6e10-stack", "me/s47-folds"] and tm["script_kb"] < 400
+    assert tm["split"] == "linked from the dataset me/s47-folds" and "WARNING" not in capsys.readouterr().out
+    local = (root / "data" / "folds.csv").read_bytes()
+    r, seen = _session(kdir, tmp_path / "linked", {"datasets/me/s47-folds/folds_v2.csv": local,  # found by content
+                                                   "datasets/thisray/s6e10-stack/folds.csv": b"id,fold\nx,9\n"})
+    assert r.returncode == 0 and seen["data/folds.csv"] == _sha1(root / "data" / "folds.csv"), r.stdout[-3000:]
+    assert "data/folds.csv linked from the dataset me/s47-folds (the same bytes as yours)" in r.stdout
+    assert "data/folds.csv from thisray/s6e10-stack skipped: already taken by the fold split of me/s47-folds" in r.stdout
+    r, seen = _session(kdir, tmp_path / "other", {"datasets/me/s47-folds/folds.csv": local.replace(b"\n", b"\r\n")})
+    assert r.returncode == 1 and not seen
+    assert "ERROR: data/folds.csv not written: the dataset me/s47-folds has no copy of your data/folds.csv (" in r.stdout
+    r, _ = _session(kdir, tmp_path / "missing", {})
+    assert r.returncode == 1 and "the dataset me/s47-folds that holds it is not under " in r.stdout
+    with pytest.raises(SystemExit, match="--split-from folds: expected <owner>/<slug>"):
+        _build_split(root, split_from="folds")
+    (root / "data" / "folds.csv").unlink()
+    with pytest.raises(SystemExit, match="--split-from: there is no data/folds.csv here"):
+        _build_split(root, split_from="me/s47-folds")
+
+
+def test_a_kernel_source_of_1_mb_is_flagged_at_build_and_refused_before_any_kaggle_call(ws, monkeypatch, capsys,
+                                                                                         plugin_root):
+    import base64
+
+    from kgkit import cli
+
+    (ws / "src").mkdir()
+    (ws / "src" / "lookup.txt").write_bytes(base64.b64encode(np.random.default_rng(4).bytes(1_000_000)))
+    monkeypatch.chdir(ws)
+    cli.main(["gpu", "build", "--name", "big", "--cmd", "python src/x.py", "--hours", "1", "--user", "me"])
+    kdir = ws / "kernels" / "big-train"
+    out = capsys.readouterr().out
+    assert "WARNING: the kernel script is 1." in out and "Its biggest parts: src/ 1." in out
+    assert "Keep data out of --include and attach it as a dataset (--dataset)." in out
+    assert ", script 1" in out and "next: make room as the WARNING above says and build again" in out
+    assert "smoke-test the command locally" not in out
+    fake = FakeKaggle(_push_routes())
+    monkeypatch.setattr(G, "run_kaggle", fake)
+    with pytest.raises(SystemExit, match=r"refusing to push .*: its source big_train\.py is 1\.\d\d MB, and Kaggle "
+                                         r"refuses a kernel source of 1 MB or more with a bare 400 Bad Request\. "
+                                         r"Rebuild it: `gpu build` prints its biggest parts\. .* --force pushes it\.$"):
+        G.push(ws, kdir)
+    assert fake.calls == []  # no session, source or quota lookups first
+    monkeypatch.setattr(G, "run_kaggle", FakeKaggle([(["kernels", "push"], _cp("", 1, SAVE_400)), *_push_routes()]))
+    with pytest.raises(SystemExit, match=r"nothing was started\. Kaggle refused the push: its source big_train\.py is "):
+        G.push(ws, kdir, force=True)
+    assert "warning: its source big_train.py is 1." in capsys.readouterr().out
+    # a raw push of it: the hook names the size
+    ctx = _hook(plugin_root, "post_tool.py", "kaggle kernels push -p kernels/big-train", ws,
+                stdout=SAVE_400)["additionalContext"]
+    assert "Kaggle refused the kernel push (a 4xx from SaveKernel), so nothing was started." in ctx
+    assert "me/big-train: its source big_train.py is 1." in ctx and "1 MB or more with a bare 400" in ctx
