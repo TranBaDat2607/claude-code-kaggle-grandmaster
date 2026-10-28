@@ -8,6 +8,7 @@ import hashlib
 import io
 import json
 import os
+import re
 import subprocess
 import sys
 import zipfile
@@ -2745,3 +2746,232 @@ def test_session_output_says_why_kaggle_could_not_be_asked(outputs_sdk, tmp_path
         raise subprocess.TimeoutExpired(cmd, kw["timeout"])
     monkeypatch.setattr(G.subprocess, "run", timeout)
     assert G.session_output("me/k") == (None, False, "", "the request to Kaggle timed out")
+
+
+# ----------------------------------------------------------------------------- #56 collect of a kernel gpu build did not make
+def _kernel_output(files=None, log=None, status="COMPLETE"):
+    """Kaggle's side of `gpu collect me/k`: the status of its last session, and `kernels output` writing ``files``
+    ({name: text}) and the session log (k.log, as the CLI names it) into -p; --file-pattern picks the files."""
+    files = {"llr_train.npy": "a", "llr_test.npy": "b", "model.pt": "w"} if files is None else files
+
+    def output(args):
+        dest = Path(args[args.index("-p") + 1])
+        pat = re.compile(args[args.index("--file-pattern") + 1]) if "--file-pattern" in args else None
+        for name, text in files.items():
+            if pat is None or pat.search(name):
+                (dest / name).parent.mkdir(parents=True, exist_ok=True)
+                (dest / name).write_text(text)
+        if log is not None:
+            (dest / "k.log").write_text(log)
+        return _cp("")
+    return FakeKaggle([(["kernels", "status"], lambda a: _cp(f'me/k has status "KernelWorkerStatus.{status}"')),
+                       (["kernels", "output"], output)])
+
+
+def _hand_run(ws, ran_h=3.9, ended=None, **extra):
+    """The issue's run of me/k, a kernel folder written by hand: pushed with --hours 4, running for ``ran_h`` hours as
+    far as the log knows (``ended``: the log has seen it end by then)."""
+    t = G._now() - dt.timedelta(hours=ran_h + (ended or 0) + 0.05)
+    start = t + dt.timedelta(minutes=3)
+    rec = {"kernel": "me/k", "version": 3, "name": "k", "jobs": ["notebook"], "hours": 4.0, "resource": "GPU",
+           "accelerator": "NvidiaTeslaT4", "pushed_at": G._iso(t), "started_at": G._iso(start), "status": "running"}
+    if ended is not None:
+        rec.update(status="complete", finished_at=G._iso(start + dt.timedelta(hours=ran_h)))
+    G.log_run(ws, {**rec, **extra})
+
+
+def test_collect_of_a_hand_written_kernel_takes_its_outcome_from_kaggle_and_keeps_the_files(ws, monkeypatch, capsys):
+    """The issue's run: complete on Kaggle, no kg_run.json (only `gpu build` kernels have one), 0 hours accounted."""
+    _hand_run(ws)
+    fake = _kernel_output(log=_kaggle_log((1.5, "start\n"), (14000.0, "done\n")))
+    monkeypatch.setattr(G, "run_kaggle", fake)
+    res = G.collect(ws, "me/k")
+    out = capsys.readouterr().out
+    dest = ws / "data" / "ext" / "kout-k"
+    assert sorted(p.name for p in dest.iterdir()) == ["k.log", "llr_test.npy", "llr_train.npy"]  # weights stay out
+    assert not (ws / ".kaggle-gm" / "remote" / "k").exists()
+    assert res["status"] == "complete" and res["dir"] == "data/ext/kout-k" and res["report"] is None
+    assert "runner did not finish" not in out and "collected me/k v3: complete" in out
+    assert "GPU-hours (session wall time)" in out
+    assert "2 file(s) in data/ext/kout-k/: llr_test.npy, llr_train.npy (+ k.log, the session log)" in out
+    assert "weights (.pt" in out and "nothing went into the ledger" in out
+    assert "`python -m kgkit ledger import <name> data/ext/kout-k/<oof>.npy" in out and "ledger add" in out
+    run = G.runs(ws)[-1]
+    assert run["status"] == "complete" and run["gpu_hours"] == pytest.approx(3.9, abs=0.01)
+    assert run["outputs"] == "data/ext/kout-k" and run["collected_at"] and "stopped_by" not in run
+    table = G.run_table(ws)
+    assert "| complete |" in table and "files in data/ext/kout-k" in table and "total GPU-hours accounted: 3.90" in table
+    assert any(c[:2] == ["kernels", "output"] and "--file-pattern" in c for c in fake.calls)
+
+
+def test_collect_with_weights_downloads_them(ws, monkeypatch, capsys):
+    _hand_run(ws)
+    monkeypatch.setattr(G, "run_kaggle", _kernel_output())
+    G.collect(ws, "me/k", weights=True)
+    assert (ws / "data" / "ext" / "kout-k" / "model.pt").is_file() and "not downloaded" not in capsys.readouterr().out
+
+
+def test_an_error_entry_older_kgkit_left_is_charged_and_collect_corrects_it(ws, monkeypatch, capsys):
+    """`status: error` with started_at / finished_at and an empty used-hours column, as the issue's gpu log showed."""
+    _hand_run(ws, ended=0.0, status="error", collected_at=_ago(hours=0.5))
+    assert "total GPU-hours accounted: 3.90" in G.run_table(ws) and "| error |" in G.run_table(ws)
+    folder = ws / "elsewhere"
+    folder.mkdir()
+    (folder / "llr_train.npy").write_text("a")
+    monkeypatch.setattr(G, "run_kaggle", _kernel_output())
+    G.collect(ws, "me/k", from_dir=folder)
+    assert (folder / "llr_train.npy").is_file() and not (ws / "data").exists()  # a folder given is not moved
+    runs = G.runs(ws)
+    assert len(runs) == 1 and runs[0]["status"] == "complete" and runs[0]["gpu_hours"] == pytest.approx(3.9, abs=0.001)
+    assert runs[0]["outputs"] == folder.as_posix()
+    assert "1 file(s) in " + folder.as_posix() in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("kaggle, ran_h, hours, stopped", [("COMPLETE", 2.0, 2.0, False),
+                                                           ("CANCEL_ACKNOWLEDGED", 3.99, 3.99, True),
+                                                           ("ERROR", 1.0, 1.0, False)])
+def test_wait_accounts_the_session_hours_of_every_run_that_ends(ws, monkeypatch, kaggle, ran_h, hours, stopped):
+    """A cap-cancelled sibling, a finished run, a failed one: each leaves its session time in the run log."""
+    _cap_run(ws, ran_h)
+    _ends_as(monkeypatch, kaggle, log=_kaggle_log((1.5, "start\n"), (60.0, "x\n")))
+    G.wait(ws, "me/k")
+    run = G.runs(ws)[-1]
+    assert run["gpu_hours"] == pytest.approx(hours, abs=0.01) and ("stopped_by" in run) is stopped
+    assert f"{hours:.2f}" in G.run_table(ws).splitlines()[2]
+
+
+def test_the_session_log_raises_the_hours_of_a_run_first_seen_running_late(ws, monkeypatch):
+    _cap_run(ws, 0.5)  # `wait` first saw it running half an hour ago; its log runs to 3.95 h
+    _ends_as(monkeypatch, "CANCEL_ACKNOWLEDGED")
+    G.wait(ws, "me/k")
+    assert G.runs(ws)[-1]["gpu_hours"] == pytest.approx(14229.4 / 3600, abs=0.001)
+
+
+def test_a_run_seen_ended_long_after_charges_at_most_its_cap_and_a_queued_tpu_run_nothing(ws):
+    G.log_run(ws, {"kernel": "me/g", "version": 1, "hours": 4.0, "accelerator": "NvidiaTeslaT4", "resource": "GPU",
+                   "pushed_at": _ago(days=3), "status": "pushed"})
+    G.log_run(ws, {"kernel": "me/t", "version": 1, "hours": 9.0, "accelerator": "TpuV5E8", "resource": "TPU",
+                   "pushed_at": _ago(days=3), "status": "queued"})
+    G.note_status(ws, "me/g", "complete")
+    G.note_status(ws, "me/t", "cancelled")
+    g, t = G.runs(ws)
+    assert g["gpu_hours"] == 4.0 and "tpu_hours" not in t and G.used_hours(t) is None
+    assert "total TPU-hours" not in G.run_table(ws)
+
+
+def test_session_hours_run_from_the_start_to_the_end_the_log_saw_and_never_past_the_cap():
+    base = {"hours": 4.0, "resource": "GPU", "started_at": "2026-10-01T00:00:00Z", "finished_at": "2026-10-01T01:30:00Z"}
+    assert G.session_hours(base) == 1.5
+    assert G.session_hours(base, 3 * 3600) == 3.0 and G.session_hours(base, 2e5) == 4.0  # the log is a lower bound
+    assert G.session_hours({**base, "started_at": None, "pushed_at": "2026-10-01T01:00:00Z"}) == 0.5
+    assert G.session_hours({"resource": "TPU", "pushed_at": "2026-10-01T00:00:00Z", "hours": 9.0,
+                            "finished_at": "2026-10-02T00:00:00Z"}) is None  # a TPU job may have sat in the queue
+    assert G.session_hours({"resource": "TPU", "hours": 9.0}, 7200.0) == 2.0
+    assert G.used_hours({**base, "status": "complete"}) == 1.5 and G.used_hours({**base, "status": "running"}) is None
+    assert G.used_hours({**base, "status": "superseded"}) is None
+    assert G.used_hours({**base, "status": "error", "gpu_hours": 0.25}) == 0.25
+
+
+def test_a_run_noted_ended_counts_against_a_cached_quota_as_it_did_before(ws):
+    _quota(ws, gpu_left=18.0, fetched=_ago(hours=5))
+    _hand_run(ws, ran_h=4.4)
+    G.note_status(ws, "me/k", "complete")
+    (run, h), = G.unseen_spend(ws, G.cached_quota(ws))
+    assert run["gpu_hours"] == pytest.approx(4.0, abs=0.001) and h == pytest.approx(4.0, abs=0.01)
+
+
+def test_collect_of_a_gpu_build_kernel_without_a_report_is_an_error_with_the_log_as_text(ws, monkeypatch):
+    _hand_run(ws, ran_h=3.0, cmd="python src/train.py --folds {fold}", name="x", jobs=["x"])
+    fake = _kernel_output(log=_kaggle_log((1.5, "start\n"), (9000.0, "fold 0 epoch 3\n")), status="COMPLETE")
+    monkeypatch.setattr(G, "run_kaggle", fake)
+    with pytest.raises(SystemExit) as e:
+        G.collect(ws, "me/k")
+    msg = str(e.value)
+    assert "Kaggle reports complete, and its output has no kg_run.json: the runner did not finish" in msg
+    assert "fold 0 epoch 3" in msg and '"stream_name"' not in msg and "--resume-from me/k" in msg
+    run = G.runs(ws)[-1]
+    assert run["status"] == "error" and run["gpu_hours"] == pytest.approx(3.0, abs=0.01)
+    assert (ws / ".kaggle-gm" / "remote" / "k" / "llr_train.npy").is_file() and not (ws / "data").exists()
+
+
+def test_collect_refuses_a_kernel_that_is_still_running_before_downloading_anything(ws, monkeypatch):
+    _cap_run(ws, 1.0)
+    fake = _kernel_output(status="RUNNING")
+    monkeypatch.setattr(G, "run_kaggle", fake)
+    with pytest.raises(SystemExit, match="me/k is still running.*gpu wait me/k --collect"):
+        G.collect(ws, "me/k")
+    assert not any(c[:2] == ["kernels", "output"] for c in fake.calls)
+    run = G.runs(ws)[-1]
+    assert run["status"] == "running" and "gpu_hours" not in run and "collected_at" not in run
+
+
+def test_collect_of_a_kernel_not_in_the_run_log_moves_the_files_and_keeps_what_was_there(ws, monkeypatch, capsys):
+    dest = ws / "data" / "ext" / "kout-k"
+    dest.mkdir(parents=True)
+    (dest / "old.npy").write_text("older")
+    (dest / "llr_train.npy").write_text("older")
+    monkeypatch.setattr(G, "run_kaggle", _kernel_output())
+    G.collect(ws, "me/k")
+    out = capsys.readouterr().out
+    assert (dest / "llr_train.npy").read_text() == "a" and (dest / "old.npy").read_text() == "older"
+    assert "kept 1 file(s) already there that this version did not write: old.npy" in out
+    assert "no hours accounted: it is not in the run log" in out and G.runs(ws) == []
+
+
+def test_collect_says_when_kaggle_could_not_be_asked_and_leaves_a_run_in_flight_alone(ws, monkeypatch, capsys):
+    _cap_run(ws, 1.0)
+    monkeypatch.setattr(G, "run_kaggle", FakeKaggle([(["kernels", "output"], lambda a: _cp(""))]))  # status: no route
+    G.collect(ws, "me/k")
+    out = capsys.readouterr().out
+    assert "collected me/k v3: unknown (Kaggle could not be asked for its outcome)" in out
+    run = G.runs(ws)[-1]
+    assert run["status"] == "running" and "gpu_hours" not in run  # not ended as far as the log knows: not charged
+    assert "no hours accounted yet" in out
+
+
+def test_collect_of_a_failed_hand_written_kernel_shows_the_log_tail(ws, monkeypatch, capsys):
+    _hand_run(ws, ran_h=1.0)
+    monkeypatch.setattr(G, "run_kaggle", _kernel_output(files={}, log=_kaggle_log((1.5, "start\n"), (3600.0, "boom\n")),
+                                                        status="ERROR"))
+    G.collect(ws, "me/k")
+    out = capsys.readouterr().out
+    assert "collected me/k v3: error" in out and "0 file(s) in data/ext/kout-k/ (it saved none)" in out
+    assert "last log lines:" in out and "boom" in out and G.runs(ws)[-1]["status"] == "error"
+
+
+def test_stop_lines_offer_collect_for_every_kernel_and_name_the_folder_of_a_hand_written_one():
+    lines = G.stop_lines("me/k", {"hours": 2.0}, "cancelled", 7100.0, ["a.npy"], False, None)
+    assert "`python -m kgkit gpu collect me/k` (into data/ext/kout-k/, with the hours it used)" in lines[1]
+    built = G.stop_lines("me/k", {"hours": 2.0, "cmd": "x"}, "cancelled", 7100.0, ["a.npy"], False, None)
+    assert "`python -m kgkit gpu collect me/k`." in built[1] and "kout" not in built[1]
+    assert G.kernel_output_dir("me/k") == "data/ext/kout-k"
+    assert G.input_sources([], ["me/k"], "nested")[0]["dest"] == G.kernel_output_dir("me/k")
+
+
+def test_push_and_the_hook_say_where_collect_puts_a_hand_written_kernels_files(plugin_root, ws, monkeypatch, capsys):
+    from kgkit import cli
+
+    k = _notebook_kernel(ws)
+    monkeypatch.setattr(G, "run_kaggle", FakeKaggle(_push_routes()))
+    monkeypatch.chdir(ws)
+    cli.main(["gpu", "push", str(k), "--hours", "0.75"])
+    assert "then gpu collect (its files go to data/ext/kout-r6-gold58/)" in capsys.readouterr().out
+    G.release(ws, "me/r6-gold58")
+    pushed = "Kernel version 4 successfully pushed.  Please check progress at https://www.kaggle.com/code/me/r6-gold58\n"
+    ctx = _hook(plugin_root, "post_tool.py", "kaggle kernels push -p kernels/r6-gold58 -t 3600", ws,
+                stdout=pushed)["additionalContext"]
+    assert "gpu collect me/r6-gold58` then brings its outputs back and accounts its hours" in ctx
+    assert "any other kernel's files into data/ext/kout-r6-gold58/" in ctx
+
+
+def test_collect_of_a_folder_while_kaggle_still_runs_the_kernel_charges_nothing_yet(ws, monkeypatch, capsys):
+    _cap_run(ws, 1.0)
+    folder = ws / "earlier-output"
+    folder.mkdir()
+    (folder / "a.npy").write_text("a")
+    monkeypatch.setattr(G, "run_kaggle", _kernel_output(status="RUNNING"))
+    G.collect(ws, "me/k", from_dir=folder)  # the folder was given: an earlier version's output is not refused
+    out = capsys.readouterr().out
+    assert "collected me/k v3: running (Kaggle has it running)" in out and "no hours accounted yet" in out
+    run = G.runs(ws)[-1]
+    assert run["status"] == "running" and "gpu_hours" not in run

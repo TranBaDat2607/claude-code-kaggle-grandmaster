@@ -1328,8 +1328,8 @@ def cmd_gpu(a):
         built = rec.get("jobs") != ["notebook"]
         print(f"pushed {rec['kernel']} v{rec['version']} ({rec['accelerator']}, cap {rec['hours']}h). "
               + ("It runs without some of its inputs: see the WARNING above." if rec.get("dropped_sources") else
-                 f"Next: python -m kgkit gpu wait {rec['kernel']}  (run it in the background)"
-                 + (", then gpu collect" if built else "; `kaggle kernels output` for its files")))
+                 f"Next: python -m kgkit gpu wait {rec['kernel']}  (run it in the background), then gpu collect"
+                 + ("" if built else f" (its files go to {G.kernel_output_dir(rec['kernel'])}/)")))
     elif a.gpu_cmd == "status":
         root = G._root(None)
         confirmed = {r["kernel"] for r in G.confirm_pending(root, a.kernel or None)}
@@ -1797,7 +1797,9 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--interval", type=float, default=90)
     s.add_argument("--max-hours", type=float, default=13)
     s.add_argument("--collect", action="store_true", help="collect the outputs when it completes")
-    s = gs.add_parser("collect", help="download outputs, import ledger records, account GPU hours")
+    s = gs.add_parser("collect", help="bring a finished kernel's outputs back and account its GPU hours: a `gpu "
+                                      "build` kernel's results go into the ledger, any other kernel's files into "
+                                      "data/ext/kout-<slug>/")
     s.add_argument("kernel")
     s.add_argument("--from-dir", help="use an already-downloaded output folder")
     s.add_argument("--weights", action="store_true", help="also download model weights (*.pt etc.)")

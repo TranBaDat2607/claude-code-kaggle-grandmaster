@@ -13,6 +13,7 @@ so every accelerator-hour can be traced to the experiment it bought::
     python -m kgkit gpu push kernels/my-notebook --hours 1      # any kernel folder (kernel-metadata.json)
     python -m kgkit gpu wait <user>/cnx384-train                # poll until done (run in background)
     python -m kgkit gpu collect <user>/cnx384-train             # outputs -> ledger + GPU-hour log
+    python -m kgkit gpu collect <user>/my-notebook              # any kernel: files -> data/ext/kout-my-notebook/
     python -m kgkit gpu plan                                    # budget until the deadline
     python -m kgkit gpu release <user>/<kernel>                 # drop the reservation of a finished run
 
@@ -103,6 +104,8 @@ INPUT_LAYOUTS = {"flat": "into data/, beside the competition data",
 PENDING = "pending"
 ACTIVE = (PENDING, "pushed", "queued", "running")
 FINISHED = ("complete", "error", "cancelled")
+# The statuses of a run whose session is over (`collect` adds the last three): the runs whose hours count.
+ENDED = (*FINISHED, "collected", "partial", "failed")
 CLOCK_SKEW_S = 60  # this machine's clock vs Kaggle's, when a pending push is matched to the kernel's last run
 
 
@@ -412,6 +415,38 @@ def in_flight_hours(root: str | Path, quota: dict | None = None, resource: str =
     return sum(reserved_hours(r, fetched) for r in active_runs(root, resource))
 
 
+def hours_key(resource: str) -> str:
+    """The run-log field that holds the quota hours a run used."""
+    return "tpu_hours" if resource == "TPU" else "gpu_hours"
+
+
+def session_hours(r: dict, ran_s: float | None = None) -> float | None:
+    """The hours the session of a run that has ended lasted, as far as the log can tell: from when it was seen running
+    (a GPU or CPU run never seen running: from its push, as `spent_since` does) to when it was seen ended, and at least
+    ``ran_s``, how long its session log shows it ran. Never more than its cap: Kaggle kills the session there. None
+    when neither is known (a TPU run never seen running, and no log)."""
+    start = _parse_time(r.get("started_at"))
+    if start is None and run_resource(r) != "TPU":
+        start = _parse_time(r.get("pushed_at"))
+    end = _parse_time(r.get("finished_at")) or _parse_time(r.get("collected_at"))
+    h = max(0.0, (end - start).total_seconds() / 3600) if start is not None and end is not None else None
+    if ran_s is not None:
+        h = max(h or 0.0, ran_s / 3600)
+    if h is None:
+        return None
+    cap = float(r.get("hours") or 0)
+    return round(min(h, cap) if cap else h, 3)
+
+
+def used_hours(r: dict) -> float | None:
+    """The quota hours a run used: the figure recorded for it (`collect`, or the session time when the log saw it end),
+    else, for a run that ended without one (an older kgkit, or an entry closed by hand), its `session_hours`."""
+    v = r.get(hours_key(run_resource(r)))
+    if v is not None:
+        return float(v)
+    return session_hours(r) if r.get("status") in ENDED else None
+
+
 def spent_since(r: dict, t: dt.datetime) -> float:
     """The most quota hours a run that is no longer in flight may have spent after ``t``, the time of a quota
     snapshot: its measured hours (``collect``), else its cap, less what it ran before ``t``, and never more than the
@@ -425,7 +460,7 @@ def spent_since(r: dict, t: dt.datetime) -> float:
     window = (end - from_t).total_seconds() / 3600
     if pushed is None or window <= 0:
         return 0.0
-    measured = r.get("tpu_hours" if res == "TPU" else "gpu_hours")
+    measured = r.get(hours_key(res))
     if measured is None and start is None:
         return 0.0
     total = float(measured if measured is not None else r.get("hours") or session_limit(res))
@@ -682,7 +717,8 @@ def update_run(root: str | Path, kernel: str, version: int | None = None, **fiel
 
 def note_status(root: str | Path, kernel: str, status: str) -> None:
     """Record a status read from Kaggle. A finished status closes every active entry of the kernel (Kaggle
-    reports only the latest version, and earlier versions ended before it); a running one stamps
+    reports only the latest version, and earlier versions ended before it) and charges the latest run its session
+    time (`session_hours`), whether or not anything is ever collected from it; a running one stamps
     ``started_at`` the first time it is seen, so a queued TPU job is not charged for its queue time. A pending
     push takes neither: the status is still an earlier version's."""
     recs = runs(root)
@@ -694,6 +730,10 @@ def note_status(root: str | Path, kernel: str, status: str) -> None:
         for r in mine:
             if r.get("status") in ACTIVE:
                 r.update(status=status, finished_at=r.get("finished_at") or now)
+                key = hours_key(run_resource(r))
+                h = session_hours(r) if r is mine[-1] and r.get(key) is None else None
+                if h is not None:
+                    r[key] = h
     else:
         last = mine[-1]
         if last.get("status") in ACTIVE:
@@ -1035,6 +1075,12 @@ def script_size_warning(root: Path, size: int, payload: bytes, split: dict | Non
             f"bare 400 Bad Request (`gpu push` stops before sending it). Its biggest parts: {biggest}. {how}")
 
 
+def kernel_output_dir(kernel: str) -> str:
+    """Where a kernel's output files go, relative to the project root: the folder ``gpu build --input-layout nested``
+    mounts it in, and the one `collect` fills for a kernel that `gpu build` did not make."""
+    return f"data/ext/kout-{kernel.split('/')[-1]}"
+
+
 def input_sources(datasets: list[str], kernels: list[str], layout: str = "flat") -> list[dict]:
     """``--dataset`` / ``--kernel`` arguments as the runner's sources: {ref, kind, dest}, ``dest`` being the
     folder (relative to the project root, so the same locally) that the input's files appear in. An argument is
@@ -1054,7 +1100,7 @@ def input_sources(datasets: list[str], kernels: list[str], layout: str = "flat")
                                      f"project root (e.g. {ref}=data/ext/{ref.split('/')[1]})")
                 dest = p.as_posix()
             elif layout == "nested":
-                dest = f"data/ext/{'kout-' if kind == 'kernel' else ''}{ref.split('/')[1]}"
+                dest = kernel_output_dir(ref) if kind == "kernel" else f"data/ext/{ref.split('/')[1]}"
             else:
                 dest = "data"
             out.append({"ref": ref, "kind": kind, "dest": dest, "auto": not given})
@@ -1659,8 +1705,9 @@ def stop_lines(kernel: str, run: dict, status: str, ran_s: float | None, files: 
     elif files:
         names = (", ".join(files[:8]) + (f" and {len(files) - 8} more" if len(files) > 8 else "")
                  + (" (list cut off)" if more else ""))
-        out.append(f"files it saved before the stop, still downloadable: {names}. Get them with {get}"
-                   + (f" or `python -m kgkit gpu collect {kernel}`." if built else "."))
+        out.append(f"files it saved before the stop, still downloadable: {names}. Get them with {get} or "
+                   f"`python -m kgkit gpu collect {kernel}`"
+                   + ("." if built else f" (into {kernel_output_dir(kernel)}/, with the hours it used)."))
     else:
         out.append("it saved no files to /kaggle/working before the stop, so nothing is downloadable.")
     if built:
@@ -1696,8 +1743,12 @@ def report_stop(root: str | Path, kernel: str, status: str, text: str = "", watc
     known = [t for t in (max(times, default=None), watched_s) if t is not None]
     ran_s = max(known) if known else None
     run = latest_run(root, kernel)
-    if stopped_by_cap(run, status, ran_s):
-        update_run(root, kernel, run.get("version"), stopped_by="cap")
+    fields = {"stopped_by": "cap"} if stopped_by_cap(run, status, ran_s) else {}
+    key, h = hours_key(run_resource(run)), session_hours(run, ran_s)
+    if run and h is not None and h > (run.get(key) or 0):  # the log can show a run lasted longer than it was watched
+        fields[key] = h
+    if fields:
+        update_run(root, kernel, run.get("version"), **fields)
     lines = stop_lines(kernel, run, status, ran_s, files, more, why)
     for i, line in enumerate(lines):
         print((f"{kernel}: " if i == 0 else "  ") + line)
@@ -1778,7 +1829,7 @@ def import_ledger(root: Path, out: Path, report: dict, kernel: str, version: int
         existing = [json.loads(l) for l in lp.read_text(encoding="utf-8").splitlines() if l.strip()]
     seen = {(r.get("remote") or {}).get("key") for r in existing}
     gpu_h = round(report.get("elapsed_s", 0) / 3600, 3)
-    hours_key = "tpu_hours" if report_resource(report) == "TPU" else "gpu_hours"
+    used_key = hours_key(report_resource(report))
     imported = []
     for rec in report.get("ledger", []):
         key = f"{report.get('build_id') or kernel}:{rec['id']}"
@@ -1802,10 +1853,10 @@ def import_ledger(root: Path, out: Path, report: dict, kernel: str, version: int
             else:
                 rec["submission"] = None
         rec.update(id=new_id, git_commit=report.get("git_commit"), git_dirty=report.get("git_dirty"),
-                   **{hours_key: gpu_h},
+                   **{used_key: gpu_h},
                    remote={"key": key, "kernel": kernel, "version": version, "remote_id": old_id,
                            "accelerator": report.get("accelerator"), "gpus": report.get("gpus"),
-                           hours_key: gpu_h, "gpu_util": report.get("gpu_util")})
+                           used_key: gpu_h, "gpu_util": report.get("gpu_util")})
         lp.parent.mkdir(parents=True, exist_ok=True)
         with lp.open("a", encoding="utf-8") as f:
             f.write(json.dumps(rec) + "\n")
@@ -1901,12 +1952,140 @@ def diagnose(report: dict) -> list[str]:
     return out
 
 
+def _status_of(kernel: str) -> str:
+    try:
+        return kernel_status(kernel)[0]
+    except (OSError, subprocess.SubprocessError):
+        return "unknown"
+
+
+def _move_tree(src: Path, dst: Path) -> list[str]:
+    """Move the files under ``src`` to ``dst`` (replacing a file of the same name), then ``src`` itself away; the moved
+    files' paths relative to ``dst``."""
+    moved = []
+    for p in sorted(src.rglob("*")):
+        if p.is_file():
+            rel = p.relative_to(src)
+            q = dst / rel
+            q.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                os.replace(p, q)
+            except OSError:  # another disk
+                shutil.copy2(p, q)
+                p.unlink()
+            moved.append(rel.as_posix())
+    shutil.rmtree(src, ignore_errors=True)
+    return moved
+
+
+def _session_log(out: Path, kslug: str) -> list[dict]:
+    """The entries of the session log that `kaggle kernels output` writes as <slug>.log beside the output files."""
+    p = out / f"{kslug}.log"
+    try:
+        return log_entries(p.read_text(encoding="utf-8", errors="replace")) if p.is_file() else []
+    except OSError:
+        return []
+
+
+def _raw_log_tail(out: Path, n: int) -> list[str]:
+    """The last ``n`` lines of the first *.log in ``out``, when the session log is not the JSON `log_entries` reads."""
+    for p in sorted(out.glob("*.log")):
+        return p.read_text(encoding="utf-8", errors="replace").splitlines()[-n:]
+    return []
+
+
+def _collect_without_report(root: Path, kernel: str, out: Path, status: str | None, staged: bool,
+                            weights: bool) -> dict:
+    """`collect` of an output with no kg_run.json, which only the runner of a `gpu build` kernel writes. The outcome is
+    what Kaggle reports (``status``, asked here when None) and the hours are the session's (the run log, and the
+    session log's last time). A `gpu build` kernel whose runner did not finish is an error. Any other kernel just has
+    files: the ones downloaded to ``out`` (``staged``) move to ``kernel_output_dir``, to be read like any input, and
+    nothing reaches the ledger, as no kg-train.json says which experiment a file belongs to."""
+    kslug = kernel.split("/")[-1]
+    if status is None:
+        status = _status_of(kernel)
+    if status in FINISHED:
+        note_status(root, kernel, status)  # older still-open entries of this kernel ended before this output
+    run = latest_run(root, kernel)
+    entries = _session_log(out, kslug)
+    ran_s = max((e["time"] for e in entries if isinstance(e.get("time"), (int, float))), default=None)
+    key, res = hours_key(run_resource(run)), run_resource(run)
+    fields = {"collected_at": _iso(_now())}
+    if run.get("status") in ENDED:  # an entry still in flight is not charged a session that may not be over
+        h = session_hours(run, ran_s)
+        if h is not None and h > (run.get(key) or 0):
+            fields[key] = h
+    if stopped_by_cap(run, status, ran_s):
+        fields["stopped_by"] = "cap"
+    used = fields.get(key, run.get(key))
+    if run.get("cmd"):
+        fields["status"] = status if status in ("error", "cancelled") else "error"
+        update_run(root, kernel, run.get("version"), **fields)
+        raise SystemExit(f"{kernel}: Kaggle reports {status}, and its output has no kg_run.json: the runner did not "
+                         "finish. Last log lines:\n" + "\n".join(log_tail(entries, 40) if entries else
+                                                                  _raw_log_tail(out, 40))
+                         + f"\nWhat it saved is in {out}; `gpu build ... --resume-from {kernel}` continues the folds "
+                         "that finished or have a checkpoint."
+                         + (f" {used:.2f} {res}-hours accounted." if used is not None else ""))
+    if staged:
+        where = kernel_output_dir(kernel)
+        dest = root / where
+        before = {p.relative_to(dest).as_posix() for p in dest.rglob("*") if p.is_file()} if dest.is_dir() else set()
+        files = _move_tree(out, dest)
+        kept = sorted(before - set(files))
+    else:
+        where, kept = out.as_posix(), []
+        files = sorted(p.relative_to(out).as_posix() for p in out.rglob("*") if p.is_file())
+    if status in FINISHED:
+        fields["status"] = status
+    if run:
+        update_run(root, kernel, run.get("version"), outputs=where, **fields)
+    if used is not None:
+        hours = f", {used:.2f} {res}-hours (session wall time)"
+    elif not run:
+        hours = ", no hours accounted: it is not in the run log (`gpu log`), so its accelerator is unknown"
+    else:
+        hours = ", no hours accounted yet: the run log does not have it ended and the session log shows no time"
+    saved = [f for f in files if f != f"{kslug}.log"]  # the session log comes with them, but the kernel did not save it
+    outcome = ("" if status in FINISHED else " (Kaggle could not be asked for its outcome)" if status == "unknown"
+               else f" (Kaggle has it {status})")
+    lines = [f"collected {kernel}" + (f" v{run['version']}" if run.get("version") else "") + f": {status}" + outcome
+             + (f", stopped by its {float(run['hours']):g}h cap" if fields.get("stopped_by") == "cap" else "") + hours,
+             f"  {len(saved)} file(s) in {where}/"
+             + (": " + ", ".join(saved[:8]) + (f" and {len(saved) - 8} more" if len(saved) > 8 else "") if saved
+                else " (it saved none)")
+             + (f" (+ {kslug}.log, the session log)" if len(saved) < len(files) else "")]
+    if kept:
+        lines.append(f"  kept {len(kept)} file(s) already there that this version did not write: "
+                     + ", ".join(kept[:8]) + (f" and {len(kept) - 8} more" if len(kept) > 8 else ""))
+    if staged and not weights:
+        lines.append("  weights (.pt .pth .bin .ckpt .safetensors) are not downloaded; --weights gets them")
+    if status == "error" and entries:
+        lines += ["  last log lines:"] + ["    " + l for l in log_tail(entries, 15)]
+    lines.append("  nothing went into the ledger: no kg-train.json says which experiment a file belongs to. OOF "
+                 f"predictions: `python -m kgkit ledger import <name> {where}/<oof>.npy --test {where}/<test>.npy`; "
+                 "a score only: `python -m kgkit ledger add <name> <cv> <notes>`.")
+    summary = "\n".join(lines)
+    print(summary)
+    return {"report": None, "imported": [], "status": status, "files": files, "dir": where, "summary": summary}
+
+
 def collect(root: str | Path | None, kernel: str, from_dir: str | Path | None = None, weights: bool = False,
             version: int | None = None) -> dict:
+    """Bring the output of ``kernel`` back and account the hours its session used. A kernel that `gpu build` made
+    reports through its runner (kg_run.json): its experiments go into the ledger and its artifacts into the project.
+    For any other kernel the outcome is Kaggle's status and its files go to ``kernel_output_dir``
+    (`_collect_without_report`). ``from_dir``: an output folder downloaded already. A kernel still queued or running
+    is not collected."""
     root = _root(root)
     confirm_pending(root, [kernel])  # a push from a background command that Kaggle ran is the run collected here
     kslug = kernel.split("/")[-1]
+    kstatus = None  # what Kaggle reports for the kernel; `status` below is the runner's account of its jobs
     if from_dir is None:
+        kstatus = _status_of(kernel)
+        if kstatus in ("queued", "running"):
+            raise SystemExit(f"{kernel} is still {kstatus}: what it has output so far is an earlier version's, or "
+                             f"partial. `python -m kgkit gpu wait {kernel} --collect` collects when it ends.")
         out = root / S.STATE_DIR / "remote" / kslug
         if out.exists():
             shutil.rmtree(out)
@@ -1921,30 +2100,27 @@ def collect(root: str | Path | None, kernel: str, from_dir: str | Path | None = 
         out = Path(from_dir)
     rp = out / "kg_run.json"
     if not rp.is_file():
-        update_run(root, kernel, status="error", collected_at=_iso(_now()))
-        logs = sorted(out.glob("*.log"))
-        tail = logs[0].read_text(encoding="utf-8", errors="replace").splitlines()[-40:] if logs else []
-        raise SystemExit("no kg_run.json in the kernel output: the runner did not finish. Last log lines:\n"
-                         + "\n".join(tail))
+        return _collect_without_report(root, kernel, out, kstatus, from_dir is None, weights)
     report = json.loads(rp.read_text(encoding="utf-8"))
     jobs = report.get("jobs", [])
     for j in jobs:
         if (out / "artifacts" / j["name"]).is_dir():
             _merge_tree(out / "artifacts" / j["name"], root / "artifacts" / j["name"])
-    note_status(root, kernel, "complete")  # older still-open entries of this kernel ended before this output
+    # older still-open entries of this kernel ended before this output
+    note_status(root, kernel, kstatus if kstatus in FINISHED else "complete")
     # a push still pending is not on Kaggle yet: this output is an earlier version's
     run = latest_run(root, kernel)
     version = version or run.get("version")
     imported = import_ledger(root, out, report, kernel, version)
     gpu_h = round(report.get("elapsed_s", 0) / 3600, 3)
     res = report_resource(report)
-    hours_key = "tpu_hours" if res == "TPU" else "gpu_hours"
+    used_key = hours_key(res)
     by_name = {r["name"]: r for r in imported}
     status = ("complete" if jobs and all(j["complete"] for j in jobs)
               else "partial" if any(j["folds_done"] for j in jobs) else "failed")
     fold_scores = {j["name"]: {k: s.get("best") for k, s in j["fold_status"].items() if s.get("best") is not None}
                    for j in jobs}
-    fields = dict(status="collected" if status == "complete" else status, **{hours_key: gpu_h},
+    fields = dict(status="collected" if status == "complete" else status, **{used_key: gpu_h},
                   collected_at=_iso(_now()), fold_scores=fold_scores,
                   folds_done={j["name"]: j["folds_done"] for j in jobs},
                   exp_ids=[r["id"] for r in imported] or run.get("exp_ids"),
@@ -1997,16 +2173,18 @@ def run_table(root: str | Path | None = None, n: int = 20) -> str:
         elif r.get("fold_scores"):
             res = "; ".join(f"{n} " + ", ".join(f"f{k}:{v:.4f}" for k, v in sorted(fs.items()))
                             for n, fs in r["fold_scores"].items() if fs)
-        used_h = r.get("tpu_hours") if r.get("tpu_hours") is not None else r.get("gpu_hours")
+        elif r.get("outputs"):
+            res = f"files in {r['outputs']}"
+        used_h = used_hours(r)
         used = f"{used_h:.2f}" if used_h is not None else ""
         lines.append(f"| {r.get('kernel', '').split('/')[-1]} | {r.get('version') or ''} | "
                      f"{', '.join(r.get('jobs') or [r.get('name') or ''])} | "
                      f"{(r.get('accelerator') or '').replace('NvidiaTesla', '')} | {r.get('hours')} | {used} | "
                      f"{r.get('folds')} | {r.get('status')}{' (cap)' if r.get('stopped_by') == 'cap' else ''} | {res} |")
     every = runs(root)
-    total = sum(r.get("gpu_hours") or 0 for r in every if run_resource(r) == "GPU")
+    total = sum(used_hours(r) or 0 for r in every if run_resource(r) == "GPU")
     lines.append(f"\ntotal GPU-hours accounted: {total:.2f}")
-    tpu = sum(r.get("tpu_hours") or 0 for r in every)
+    tpu = sum(used_hours(r) or 0 for r in every if run_resource(r) == "TPU")
     if tpu:
         lines.append(f"total TPU-hours accounted: {tpu:.2f} (separate quota)")
     return "\n".join(lines)
