@@ -211,8 +211,9 @@ def log_gpu_push(root: Path, push: dict, target: tuple, version: int) -> str | N
             + (", a hard stop: Kaggle kills the session at it and keeps only the files already written"
                if push.get("timeout") else ": no -t, so the full session limit is reserved") + f").{queue} Poll "
             f"with `python -m kgkit gpu wait {kernel}` in the background (not a tight loop); it releases the "
-            f"reservation when the run ends. For kgkit-built training kernels then run `python -m kgkit gpu "
-            f"collect {kernel}`.")
+            f"reservation when the run ends. `python -m kgkit gpu collect {kernel}` then brings its outputs back "
+            f"and accounts its hours: a kgkit-built kernel's results go into the ledger, any other kernel's files into "
+            f"{C.G.kernel_output_dir(kernel)}/.")
 
 
 def push_reply_notes(payload: dict, pushes: list[dict]) -> list[str]:

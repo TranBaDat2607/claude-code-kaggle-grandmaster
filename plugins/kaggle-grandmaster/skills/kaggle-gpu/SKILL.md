@@ -62,10 +62,13 @@ push                ->  input-kernel and busy-session checks, quota check, -t ca
                         reads kernel-metadata.json (notebooks, inference and holdout-diagnostic kernels)
 wait                ->  polls every 90 s; on cancelled/error prints the log tail, says whether the --hours cap
                         stopped it, and lists the files the session saved (still downloadable with
-                        `kaggle kernels output`)   (run it in the background)
+                        `gpu collect`)   (run it in the background)
 status              ->  re-checks every run still marked in flight; finished ones free their hours
 collect             ->  outputs (no weights by default) -> ledger import, artefacts, GPU/TPU-hour accounting,
-                        diagnostics (idle GPU, input-bound, deadline hit, pruned)
+                        diagnostics (idle GPU, input-bound, deadline hit, pruned). For a kernel `gpu build` did
+                        not make (no kg_run.json): Kaggle's status is the outcome, the files go to
+                        data/ext/kout-<slug>/, the session's hours are accounted, the ledger is yours
+                        (`ledger import` / `ledger add`)
 release <kernel>    ->  drop a reservation by hand (a run that was deleted or never started)
 cancel <kernel>     ->  how to stop it: running = website "Stop session"; queued = only `kaggle kernels
                         delete` frees the slot (irreversible: ask the user)
@@ -197,7 +200,7 @@ python -m kgkit gpu build --name stack --hours 2 --accelerator none --input-layo
 | GPU util < 60 % | input-bound: pre-resize, uint8, GPU augmentation, fewer CPU transforms, `persistent_workers` |
 | too short to diagnose | a smoke/dev run (< 20 min) is mostly start-up; judge throughput on a longer run |
 | deadline hit | `--resume-from`; next time raise `--hours` or lower epochs/res |
-| stopped by the `--hours` cap (`cancelled`, log ends at the cap) | `kaggle kernels output` for what it saved; re-push with a margin (~1.3-1.5x the runtime) and save the model before the long phase. Same cap again stops it at the same point |
+| stopped by the `--hours` cap (`cancelled`, log ends at the cap) | `gpu collect <kernel>` for what it saved; re-push with a margin (~1.3-1.5x the runtime) and save the model before the long phase. Same cap again stops it at the same point |
 | pruned | discard or change the idea materially; don't re-run it unchanged |
 | fold failed | read the log tail; reproduce with `--smoke` locally before re-pushing |
 

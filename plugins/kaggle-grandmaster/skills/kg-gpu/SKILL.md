@@ -55,7 +55,10 @@ skill's table says. A run that was deleted or never started: `gpu release <kerne
 
 ## Other kernels (notebooks, inference, holdout diagnostics)
 `gpu push <kernel-dir> --hours <cap>` works on any folder with `kernel-metadata.json`: same quota,
-input and session checks, `-t` cap and run log. Collect its files with `kaggle kernels output`.
+input and session checks, `-t` cap and run log. `gpu collect <kernel>` brings its files back to
+`data/ext/kout-<slug>/` (the folder `--input-layout nested` mounts a kernel output at), takes the outcome from
+Kaggle's status (complete / error / cancelled) and accounts the session's hours; nothing goes into the ledger (no
+`kg-train.json` maps files to experiments), so log OOFs with `ledger import` or a score with `ledger add`.
 The cap is a hard kill (no runner stops the script first): set it to ~1.3-1.5x the measured runtime, and make
 sure the kernel saves its model before a long inference phase. If a cap stops it, `gpu wait` says so and lists the
 files it saved; a re-push with the same cap warns.
