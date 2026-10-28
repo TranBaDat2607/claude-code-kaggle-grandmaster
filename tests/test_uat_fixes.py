@@ -2495,9 +2495,253 @@ def test_final_says_why_kaggle_could_not_be_asked(tmp_path, monkeypatch, capsys,
     assert FN.live("demo") == (None, "the request to Kaggle timed out")
 
 
-def test_submissions_child_imports_only_the_standard_library_at_import_time(plugin_root):
-    """It runs under the Kaggle CLI's interpreter, which may have nothing else installed."""
-    tree = ast.parse((plugin_root / "kgkit" / "kaggle_submissions.py").read_text(encoding="utf-8"))
+@pytest.mark.parametrize("child", ["kaggle_submissions.py", "kaggle_outputs.py"])
+def test_sdk_children_import_only_the_standard_library_at_import_time(plugin_root, child):
+    """They run under the Kaggle CLI's interpreter, which may have nothing else installed."""
+    tree = ast.parse((plugin_root / "kgkit" / child).read_text(encoding="utf-8"))
     mods = {a.name.split(".")[0] for n in tree.body if isinstance(n, ast.Import) for a in n.names}
     mods |= {n.module.split(".")[0] for n in tree.body if isinstance(n, ast.ImportFrom) and n.level == 0}
     assert mods <= set(sys.stdlib_module_names) | {"__future__"}, mods
+
+
+# ----------------------------------------------------------------------------- #55 the --hours cap is a hard kill
+def _kaggle_log(*lines):
+    """A session log as `kaggle kernels logs` prints it: a JSON array, one entry per line, `time` in seconds."""
+    return "[" + "\n,".join(json.dumps({"stream_name": "stdout", "time": t, "data": d}) for t, d in lines) + "\n]"
+
+
+CAP_LOG = _kaggle_log((1.5, "start\n"), (12903.5, "[ 214.9 min] test: 102656/299844 rows  ETA 33.9 min\n"),
+                      (14229.4, "[ 237.0 min] test: 230656/299844 rows  ETA 11.9 min\n"))  # the issue's run
+
+
+def _cap_run(ws, ran_h, hours=4.0, **extra):
+    """me/k as `wait` finds it: running for ``ran_h`` hours of a cap of ``hours``."""
+    t = G._iso(G._now() - dt.timedelta(hours=ran_h))
+    G.log_run(ws, {"kernel": "me/k", "version": 3, "hours": hours, "accelerator": "NvidiaTeslaT4", "resource": "GPU",
+                   "pushed_at": t, "started_at": t, "status": "running", **extra})
+
+
+def _ends_as(monkeypatch, status, log=CAP_LOG, files=("llr_train.npy",), more=False, why=None, extra_routes=()):
+    """Kaggle reports me/k running, then ``status`` (CANCEL_ACKNOWLEDGED...) after the first sleep; its session has
+    ``files`` and ``log`` (`session_output`)."""
+    state = {"status": "RUNNING"}
+    monkeypatch.setattr(G, "run_kaggle", FakeKaggle([
+        (["kernels", "status"], lambda a: _cp(f'me/k has status "KernelWorkerStatus.{state["status"]}"')),
+        *extra_routes]))
+    monkeypatch.setattr(G, "session_output", lambda kernel: (list(files) if files is not None else None, more, log, why))
+    monkeypatch.setattr(G, "time", SimpleNamespace(time=G.time.time, sleep=lambda s: state.update(status=status)))
+
+
+def test_log_entries_read_kaggles_log_and_a_cut_off_one():
+    entries = G.log_entries(CAP_LOG)
+    assert [e["time"] for e in entries] == [1.5, 12903.5, 14229.4]
+    assert G.log_tail(entries, 1) == ["[ 237.0 min] test: 230656/299844 rows  ETA 11.9 min"]
+    cut = CAP_LOG[:CAP_LOG.rindex("\n,")] + '\n,{"stream_name": "stdout", "ti'  # cut off in the middle of an entry
+    assert [e["time"] for e in G.log_entries(cut)] == [1.5, 12903.5]
+    assert G.log_entries("Traceback (most recent call last):\n  File x\n") == [] and G.log_entries("") == []
+    assert G.log_entries("[1, 2]") == []  # a JSON array, but not a log
+
+
+def test_wait_says_the_hours_cap_stopped_the_run_and_lists_what_it_saved(ws, monkeypatch, capsys):
+    """The issue's run: a 4 h cap killed it 171 s before the end of the log; `wait` said only 'cancelled'."""
+    _cap_run(ws, 3.99)
+    _ends_as(monkeypatch, "CANCEL_ACKNOWLEDGED")
+    assert G.wait(ws, "me/k") == "cancelled"
+    out = capsys.readouterr().out
+    assert "me/k: stopped by its --hours cap (4h): it ran at least 3.99h" in out and "hard kill" in out
+    assert "files it saved before the stop, still downloadable: llr_train.npy" in out
+    assert "`kaggle kernels output me/k -p <dir>`" in out and "save the model" in out
+    assert "test: 230656/299844 rows" in out and '"stream_name"' not in out  # the log's text, not its JSON
+    run = G.runs(ws)[-1]
+    assert run["status"] == "cancelled" and run["stopped_by"] == "cap"
+    assert "| cancelled (cap) |" in G.run_table(ws)
+
+
+def test_wait_bounds_a_silent_log_by_how_long_it_watched_the_run(ws, monkeypatch, capsys):
+    """A script that prints rarely leaves a log that ends hours before the kill: `wait` saw it running until then."""
+    _cap_run(ws, 3.99)
+    _ends_as(monkeypatch, "CANCEL_ACKNOWLEDGED", log=_kaggle_log((1.5, "start\n"), (3600.0, "epoch 1\n")))
+    G.wait(ws, "me/k")
+    assert "stopped by its --hours cap (4h): it ran at least 3.99h" in capsys.readouterr().out
+    assert G.runs(ws)[-1]["stopped_by"] == "cap"
+
+
+def test_wait_does_not_blame_the_cap_for_a_run_that_stopped_early(ws, monkeypatch, capsys):
+    _cap_run(ws, 1.2)
+    _ends_as(monkeypatch, "CANCEL_ACKNOWLEDGED", log=_kaggle_log((1.5, "start\n"), (4300.0, "epoch 3\n")))
+    G.wait(ws, "me/k")
+    out = capsys.readouterr().out
+    assert "ran at least 1.20h of its 4h cap; the cap does not look like the cause" in out and "stopped by" not in out
+    assert "llr_train.npy" in out  # the files a stopped run saved are listed whatever stopped it
+    assert "stopped_by" not in G.runs(ws)[-1]
+
+
+def test_wait_lists_the_files_of_a_failed_run_without_calling_it_capped(ws, monkeypatch, capsys):
+    _cap_run(ws, 3.99)
+    _ends_as(monkeypatch, "ERROR", files=("part.npy",))
+    assert G.wait(ws, "me/k") == "error"
+    out = capsys.readouterr().out
+    assert "stopped by" not in out and "part.npy" in out and "stopped_by" not in G.runs(ws)[-1]
+
+
+def test_wait_says_when_the_files_could_not_be_listed_and_reads_the_log_the_old_way(ws, monkeypatch, capsys):
+    _cap_run(ws, 3.99)
+    _ends_as(monkeypatch, "CANCEL_ACKNOWLEDGED", log="", files=None, why="not authenticated with the Kaggle API",
+             extra_routes=[(["kernels", "logs"], _cp(CAP_LOG))])
+    G.wait(ws, "me/k")
+    out = capsys.readouterr().out
+    assert "could not list the files it saved (not authenticated with the Kaggle API)" in out
+    assert "test: 230656/299844 rows" in out and "stopped by its --hours cap (4h)" in out
+
+
+def test_wait_names_the_resume_for_a_built_kernel_and_says_when_nothing_was_saved(ws, monkeypatch, capsys):
+    _cap_run(ws, 3.99, cmd="python src/train.py --folds {fold}", name="x", jobs=["x"])
+    _ends_as(monkeypatch, "CANCEL_ACKNOWLEDGED", files=())
+    G.wait(ws, "me/k")
+    out = capsys.readouterr().out
+    assert "it saved no files to /kaggle/working before the stop" in out
+    assert "`gpu build ... --resume-from me/k`" in out and "save the model" not in out
+
+
+def test_stop_lines_cut_a_long_file_list_and_name_a_raw_push_cap_by_its_flag():
+    run = {"hours": 2.0, "via": "kaggle-cli"}
+    lines = G.stop_lines("me/k", run, "cancelled", 7100.0, [f"f{i}.npy" for i in range(10)], True, None)
+    assert "stopped by its -t cap (2h)" in lines[0]
+    assert "f7.npy and 2 more (list cut off)" in lines[1] and "f8.npy" not in lines[1]
+    assert G.stopped_by_cap({"hours": 2.0}, "cancelled", 6599.0) is False  # more than 600 s short of the cap
+    assert G.stopped_by_cap({"hours": 2.0}, "cancelled", 6600.0) is True
+    assert G.stopped_by_cap({"hours": 0.5}, "cancelled", 1619.0) is False  # a short cap: 10% of it is the slack
+    assert G.stopped_by_cap({"hours": 0.5}, "cancelled", 1620.0) is True
+    assert G.stopped_by_cap({}, "cancelled", 9e9) is False  # no cap on record
+    assert G.stopped_by_cap({"hours": 2.0}, "error", 7200.0) is False
+
+
+def test_gpu_status_reports_a_run_that_ended_since_the_log_last_saw_it_once(ws, monkeypatch, capsys):
+    from kgkit import cli
+
+    _cap_run(ws, 3.99)
+    _ends_as(monkeypatch, "CANCEL_ACKNOWLEDGED")
+    monkeypatch.setattr(G, "time", SimpleNamespace(time=G.time.time, sleep=lambda s: None))
+    monkeypatch.setattr(G, "run_kaggle", FakeKaggle([(["kernels", "status"],
+                                                      _cp('me/k has status "KernelWorkerStatus.CANCEL_ACKNOWLEDGED"'))]))
+    monkeypatch.chdir(ws)
+    cli.main(["gpu", "status"])
+    out = capsys.readouterr().out
+    assert "me/k: cancelled" in out and "stopped by its --hours cap (4h)" in out and "llr_train.npy" in out
+    assert "test: 230656/299844 rows" not in out  # the log's tail is for `wait`
+    cli.main(["gpu", "status"])
+    assert "no active remote runs" in capsys.readouterr().out  # said once, when it turned cancelled
+
+
+def test_push_says_the_cap_is_a_hard_stop(ws, monkeypatch, capsys):
+    k = _notebook_kernel(ws)
+    monkeypatch.setattr(G, "run_kaggle", FakeKaggle(_push_routes()))
+    G.push(ws, k, hours=0.75)
+    out = capsys.readouterr().out
+    assert "note: the cap of 0.75h is a hard stop, not only a quota reservation" in out
+    assert "wherever the script is (status 'cancelled')" in out and "1.3-1.5x the measured runtime" in out
+    assert "no deadline of its own" in out and "the session limit is 12h" in out
+    built = G.cap_note(2.0, "GPU", True)
+    assert "The runner stops its jobs a few minutes before the cap" in built and "no deadline" not in built
+    assert "the session limit is 9h" in G.cap_note(2.0, "TPU", False)
+
+
+@pytest.mark.parametrize("hours, warns", [(0.75, True), (0.5, True), (1.5, False)])
+def test_push_warns_when_the_last_run_was_stopped_by_the_same_cap(ws, monkeypatch, capsys, hours, warns):
+    k = _notebook_kernel(ws)
+    G.log_run(ws, {"kernel": "me/r6-gold58", "version": 6, "hours": 0.75, "accelerator": "NvidiaTeslaT4",
+                   "pushed_at": G._iso(G._now() - dt.timedelta(hours=3)), "status": "cancelled", "stopped_by": "cap"})
+    monkeypatch.setattr(G, "run_kaggle", FakeKaggle(_push_routes()))
+    G.push(ws, k, hours=hours)
+    out = capsys.readouterr().out
+    assert ("the last run of me/r6-gold58 (v6) was stopped by its 0.75h cap and this push caps at "
+            f"{hours:g}h") in out if warns else "was stopped by its" not in out
+
+
+def test_the_hook_says_a_raw_push_cap_is_a_hard_stop(plugin_root, ws):
+    _notebook_kernel(ws)
+    pushed = "Kernel version 3 successfully pushed.  Please check progress at https://www.kaggle.com/code/me/r6-gold58\n"
+    ctx = _hook(plugin_root, "post_tool.py", "kaggle kernels push -p kernels/r6-gold58 -t 3600", ws,
+                stdout=pushed)["additionalContext"]
+    assert "(cap 1.0h of weekly quota, a hard stop: Kaggle kills the session at it and keeps only the files" in ctx
+    G.release(ws, "me/r6-gold58")
+    ctx = _hook(plugin_root, "post_tool.py", "kaggle kernels push -p kernels/r6-gold58",
+                ws, stdout=pushed.replace("version 3", "version 4"))["additionalContext"]
+    assert "no -t, so the full session limit is reserved" in ctx and "a hard stop" not in ctx
+
+
+# the child: Kaggle's list_kernel_session_output, behind a fake kaggle / kagglesdk
+def _fake_outputs_sdk(root):
+    """Just enough of kaggle and kagglesdk for kgkit.kaggle_outputs: me/k's session has three files over two pages
+    and a log; FAKE_ENDLESS makes every page one file with a next page; an authenticate() that is chatty and fails
+    with FAKE_NO_AUTH."""
+    files = {
+        "kaggle/__init__.py": "",
+        "kaggle/api/__init__.py": "",
+        "kaggle/api/kaggle_api_extended.py": textwrap.dedent("""\
+            import os
+            from types import SimpleNamespace as N
+            class Client:
+                def __enter__(self): return self
+                def __exit__(self, *a): return False
+                @property
+                def kernels(self): return N(kernels_api_client=self)
+                def list_kernel_session_output(self, r):
+                    assert (r.user_name, r.kernel_slug, r.page_size) == ('me', 'k', 200)
+                    if os.environ.get('FAKE_ENDLESS'):
+                        n = len(r.page_token)
+                        return N(files=[N(file_name=f'f{n}.bin')], log='L\\n', next_page_token=r.page_token + 'x')
+                    if r.page_token == '':
+                        return N(files=[N(file_name='a.npy'), N(file_name='b.npy')], log='LOG\\n', next_page_token='p2')
+                    assert r.page_token == 'p2'
+                    return N(files=[N(file_name='c.npy')], log='not read again', next_page_token='')
+            class KaggleApi:
+                def authenticate(self):
+                    if os.environ.get('FAKE_NO_AUTH'): raise SystemExit(1)
+                    print('Warning: outdated API version')
+                def build_kaggle_client(self): return Client()
+            """),
+        "kagglesdk/__init__.py": "",
+        "kagglesdk/kernels/__init__.py": "",
+        "kagglesdk/kernels/types/__init__.py": "",
+        "kagglesdk/kernels/types/kernels_api_service.py": "class ApiListKernelSessionOutputRequest:\n    page_token = ''\n",
+    }
+    for rel, text in files.items():
+        (root / rel).parent.mkdir(parents=True, exist_ok=True)
+        (root / rel).write_text(text)
+
+
+@pytest.fixture
+def outputs_sdk(tmp_path_factory, monkeypatch):
+    root = tmp_path_factory.mktemp("outputs_sdk")
+    _fake_outputs_sdk(root)
+    monkeypatch.setenv("PYTHONPATH", str(root))
+    monkeypatch.setenv("VERBOSE", "1")
+    monkeypatch.setattr(G, "kaggle_python", lambda: sys.executable)
+    return root
+
+
+def test_session_output_lists_every_page_and_takes_the_log_from_the_first(outputs_sdk):
+    assert G.session_output("me/k") == (["a.npy", "b.npy", "c.npy"], False, "LOG\n", None)
+
+
+def test_session_output_says_when_there_are_more_files_than_it_listed(outputs_sdk, monkeypatch):
+    monkeypatch.setenv("FAKE_ENDLESS", "1")
+    files, more, log, why = G.session_output("me/k")
+    assert files == [f"f{i}.bin" for i in range(5)] and more is True and why is None
+
+
+def test_session_output_says_why_kaggle_could_not_be_asked(outputs_sdk, tmp_path, monkeypatch):
+    monkeypatch.setenv("FAKE_NO_AUTH", "1")
+    files, more, log, why = G.session_output("me/k")
+    assert files is None and log == "" and "not authenticated with the Kaggle API" in why
+    nosdk = tmp_path / "nosdk"
+    (nosdk / "kaggle").mkdir(parents=True)
+    (nosdk / "kaggle" / "__init__.py").write_text("raise ImportError('no kaggle here')\n")
+    monkeypatch.setenv("PYTHONPATH", str(nosdk))
+    assert "no Kaggle SDK" in G.session_output("me/k")[3]
+
+    def timeout(cmd, **kw):
+        raise subprocess.TimeoutExpired(cmd, kw["timeout"])
+    monkeypatch.setattr(G.subprocess, "run", timeout)
+    assert G.session_output("me/k") == (None, False, "", "the request to Kaggle timed out")

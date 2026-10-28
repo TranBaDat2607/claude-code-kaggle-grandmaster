@@ -19,7 +19,9 @@ environment and produce a valid submission on the hidden test set.
 3. Write the inference script from `templates/inference_kernel.py`: reads test files dynamically,
    never hardcodes row counts, installs wheels with `--no-index`, loads models with
    `local_files_only`, tracks elapsed time with a safe fallback, frees memory between models,
-   asserts output validity, writes `/kaggle/working/submission.csv` (or the required format).
+   asserts output validity, writes `/kaggle/working/submission.csv` (or the required format). Whatever
+   takes long (a model fit, a scoring pass) saves its result to `/kaggle/working` as soon as it exists:
+   the push timeout is a hard kill, and only files already written survive it.
 4. Write `kernel-metadata.json` (`enable_internet: false`, `enable_gpu` per need with `machine_shape`
    `NvidiaTeslaT4` for 2x T4, competition + dataset + model sources; skill `kaggle-cli` lists the shapes a
    push takes). If the weights came from a remote training kernel (`kgkit gpu`), list
@@ -30,7 +32,10 @@ environment and produce a valid submission on the hidden test set.
    validation fold.
 6. Ask the user before creating/uploading datasets or pushing kernels (outward-facing actions),
    unless they have already authorised it. Then `kaggle datasets create/version`, `kaggle kernels
-   push`, poll `kaggle kernels status` every ~60s, and fetch logs/output on failure.
+   push` (`-t` = the measured runtime x 1.3-1.5, not a tight fit: Kaggle kills the session at it, and a run
+   that ends early is charged only the hours it ran), poll `kaggle kernels status` every ~60s, and fetch
+   logs/output on failure. A `cancelled` run near its `-t` was stopped by the cap, and the files it saved
+   are still downloadable (`kaggle kernels output`).
 
 ## Report
 Artefacts uploaded (dataset slugs + versions), kernel slug + version, measured runtime with

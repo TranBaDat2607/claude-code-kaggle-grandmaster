@@ -62,6 +62,11 @@ QUEUE_ALLOWANCE_H = {"GPU": 1.0, "TPU": 36.0, "CPU": 1.0}
 QUOTA_TRIES, QUOTA_RETRY_S = 2, 3.0
 # A run logged since a cached quota counts against it when it may have spent at least this many hours of it.
 UNSEEN_MIN_H = 0.01
+# The `-t` of a push is a hard kill: Kaggle ends the session at the cap, wherever the script is, and reports the run as
+# cancelled. A cancelled run that got within this many seconds of its cap (or this fraction of it, if that is less) was
+# stopped by it; the log's last line is up to one progress message earlier than the kill.
+CAP_SLACK_S, CAP_SLACK_FRAC = 600.0, 0.1
+OUTPUT_TIMEOUT = 180.0  # seconds for the request that lists a stopped session's files and log
 ACCELERATORS = {
     "NvidiaTeslaT4": "2x T4 16 GB (two GPUs per quota hour: run two folds in parallel)",
     "NvidiaTeslaP100": "1x P100 16 GB (one GPU; no Triton/torch.compile, sm_60)",
@@ -1507,6 +1512,12 @@ def push(root: str | Path | None, kdir: str | Path, force: bool = False, hours: 
                 print(f"warning: {res} budget checked against a cached quota, not a live one: {note}")
             print(f"{res} budget: run capped at {hours:.2f}h; {avail:.2f}h plannable -> "
                   f"{avail - hours:.2f}h left in the worst case")
+    prev = latest_run(root, tm["kernel"])
+    if prev.get("stopped_by") == "cap" and hours <= float(prev.get("hours") or 0):
+        print(f"warning: the last run of {tm['kernel']}" + (f" (v{prev['version']})" if prev.get("version") else "")
+              + f" was stopped by its {float(prev['hours']):g}h cap and this push caps at {hours:g}h: unless the "
+              "script got faster, it stops at the same point again. Raise --hours, or have the kernel save its "
+              "results earlier.")
     args = ["kernels", "push", "-p", str(kdir), "-t", str(int(hours * 3600))]
     if acc != "none":
         args += ["--accelerator", acc]
@@ -1522,6 +1533,7 @@ def push(root: str | Path | None, kdir: str | Path, force: bool = False, hours: 
            "jobs": tm.get("jobs") or [tm["name"]], "accelerator": acc, "resource": res, "hours": hours,
            "folds": tm.get("folds"), "cmd": tm.get("cmd"), "build_id": tm.get("build_id"), "prune": tm.get("prune"),
            "resume_from": tm.get("resume_from"), "pushed_at": _iso(_now()), "status": "pushed"}
+    print(cap_note(hours, res, bool(tm.get("cmd"))))
     dropped = [s for v in dropped_sources(out).values() for s in v]
     if dropped:
         rec["dropped_sources"] = dropped
@@ -1551,12 +1563,153 @@ def cancel_advice(kernel: str, status: str) -> str:
                                                          if status in FINISHED else "")
 
 
+def latest_run(root: str | Path, kernel: str) -> dict:
+    """The log entry of ``kernel``'s latest run ({} when there is none); a pending push is not a run yet."""
+    return next((r for r in reversed(runs(root)) if r.get("kernel") == kernel and r.get("status") != PENDING), {})
+
+
+def cap_note(hours: float, resource: str, built: bool) -> str:
+    """What a push's ``--hours`` (the ``-t`` of the push) does: it is a hard kill, not only a quota reservation."""
+    limit = session_limit(resource)
+    note = (f"note: the cap of {hours:g}h is a hard stop, not only a quota reservation: Kaggle kills the session at "
+            f"{hours:g}h wherever the script is (status 'cancelled') and keeps only the files already in "
+            "/kaggle/working. A run that ends early is charged only the hours it ran, so leave a margin: about "
+            f"1.3-1.5x the measured runtime (the session limit is {limit:g}h).")
+    if built:
+        return note + (" The runner stops its jobs a few minutes before the cap, with their checkpoints saved "
+                       "(`gpu build ... --resume-from <kernel>` continues them).")
+    return note + (" A kernel of your own has no deadline of its own: save the model before a long inference or "
+                   "scoring phase, so a stop costs that phase only.")
+
+
+def log_entries(text: str) -> list[dict]:
+    """The entries ``{stream_name, time, data}`` of a session log as ``kaggle kernels logs`` prints it (a JSON array,
+    ``time`` being seconds since the session started); [] when ``text`` is not one. A log cut off mid-way is read line
+    by line."""
+    text = text or ""
+    try:
+        rows = json.loads(text[text.find("["):]) if "[" in text else None
+    except ValueError:
+        rows = []
+        for line in text.splitlines():
+            try:
+                rows.append(json.loads(line.strip().lstrip("[,").rstrip(",]")))
+            except ValueError:
+                continue
+    return [r for r in rows if isinstance(r, dict) and "data" in r] if isinstance(rows, list) else []
+
+
+def log_tail(entries: list[dict], n: int = 60) -> list[str]:
+    """The last ``n`` lines of the text a session log's entries hold."""
+    return "".join(str(e.get("data") or "") for e in entries).splitlines()[-n:]
+
+
+def session_output(kernel: str, timeout: float = OUTPUT_TIMEOUT) -> tuple[list[str] | None, bool, str, str | None]:
+    """(file names, more files than listed, log text, None) of the last session of ``kernel``, without downloading
+    anything (`kgkit.kaggle_outputs`, in a child process); (None, False, '', why) when Kaggle could not be asked.
+    Never raises."""
+    try:
+        r = subprocess.run([kaggle_python() or sys.executable, "-m", "kgkit.kaggle_outputs"],
+                           input=json.dumps({"kernel": kernel, "max_pages": 5}), capture_output=True,
+                           encoding="utf-8", errors="replace", timeout=timeout, cwd=str(KGKIT_DIR.parent),
+                           env=safety.kaggle_env())
+    except subprocess.TimeoutExpired:
+        return None, False, "", "the request to Kaggle timed out"
+    except OSError as e:
+        return None, False, "", f"the request to Kaggle did not start: {e}"
+    try:
+        res = json.loads((r.stdout or "").strip().splitlines()[-1])
+        error, files = res.get("error"), [str(f) for f in res.get("files") or []]
+        more, log = bool(res.get("more")), str(res.get("log") or "")
+    except (ValueError, IndexError, TypeError, AttributeError):
+        tail = (r.stderr or r.stdout or "").strip().splitlines()
+        return None, False, "", ("the request to Kaggle failed" + (f": {safety.clean(tail[-1])[:300]}" if tail
+                                                                    else f" (exit {r.returncode})"))
+    if error:
+        return None, False, "", safety.clean(str(error))[:300]
+    return files, more, log, None
+
+
+def stopped_by_cap(run: dict, status: str, ran_s: float | None) -> bool:
+    """Whether a run that ended as ``status`` after at least ``ran_s`` seconds was killed by its cap."""
+    cap_s = float(run.get("hours") or 0) * 3600
+    return bool(status == "cancelled" and cap_s and ran_s is not None
+                and ran_s >= cap_s - min(CAP_SLACK_S, CAP_SLACK_FRAC * cap_s))
+
+
+def stop_lines(kernel: str, run: dict, status: str, ran_s: float | None, files: list[str] | None, more: bool,
+               why: str | None) -> list[str]:
+    """What to tell about a run that ended as ``cancelled`` or ``error``: whether its cap stopped it, the files it saved
+    before the end (Kaggle keeps them) and how to get them, and what to do next. ``ran_s``: how long it is known to
+    have run, at least; ``files`` None when they could not be listed (``why``)."""
+    cap_h = float(run.get("hours") or 0)
+    ran = f"{ran_s / 3600:.2f}h" if ran_s is not None else ""
+    built = bool(run.get("cmd"))
+    capped = stopped_by_cap(run, status, ran_s)
+    out = []
+    if capped:
+        what = "-t cap" if run.get("via") == "kaggle-cli" else "--hours cap"
+        out.append(f"stopped by its {what} ({cap_h:g}h): it ran at least {ran}. The cap is a hard kill - Kaggle ends "
+                   "the session there, wherever the script is - not only a quota reservation.")
+    elif ran and cap_h:
+        out.append(f"ran at least {ran} of its {cap_h:g}h cap; the cap does not look like the cause.")
+    get = f"`kaggle kernels output {kernel} -p <dir>` (--file-pattern <regex> picks files)"
+    if files is None:
+        out.append(f"could not list the files it saved ({why}); {get} downloads them.")
+    elif files:
+        names = (", ".join(files[:8]) + (f" and {len(files) - 8} more" if len(files) > 8 else "")
+                 + (" (list cut off)" if more else ""))
+        out.append(f"files it saved before the stop, still downloadable: {names}. Get them with {get}"
+                   + (f" or `python -m kgkit gpu collect {kernel}`." if built else "."))
+    else:
+        out.append("it saved no files to /kaggle/working before the stop, so nothing is downloadable.")
+    if built:
+        out.append(f"to continue: `gpu build ... --resume-from {kernel}` (finished folds are skipped, timed-out ones "
+                   "continue from their checkpoint).")
+    elif capped:
+        out.append("to run it again: a cap of about 1.3-1.5x the time it needs (a run that ends early is charged only "
+                   "the hours it ran, though the quota check reserves the whole cap while it runs), and have the "
+                   "kernel save the model, then the predictions, as soon as each exists, so a stop costs the last "
+                   "phase only.")
+    return out
+
+
+def report_stop(root: str | Path, kernel: str, status: str, text: str = "", watched_s: float | None = None,
+                tail: bool = True) -> None:
+    """Print what a run that ended as ``cancelled`` or ``error`` left (`stop_lines`): the status text, the log's
+    tail (``tail``), whether its cap stopped it (recorded on the run as ``stopped_by``) and the files it saved.
+    ``watched_s``: how long ``wait`` saw it run, which bounds a log that stops well before the end."""
+    if text:
+        print(text)
+    files, more, log, why = session_output(kernel)
+    if not log:
+        try:
+            log = run_kaggle(["kernels", "logs", kernel], timeout=300).stdout or ""
+        except (OSError, subprocess.SubprocessError):
+            pass
+    entries = log_entries(log)
+    if tail:
+        lines = log_tail(entries) if entries else log.splitlines()[-60:]
+        if lines:
+            print("\n".join(lines))
+    times = [e["time"] for e in entries if isinstance(e.get("time"), (int, float))]
+    known = [t for t in (max(times, default=None), watched_s) if t is not None]
+    ran_s = max(known) if known else None
+    run = latest_run(root, kernel)
+    if stopped_by_cap(run, status, ran_s):
+        update_run(root, kernel, run.get("version"), stopped_by="cap")
+    lines = stop_lines(kernel, run, status, ran_s, files, more, why)
+    for i, line in enumerate(lines):
+        print((f"{kernel}: " if i == 0 else "  ") + line)
+
+
 def wait(root: str | Path | None, kernel: str, interval: float = 60, max_hours: float = SESSION_LIMIT_H + 1) -> str:
     """Poll ``kernel`` until its run ends. A pending push is waited for first: until Kaggle runs it, the status
     Kaggle reports is an earlier version's."""
     root = _root(root)
     t_end = time.time() + max_hours * 3600
     last = None
+    seen_running = None  # when a poll last found it running: it ran at least until then
     while True:
         pend = next((r for r in runs(root) if r.get("kernel") == kernel and r.get("status") == PENDING), None)
         if pend is not None and confirm_pending(root, [kernel]):
@@ -1573,6 +1726,8 @@ def wait(root: str | Path | None, kernel: str, interval: float = 60, max_hours: 
                                                      "Kaggle)" if pend is not None else ""), flush=True)
             note_status(root, kernel, s)
             last = s
+        if s == "running":
+            seen_running = _now()
         if pend is not None and _stale(pend, _now()):
             print(f"no version of {kernel} has run on Kaggle since its push from a background command at "
                   f"{pend.get('pushed_at')}: that push most likely failed (read that command's output). "
@@ -1580,12 +1735,9 @@ def wait(root: str | Path | None, kernel: str, interval: float = 60, max_hours: 
             return s
         if s in FINISHED:
             if s != "complete":
-                print(text)
-                try:
-                    lg = run_kaggle(["kernels", "logs", kernel], timeout=300)
-                    print("\n".join(lg.stdout.splitlines()[-60:]))
-                except (OSError, subprocess.SubprocessError):
-                    pass
+                started = _parse_time(latest_run(root, kernel).get("started_at"))
+                watched = (seen_running - started).total_seconds() if seen_running and started else None
+                report_stop(root, kernel, s, text, watched)
             return s
         if time.time() > t_end:
             print("stopped waiting (max time reached); the kernel may still be running")
@@ -1781,7 +1933,7 @@ def collect(root: str | Path | None, kernel: str, from_dir: str | Path | None = 
             _merge_tree(out / "artifacts" / j["name"], root / "artifacts" / j["name"])
     note_status(root, kernel, "complete")  # older still-open entries of this kernel ended before this output
     # a push still pending is not on Kaggle yet: this output is an earlier version's
-    run = next((r for r in reversed(runs(root)) if r.get("kernel") == kernel and r.get("status") != PENDING), {})
+    run = latest_run(root, kernel)
     version = version or run.get("version")
     imported = import_ledger(root, out, report, kernel, version)
     gpu_h = round(report.get("elapsed_s", 0) / 3600, 3)
@@ -1850,7 +2002,7 @@ def run_table(root: str | Path | None = None, n: int = 20) -> str:
         lines.append(f"| {r.get('kernel', '').split('/')[-1]} | {r.get('version') or ''} | "
                      f"{', '.join(r.get('jobs') or [r.get('name') or ''])} | "
                      f"{(r.get('accelerator') or '').replace('NvidiaTesla', '')} | {r.get('hours')} | {used} | "
-                     f"{r.get('folds')} | {r.get('status')} | {res} |")
+                     f"{r.get('folds')} | {r.get('status')}{' (cap)' if r.get('stopped_by') == 'cap' else ''} | {res} |")
     every = runs(root)
     total = sum(r.get("gpu_hours") or 0 for r in every if run_resource(r) == "GPU")
     lines.append(f"\ntotal GPU-hours accounted: {total:.2f}")

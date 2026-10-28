@@ -17,9 +17,15 @@ Unused quota expires at the weekly reset, so hours you don't spend are also lost
   tried twice; when it still fails the report says `NOT LIVE`, why, and how old the cached value is, and counts the
   runs logged since against it (it cannot see sessions started elsewhere, such as the website or another machine:
   run `gpu quota` again before committing hours on a cached figure).
-- Per-session limit 12 h (GPU/CPU), 9 h (TPU). The push timeout `-t` caps a run below that, and a capped
-  run never burns more than its cap. A push without `-t` reserves the full session limit until the run is
+- Per-session limit 12 h (GPU/CPU), 9 h (TPU). The push timeout `-t` (`--hours`) caps a run below that, and a
+  capped run never burns more than its cap. A push without `-t` reserves the full session limit until the run is
   seen finished.
+- **`-t` is a hard kill, not only a quota reservation.** Kaggle ends the session at the cap wherever the script is
+  (status `CANCEL_ACKNOWLEDGED`, i.e. `cancelled`) and keeps only the files already in `/kaggle/working`. A run
+  that ends early is charged only the hours it ran, so a margin costs nothing: cap a kernel of your own at
+  ~1.3-1.5x its measured runtime. (Measured Oct 2026: a 2xT4 job capped at 4 h was killed 12 min before its test
+  scoring ended, with no model saved: the test predictions were lost.) `gpu build` kernels stop themselves a few
+  minutes before the cap with their checkpoints saved.
 - Batch sessions at once per account: **2 GPU, 1 TPU**, across all competitions. A push beyond that
   prints `Maximum batch GPU session count of 2 reached` and exits 0. `kgkit gpu push` checks your busy
   sessions first.
@@ -54,7 +60,9 @@ build               ->  kernels/<name>-train/: runner + your src/ + kgkit + comp
 push                ->  input-kernel and busy-session checks, quota check, -t cap, --accelerator, run log
                         (.kaggle-gm/gpu_runs.jsonl). Also any other kernel folder: `gpu push <dir> --hours H`
                         reads kernel-metadata.json (notebooks, inference and holdout-diagnostic kernels)
-wait                ->  polls every 90 s; prints the log tail on error   (run it in the background)
+wait                ->  polls every 90 s; on cancelled/error prints the log tail, says whether the --hours cap
+                        stopped it, and lists the files the session saved (still downloadable with
+                        `kaggle kernels output`)   (run it in the background)
 status              ->  re-checks every run still marked in flight; finished ones free their hours
 collect             ->  outputs (no weights by default) -> ledger import, artefacts, GPU/TPU-hour accounting,
                         diagnostics (idle GPU, input-bound, deadline hit, pruned)
@@ -95,6 +103,13 @@ python -m kgkit gpu wait me/cnx384-train --collect     # background
 Custom scripts work if they follow the contract: accept `--folds <k>` and `--assemble`, write
 `artifacts/<name>/fold<k>_oof.npy` (+ `_idx.npy`, `_test.npy`), and use `kgkit.budget.TrainBudget`
 for deadline, resume and pruning. The image and transformer templates already do all of this.
+
+A kernel of your own (`gpu push <dir> --hours H`) has no runner and no deadline: Kaggle kills it at H h (see
+section 1). So size H from a measured runtime with a margin, and write the kernel so that a kill costs one phase,
+not the run: save the model to `/kaggle/working` right after training, before a long inference or scoring phase;
+write predictions in chunks (or per fold) as they are made, so a restart can skip what exists; and print progress
+with the elapsed time and an ETA, so the log tail `gpu wait` prints shows where the kill came. When a cap does stop
+it, `gpu wait` says so and lists the files saved before the kill.
 
 Where the inputs go (match your local layout, so the command finds them):
 - `--input-layout flat` (the default): competition data, `--dataset` and `--kernel` contents side by side in `data/`.
@@ -182,6 +197,7 @@ python -m kgkit gpu build --name stack --hours 2 --accelerator none --input-layo
 | GPU util < 60 % | input-bound: pre-resize, uint8, GPU augmentation, fewer CPU transforms, `persistent_workers` |
 | too short to diagnose | a smoke/dev run (< 20 min) is mostly start-up; judge throughput on a longer run |
 | deadline hit | `--resume-from`; next time raise `--hours` or lower epochs/res |
+| stopped by the `--hours` cap (`cancelled`, log ends at the cap) | `kaggle kernels output` for what it saved; re-push with a margin (~1.3-1.5x the runtime) and save the model before the long phase. Same cap again stops it at the same point |
 | pruned | discard or change the idea materially; don't re-run it unchanged |
 | fold failed | read the log tail; reproduce with `--smoke` locally before re-pushing |
 

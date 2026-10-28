@@ -208,7 +208,8 @@ def log_gpu_push(root: Path, push: dict, target: tuple, version: int) -> str | N
     queue = (" TPU jobs usually wait 10-24h in the queue; `kaggle kernels logs` is empty until the session ends."
              if res == "TPU" else "")
     return (f"kaggle-grandmaster: {res} kernel {kernel} v{version} logged (cap {hours}h of weekly quota"
-            + ("" if push.get("timeout") else ": no -t, so the full session limit is reserved") + f").{queue} Poll "
+            + (", a hard stop: Kaggle kills the session at it and keeps only the files already written"
+               if push.get("timeout") else ": no -t, so the full session limit is reserved") + f").{queue} Poll "
             f"with `python -m kgkit gpu wait {kernel}` in the background (not a tight loop); it releases the "
             f"reservation when the run ends. For kgkit-built training kernels then run `python -m kgkit gpu "
             f"collect {kernel}`.")
