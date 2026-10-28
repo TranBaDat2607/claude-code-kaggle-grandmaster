@@ -1970,3 +1970,198 @@ def test_a_kernel_source_of_1_mb_is_flagged_at_build_and_refused_before_any_kagg
                 stdout=SAVE_400)["additionalContext"]
     assert "Kaggle refused the kernel push (a 4xx from SaveKernel), so nothing was started." in ctx
     assert "me/big-train: its source big_train.py is 1." in ctx and "1 MB or more with a bare 400" in ctx
+
+
+# ----------------------------------------------------------------------------- #53 cached quota
+CONN_ERR = ("Traceback (most recent call last):\n  File \"kaggle\", line 1, in <module>\n"
+            "requests.exceptions.ConnectionError: HTTPSConnectionPool(host='www.kaggle.com', port=443): Max retries "
+            "exceeded (Temporary failure in name resolution)")
+QUOTA_OK = json.dumps([{"resource": "GPU", "used": "14.55h", "remaining": "15.45h", "total": "30h",
+                        "refreshAt": "2099-01-03T00:00:00"}])
+
+
+def _ago(**delta):
+    return G._iso(G._now() - dt.timedelta(**delta))
+
+
+def _old_quota(root, days=3.0, gpu_left=18.38):
+    return _quota(root, gpu_left=gpu_left, fetched=_ago(days=days))
+
+
+def _flaky_quota(fails, out=QUOTA_OK, err=CONN_ERR):
+    """`kaggle quota` that fails ``fails`` times, then answers."""
+    calls = []
+
+    def route(args):
+        calls.append(args)
+        return _cp("", 1, err) if len(calls) <= fails else _cp(out)
+    route.calls = calls
+    return route
+
+
+@pytest.fixture
+def no_retry_wait(monkeypatch):
+    monkeypatch.setattr(G, "QUOTA_RETRY_S", 0)
+
+
+def test_quota_call_is_retried_once(ws, no_retry_wait, monkeypatch):
+    _old_quota(ws)
+    route = _flaky_quota(1)
+    monkeypatch.setattr(G, "run_kaggle", FakeKaggle([(["quota"], route)]))
+    txt = G.quota_report(ws)
+    assert len(route.calls) == 2  # the first call failed on the network, the second was live
+    assert "14.55h used, 15.45h of 30.00h left" in txt and "NOT LIVE" not in txt and "cached" not in txt
+    assert G.cached_quota(ws)["remaining_h"] == pytest.approx(15.45)
+
+
+def test_report_says_the_live_call_failed_why_and_how_old_the_cache_is(ws, no_retry_wait, monkeypatch):
+    _old_quota(ws, days=3.0)
+    route = _flaky_quota(9)
+    monkeypatch.setattr(G, "run_kaggle", FakeKaggle([(["quota"], route)]))
+    txt = G.quota_report(ws)
+    assert len(route.calls) == G.QUOTA_TRIES == 2
+    assert "NOT LIVE: `kaggle quota` failed twice (requests.exceptions.ConnectionError: HTTPSConnectionPool" in txt
+    assert "(Temporary failure in name resolution))" in txt and "Traceback" not in txt  # the exception, not its trace
+    assert "showing the cached value from " in txt and "(3.0 days old, may be stale)" in txt
+    G.quota_path(ws).unlink()
+    assert G.quota_report(ws).startswith("GPU quota unknown: `kaggle quota` failed twice (requests.exceptions.")
+    assert "and nothing is cached" in G.quota_report(ws)
+
+
+def test_cli_failure_is_one_line_with_kaggles_reason_first():
+    err = "401 Client Error: Unauthorized for url: https://x\nKaggle's reason: bad token (UNAUTHENTICATED)\n"
+    assert G._cli_failure(_cp("", 1, err)) == "Kaggle's reason: bad token (UNAUTHENTICATED)"
+    assert G._cli_failure(_cp("", 1, CONN_ERR)).startswith("requests.exceptions.ConnectionError: ")
+    assert G._cli_failure(_cp("", 3, "")) == "exit status 3"
+    assert len(G._cli_failure(_cp("", 1, "x" * 500))) == 200
+
+
+def test_quota_call_that_timed_out_or_listed_nothing(ws, no_retry_wait, monkeypatch):
+    calls = []
+
+    def hung(args, timeout=600):
+        calls.append(args)
+        raise subprocess.TimeoutExpired(args, timeout)
+    monkeypatch.setattr(G, "run_kaggle", hung)
+    assert G.live_quota(ws) == (None, "timed out after 60 s") and len(calls) == 1  # a hung network is not retried
+    monkeypatch.setattr(G, "run_kaggle", FakeKaggle([(["quota"], _cp("[]"))]))
+    assert G.live_quota(ws) == (None, "failed twice (no GPU row in its output)")
+    assert G.fetch_quota(ws) is None and not G.quota_path(ws).exists()
+
+
+def _runs_since_an_old_cache(ws):
+    """Runs of the log against a quota fetched 3 days ago (`_old_quota`): two spent some of it after that, three did not."""
+    G.log_run(ws, {"kernel": "u/a", "version": 1, "hours": 2.0, "gpu_hours": 1.5, "pushed_at": _ago(hours=48),
+                   "finished_at": _ago(hours=40), "collected_at": _ago(hours=40), "status": "collected"})
+    G.log_run(ws, {"kernel": "u/b", "version": 1, "hours": 2.0, "pushed_at": _ago(hours=30),
+                   "finished_at": _ago(hours=29.5), "status": "error"})  # capped at 2h, seen over 30 min after the push
+    G.log_run(ws, {"kernel": "u/c", "version": 1, "hours": 4.0, "pushed_at": _ago(hours=80),
+                   "finished_at": _ago(hours=75), "status": "complete"})  # over before the snapshot
+    G.log_run(ws, {"kernel": "u/p", "version": None, "hours": 12.0, "pushed_at": _ago(hours=60),
+                   "status": G.PENDING})  # never confirmed: its reservation has lapsed
+    G.log_run(ws, {"kernel": "u/t", "version": 1, "hours": 8.0, "accelerator": "TpuV5E8", "resource": "TPU",
+                   "pushed_at": _ago(hours=20), "finished_at": _ago(hours=10), "tpu_hours": 3.0,
+                   "status": "collected"})
+
+
+def test_runs_logged_after_a_cached_quota_count_against_it(ws):
+    _old_quota(ws, days=3.0, gpu_left=18.38)
+    _runs_since_an_old_cache(ws)
+    q = G.cached_quota(ws)
+    assert [(r["kernel"], round(h, 1)) for r, h in G.unseen_spend(ws, q)] == [("u/a", 1.5), ("u/b", 0.5)]
+    assert [(r["kernel"], round(h, 1)) for r, h in G.unseen_spend(ws, G.cached_quota(ws, "TPU"), "TPU")] == [("u/t", 3.0)]
+    assert G.available_hours(ws) == pytest.approx(18.38 - 2.0, abs=0.01)
+    assert G.available_hours(ws, resource="TPU") == pytest.approx(20.0 - 3.0, abs=0.01)
+    assert B.gpu_budget(ws) == pytest.approx(18.38 - 2.0, abs=0.02)  # the backlog ranks against the same figure
+    line = G.quota_line(ws)
+    assert "3.0 days ago" in line and "16.4h plannable of 30h" in line
+    assert "(2 run(s) logged since then counted, 2.0h)" in line
+    txt = G.quota_report(ws, refresh=False)
+    assert "cached: " in txt and "2 run(s) logged since then count 2.00h against it" in txt
+    assert "logged since then: u/a v1 ~1.50h, u/b v1 ~0.50h" in txt and "-> 16.38h plannable" in txt
+    # the same runs against a quota fetched just now: it saw them all
+    _quota(ws, gpu_left=18.38)
+    assert G.unseen_spend(ws, G.cached_quota(ws)) == [] and G.available_hours(ws) == pytest.approx(18.38)
+    assert "logged since" not in G.quota_line(ws)
+
+
+def test_a_cache_from_a_week_that_ended_counts_a_full_week_from_its_latest_reset(ws):
+    now = G._now()
+    _quota(ws, gpu_left=2.0, fetched=_ago(days=12), refresh=_ago(days=10))  # reset 10 days ago, and again 3 days ago
+    q = G.cached_quota(ws)
+    assert q["stale_reset"] and q["remaining_h"] == 30.0 and q["used_h"] == 0.0
+    assert abs((G._parse_time(q["reset_at"]) - (now - dt.timedelta(days=3))).total_seconds()) < 5
+    assert 95 < (G._parse_time(q["refresh_at"]) - now).total_seconds() / 3600 < 97  # the next one, in the future
+    assert G.resets_before(q, S.load(ws).deadline) == 3  # the two that passed are not weeks still to come
+    G.log_run(ws, {"kernel": "u/new", "version": 1, "hours": 3.0, "gpu_hours": 2.5, "pushed_at": _ago(days=2),
+                   "finished_at": _ago(days=2, hours=-3), "status": "collected"})
+    G.log_run(ws, {"kernel": "u/last-week", "version": 1, "hours": 4.0, "gpu_hours": 4.0, "pushed_at": _ago(days=5),
+                   "finished_at": _ago(days=4, hours=22), "status": "collected"})  # before the reset: not this week's
+    assert G.available_hours(ws) == pytest.approx(30.0 - 2.5, abs=0.01)
+    txt = G.quota_report(ws, refresh=False)
+    assert "(in -" not in txt and "the weekly reset at " in txt and "a full week is counted" in txt
+    assert "a full week is counted" in G.quota_line(ws)
+
+
+def test_push_on_a_cached_quota_counts_runs_logged_since_and_says_so(ws, no_retry_wait, monkeypatch, capsys):
+    k = _notebook_kernel(ws)
+    _old_quota(ws, days=3.0, gpu_left=3.0)
+    G.log_run(ws, {"kernel": "me/earlier", "version": 1, "hours": 3.0, "gpu_hours": 2.5, "pushed_at": _ago(hours=48),
+                   "finished_at": _ago(hours=44), "status": "collected"})
+    fake = FakeKaggle([(["quota"], _cp("", 1, CONN_ERR)), *_push_routes()])
+    monkeypatch.setattr(G, "run_kaggle", fake)
+    with pytest.raises(SystemExit, match=r"only 0\.50h of GPU quota is plannable before 2099-01-03T00:00:00Z \(a cached "
+                                         r"quota: `kaggle quota` failed twice \(requests\.exceptions\.ConnectionError"):
+        G.push(ws, k, hours=1)
+    assert not any(c[:2] == ["kernels", "push"] for c in fake.calls)
+    rec = G.push(ws, k, hours=0.4)  # fits what is left of the cached figure: pushed, with the warning
+    out = capsys.readouterr().out
+    assert rec["version"] == 7
+    assert "warning: GPU budget checked against a cached quota, not a live one: `kaggle quota` failed twice" in out
+    assert "(3.0 days old, may be stale); 1 run(s) logged since then count 2.50h against it" in out
+    assert "GPU budget: run capped at 0.40h; 0.50h plannable -> 0.10h left in the worst case" in out
+    G.quota_path(ws).unlink()
+    G.push(ws, k, hours=0.4)
+    assert "warning: GPU quota unknown - `kaggle quota` failed twice (" in capsys.readouterr().out
+
+
+def test_plan_on_a_cached_quota_says_so_once_and_plans_from_the_corrected_figure(ws, no_retry_wait, monkeypatch):
+    _old_quota(ws, days=3.0, gpu_left=18.38)
+    G.log_run(ws, {"kernel": "u/a", "version": 1, "hours": 2.0, "gpu_hours": 2.0, "pushed_at": _ago(hours=48),
+                   "finished_at": _ago(hours=44), "status": "collected"})
+    monkeypatch.setattr(G, "run_kaggle", FakeKaggle([(["quota"], _cp("", 1, CONN_ERR))]))
+    txt = G.plan(ws)
+    assert txt.count("NOT LIVE") == 1 and "failed twice" in txt and "3.0 days old" in txt
+    assert "16.4h now" in txt  # 18.38h on the cache, less the 2h of the run logged since
+    live = G.plan(ws, refresh=False)  # --cached: no API call, still says how old
+    assert "cached: " in live and "not checked live" in live and "NOT LIVE" not in live
+
+
+def test_gpu_quota_cli_after_a_failed_live_call(ws, no_retry_wait, monkeypatch, capsys):
+    from kgkit import cli
+
+    _old_quota(ws, days=3.0)
+    fake = FakeKaggle([(["quota"], _cp("", 1, CONN_ERR))])
+    monkeypatch.setattr(G, "run_kaggle", fake)
+    monkeypatch.chdir(ws)
+    cli.main(["gpu", "quota"])
+    out = capsys.readouterr().out
+    assert "18.38h of 30.00h left" in out and "NOT LIVE: `kaggle quota` failed twice (" in out
+    assert "(3.0 days old, may be stale)" in out and len(fake.calls) == 2
+    fake.calls.clear()
+    cli.main(["gpu", "quota", "--cached"])
+    out = capsys.readouterr().out
+    assert "cached: " in out and "(3.0 days old; not checked live)" in out and "NOT LIVE" not in out
+    assert fake.calls == []
+
+
+def test_push_hook_names_the_age_of_the_cached_quota_and_the_runs_logged_since(plugin_root, ws):
+    base = _two_gpu_kernels(ws)
+    _old_quota(ws, days=3.0, gpu_left=3.0)
+    G.log_run(ws, {"kernel": "me/earlier", "version": 1, "hours": 3.0, "gpu_hours": 2.5, "pushed_at": _ago(hours=48),
+                   "finished_at": _ago(hours=44), "status": "collected"})
+    out = _hook(plugin_root, "pre_tool.py", f"kaggle kernels push -p {(base / 'vj-gold58').as_posix()} -t 7200", ws)
+    assert out["permissionDecision"] == "ask"
+    why = out["permissionDecisionReason"]
+    assert "only 0.50h of GPU quota is plannable" in why  # 3h on the cache, less the 2.5h logged since
+    assert "quota cached " in why and "3.0 days ago, 1 run(s) logged since then counted, resets 2099-01-03" in why

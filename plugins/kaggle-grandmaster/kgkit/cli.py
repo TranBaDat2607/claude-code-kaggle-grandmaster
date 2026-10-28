@@ -1645,8 +1645,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     g = sub.add_parser("gpu", help="train on Kaggle GPUs/TPUs: quota, remote kernels, accelerator-hour accounting")
     gs = g.add_subparsers(dest="gpu_cmd", required=True)
-    s = gs.add_parser("quota", help="live weekly GPU quota and reset countdown")
-    s.add_argument("--cached", action="store_true", help="do not call the API; use the cached value")
+    s = gs.add_parser("quota", help="weekly GPU/TPU quota and reset countdown: live, or the cached value with its age "
+                                    "when the API call fails twice")
+    s.add_argument("--cached", action="store_true", help="do not call the API; use the cached value (shows its age)")
     s = gs.add_parser("plan", help="GPU-hour budget until the deadline")
     s.add_argument("--cached", action="store_true")
     s.add_argument("--deadline", help="YYYY-MM-DD (default: competition.json)")
