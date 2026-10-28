@@ -1345,9 +1345,12 @@ def cmd_gpu(a):
                       f"`kgkit gpu release {k}`)")
                 continue
             s, text = G.kernel_status(k)
+            was_active = G.latest_run(root, k).get("status") in G.ACTIVE
             G.note_status(root, k, s)
             print(f"{k}: {s}" + (f"  ({text})" if s == "unknown" else "")
                   + ("  (its push from a background command went through)" if k in confirmed else ""))
+            if was_active and s in ("cancelled", "error"):  # it ended since the log last saw it: say how
+                G.report_stop(root, k, s, tail=False)
         if not kernels:
             print("no active remote runs")
     elif a.gpu_cmd == "release":
@@ -1741,7 +1744,9 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--name", required=True, help="experiment name (artifacts/<name>/ fold files)")
     s.add_argument("--cmd", required=True,
                    help='training command run from the project root; "{fold}" = one fold per process/GPU')
-    s.add_argument("--hours", type=float, required=True, help="session cap (~1.3x the estimate, <= 12; TPU <= 9)")
+    s.add_argument("--hours", type=float, required=True,
+                   help="session cap (~1.3x the estimate, <= 12; TPU <= 9): a hard stop, Kaggle kills the session at "
+                        "it (the runner stops its jobs a few minutes before, checkpoints saved)")
     s.add_argument("--folds", type=int, nargs="+", help="folds to run (default: all in data/folds.csv)")
     s.add_argument("--accelerator", default="NvidiaTeslaT4",
                    help="NvidiaTeslaT4 (2x T4) | NvidiaTeslaP100 | TpuV5E8 (TPU quota, one process per chip) | "
@@ -1776,7 +1781,10 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--public", action="store_true")
     s = gs.add_parser("push", help="check quota, inputs and session slots, then push a kernel folder")
     s.add_argument("dir", help="a `gpu build` folder, or any kernel folder with kernel-metadata.json (needs --hours)")
-    s.add_argument("--hours", type=float, help="session cap (-t); required for folders not made by `gpu build`")
+    s.add_argument("--hours", type=float,
+                   help="session cap (-t), a hard stop: Kaggle kills the run at it wherever the script is, keeping "
+                        "only the files already written - leave ~1.3-1.5x the measured runtime; required for folders "
+                        "not made by `gpu build`")
     s.add_argument("--force", action="store_true",
                    help="push even if the cap exceeds the plannable quota, an input kernel is still running, "
                         "the session slots look full, or the machine shape is not one Kaggle is known to accept")

@@ -56,6 +56,9 @@ skill's table says. A run that was deleted or never started: `gpu release <kerne
 ## Other kernels (notebooks, inference, holdout diagnostics)
 `gpu push <kernel-dir> --hours <cap>` works on any folder with `kernel-metadata.json`: same quota,
 input and session checks, `-t` cap and run log. Collect its files with `kaggle kernels output`.
+The cap is a hard kill (no runner stops the script first): set it to ~1.3-1.5x the measured runtime, and make
+sure the kernel saves its model before a long inference phase. If a cap stops it, `gpu wait` says so and lists the
+files it saved; a re-push with the same cap warns.
 
 ## TPU
 When the GPU quota is gone (or a run is longer than a GPU session), follow the skill's TPU section:
