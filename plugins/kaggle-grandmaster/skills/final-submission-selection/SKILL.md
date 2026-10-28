@@ -37,6 +37,11 @@ not the gap between two candidates. See `cv-lb-debugging`.
 - LB-only candidates (blends with public submission files, forks with no OOF; `LB-only` in the ledger)
   have no honest CV. They can be the hedge, never both picks: keep a CV-backed candidate as pick 1.
   Their weights were chosen on the public LB, so expect them to lose some of their public edge on private.
+- Files fitted to the public labels (tilted toward an estimate of them, built from publicly shared scored files;
+  tag them `public-lb-fitted`, `kgkit ledger tag <id> public-lb-fitted`) are display entries: not pick 1, and
+  unlike an LB-only blend not even the hedge. Their public edge is mostly fit (reported for a Playground
+  S6E9 2nd place: 0.94945 public, 0.94313 private). `kgkit` keeps them out of best CV, the baseline and the
+  CV-LB correlation.
 - If both CV and LB agree on a candidate, take it, and hedge with the second-best on a
   different axis.
 
@@ -48,7 +53,9 @@ not the gap between two candidates. See `cv-lb-debugging`.
   that runtime has margin (private rerun may be on more data).
 - Check prediction distributions vs OOF, no NaNs, correct id coverage.
 - Make sure the selection is actually set on the website (the user must tick the submissions;
-  otherwise Kaggle auto-selects by public LB).
+  otherwise Kaggle auto-selects the best public scores, which are often the fitted files). Kaggle has no API
+  to select, but `python -m kgkit final` reads the selection back and `kgkit status` warns until finals are
+  selected and recorded.
 
 ## 5. Endgame timeline (back-planned from the deadline)
 

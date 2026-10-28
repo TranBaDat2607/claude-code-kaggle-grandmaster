@@ -35,6 +35,7 @@ class CompetitionState:
     gpu: str = ""
     daily_submissions: int = 5
     final_submissions: int = 2
+    final_picks: list[str] = field(default_factory=list)  # ledger ids selected as finals on the website
     deadline: str = ""                # ISO date of the final submission deadline (UTC)
     team_merger_deadline: str = ""
     external_data_allowed: str = "unknown"
@@ -129,15 +130,27 @@ def submissions_line(root: Path, st: CompetitionState, records: list[dict] | Non
     return s + (f"; Kaggle reported {left} left today for the team after the last submit" if left is not None else "")
 
 
+def deadline_date(st: CompetitionState) -> dt.date | None:
+    """The deadline's date, None when it is unset or not an ISO date."""
+    try:
+        return dt.date.fromisoformat(st.deadline[:10]) if st.deadline else None
+    except ValueError:
+        return None
+
+
+def deadline_days(st: CompetitionState) -> int | None:
+    """Days from today (UTC) to the deadline's date (0 on the day itself, negative after it), None when unknown."""
+    d = deadline_date(st)
+    return None if d is None else (d - dt.datetime.now(dt.timezone.utc).date()).days
+
+
 def deadline_line(st: CompetitionState) -> str:
     """The deadline, days left and the endgame phase that applies."""
     if not st.deadline:
         return "deadline: unknown (`python -m kgkit config deadline=YYYY-MM-DD`)"
-    try:
-        d = dt.date.fromisoformat(st.deadline[:10])
-    except ValueError:
+    d, days = deadline_date(st), deadline_days(st)
+    if d is None:
         return f"deadline: {st.deadline}"
-    days = (d - dt.datetime.now(dt.timezone.utc).date()).days
     phase = ("ENDED — run /kg-postmortem" if days < 0 else "FINAL DAYS — robustness + /kg-final" if days <= 3
              else "endgame — freeze ensemble design" if days <= 14 else "exploration")
     return f"deadline {d.isoformat()} ({days} days left; phase: {phase})"

@@ -171,13 +171,15 @@ command also runs from that copy, at the copy's version. Vendor again (with the 
 |---|---|
 | `init <slug> --metric auc --target y --id-col id [--code-competition --runtime-hours 9 --no-internet] --deadline YYYY-MM-DD` | create a workspace |
 | `adopt [slug] [--metric ... --code-competition --no-internet] [--submissions-file subs.json]` | adopt an existing repo mid-competition: writes only `.kaggle-gm/competition.json` and imports your Kaggle submission history so today's submissions count against the budget; slug and internet setting detected from `kernel-metadata.json` / competition URLs; safe to re-run |
-| `status` | dashboard: accepted baseline, best CV/LB, CV↔LB correlation, recent experiments, backlog top, CV-overfitting warning |
+| `status` | dashboard: accepted baseline, best CV/LB, CV↔LB correlation, recent experiments, backlog top, CV-overfitting warning, and a warning when Kaggle would auto-select a `public-lb-fitted` file as a final |
+| `final` | asks Kaggle which submissions are selected as finals (the website selects them; there is no API for that), shows what auto-selection would take when none is, flags `public-lb-fitted` files, records the selection (`final_picks`), prints the website steps and the deadline in UTC and local time |
 | `folds train.csv --target y [--group g] [--strategy ...]` | leak-free folds + fold report (group leakage check) |
 | `eda train.csv --test test.csv --target y --id-col id` | markdown EDA with red flags (leaks, ID-like columns, drift, unseen categories, duplicates, row-order correlation) |
 | `adv train.csv test.csv --drop id,y` | adversarial validation with drifting-feature importances |
 | `ledger list\|best\|show\|lb\|add` | experiment ledger; `ledger lb <id> <public> [private]` |
 | `ledger compare <new> [<base>] --truth train.csv:y --folds folds.csv:fold [--fold 0] [--groups ...]` | paired per-fold test + paired OOF bootstrap against the accepted baseline → KEEP / DISCARD / INCONCLUSIVE (also works on unassembled 1-fold screens in `artifacts/<name>/`) |
 | `ledger decide <id> keep\|discard\|inconclusive\|baseline` · `baseline` · `lineage` | record decisions; the accepted baseline is the last KEEP, not the best CV; lineage drives reverse ablation |
+| `ledger tag <id> <tag>... [--remove]` | tag a logged record, e.g. `public-lb-fitted` (a file tilted toward the public labels: display only; kept out of best CV, the baseline and the CV↔LB correlation; never accepted as KEEP/baseline) |
 | `ledger import <name> oof.npy --test test.npy --truth ... --folds ... --source teammate` | bring a teammate's or public notebook's predictions in, CV recomputed on your folds |
 | `backlog add\|list\|set\|render\|fidelity` | ranked idea backlog (`--cost` hands-on hours, `--gpu-hours` unattended Kaggle GPU time ranked against the quota left); `fidelity` checks that cheap screens rank ideas like full CV |
 | `features search train.csv --target y --folds folds.csv:fold --recheck-seed 7` | generate count / target encodings, groupby aggregates and pairwise arithmetic, screen in batches, recheck on a fresh split |

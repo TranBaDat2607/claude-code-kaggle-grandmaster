@@ -2165,3 +2165,339 @@ def test_push_hook_names_the_age_of_the_cached_quota_and_the_runs_logged_since(p
     why = out["permissionDecisionReason"]
     assert "only 0.50h of GPU quota is plannable" in why  # 3h on the cache, less the 2.5h logged since
     assert "quota cached " in why and "3.0 days ago, 1 run(s) logged since then counted, resets 2099-01-03" in why
+
+
+# ----------------------------------------------------------------------------- #54 public-LB-fitted files and auto-selection
+import textwrap  # noqa: E402
+
+from kgkit import evalset as E  # noqa: E402
+from kgkit import finals as FN  # noqa: E402
+
+
+def _utc_in(days):
+    return (dt.datetime.now(dt.timezone.utc).date() + dt.timedelta(days=days)).isoformat()
+
+
+def _finals_ws(root, days=3, **state):
+    """The issue's workspace: two public-LB-fitted files hold the best public scores; an honest stack (accepted
+    baseline) and a blend of public files are below them."""
+    S.CompetitionState(slug="demo", metric="auc", deadline=_utc_in(days), **state).save(root)
+    led = Ledger(root)
+    stack = led.log("stack", 0.9622)
+    led.attach_lb(stack["id"], 0.96185)
+    led.decide(stack["id"], "keep")
+    blend = led.log("blend", None, tags=["lb-blend"])
+    led.attach_lb(blend["id"], 0.96214)
+    for name, lb in (("tilt-a", 0.96297), ("tilt-b", 0.96285)):
+        led.attach_lb(led.log(name, None, tags=["tilt", "public-lb-fitted"])["id"], lb)
+    return led
+
+
+def _session_context(plugin_root, cwd):
+    r = subprocess.run([sys.executable, str(plugin_root / "hooks" / "session_start.py")], capture_output=True,
+                       input=json.dumps({"hook_event_name": "SessionStart", "cwd": str(cwd)}), text=True, timeout=60)
+    assert r.returncode == 0, r.stderr
+    return json.loads(r.stdout)["hookSpecificOutput"]["additionalContext"]
+
+
+def test_status_and_the_brief_warn_that_kaggle_would_select_the_fitted_files(tmp_path, monkeypatch, capsys, plugin_root):
+    from kgkit import cli
+
+    _finals_ws(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    cli.main(["status"])
+    out = capsys.readouterr().out
+    warning = next(l for l in out.splitlines() if l.startswith("WARNING: with no finals selected"))
+    assert "the 2 best public scores: 0004_tilt-b" not in warning  # best first
+    assert warning.index("0003_tilt-a 0.96297 [public-LB fitted]") < warning.index("0004_tilt-b 0.96285 [public-LB fitted]")
+    assert "all of them public-LB fitted" in warning and "0002_blend" not in warning.split("Honest candidates")[0]
+    assert f"by {_utc_in(3)} 23:59 UTC (3 days left)" in warning
+    assert "https://www.kaggle.com/competitions/demo/submissions" in warning
+    honest = warning.split("Honest candidates: ")[1]
+    assert "0001_stack (accepted baseline, best CV; CV 0.96220, LB 0.96185)" in honest
+    assert "0002_blend (best public score not fitted; LB-only, LB 0.96214)" in honest
+    assert "final_picks=<id>,<id>" in warning
+    assert ("best public LB: 0.96297 (0003_tilt-a, CV LB-only); public-LB fitted; best not fitted: 0.96214 "
+            "(0002_blend, LB-only)") in out
+    assert "| 0.96297 (fitted) |" in out
+    ctx = _session_context(plugin_root, tmp_path)
+    assert warning in ctx.splitlines()
+    assert "best public LB 0.96297 (0003_tilt-a) [public-LB fitted; best not fitted: 0.96214 (0002_blend, LB-only)]" in ctx
+
+
+def test_auto_selection_follows_the_picks_the_direction_and_ties():
+    def rec(i, lb, *tags):
+        return {"id": f"{i:04d}_r", "name": "r", "cv": None, "lb_public": lb, "tags": list(tags)}
+
+    recs = [rec(1, 0.90), rec(2, 0.80, "public-lb-fitted"), rec(3, 0.70), rec(4, 0.60), rec(5, 0.99, "x")]
+    recs[4]["recheck"] = "7"  # a re-drawn split is not a submission
+    sel = FN.selection(S.CompetitionState(slug="d", metric="auc", final_submissions=3), recs)
+    assert [(e["id"][:4], e["fitted"]) for e in sel["auto"]] == [("0001", False), ("0002", True), ("0003", False)]
+    low = FN.selection(S.CompetitionState(slug="d", metric="rmse", greater_is_better=False, final_submissions=2), recs)
+    assert [e["id"][:4] for e in low["auto"]] == ["0004", "0003"] and not low["fitted_auto"]
+    tied = FN.selection(S.CompetitionState(slug="d", metric="auc", final_submissions=2),
+                        [rec(1, 0.9), rec(2, 0.8, "public-lb-fitted"), rec(3, 0.8), rec(4, 0.7)])
+    assert [e["id"][:4] for e in tied["auto"]] == ["0001", "0002", "0003"]  # a tie at the cut: any of them may be taken
+    assert [e["id"][:4] for e in tied["fitted_auto"]] == ["0002"]
+
+
+def test_a_fitted_file_is_never_an_honest_score_or_a_baseline(ws, monkeypatch, capsys):
+    from kgkit import cli
+
+    led = Ledger(ws)
+    base = led.log("stack", 0.9620)
+    led.attach_lb(base["id"], 0.9615)
+    for cv, lb in [(0.95, 0.951), (0.955, 0.954), (0.958, 0.957)]:
+        led.attach_lb(led.log("m", cv)["id"], lb)
+    fit = led.log("tilt", 0.9999, tags=["public-lb-fitted"])  # logged with a borrowed CV
+    led.attach_lb(fit["id"], 0.99)
+    assert led.best(1)[0]["id"] == base["id"] and led.baseline()["id"] == base["id"]
+    assert fit["id"] in [r["id"] for r in led.borrowed_scores()]
+    assert led.cv_lb_correlation()["n"] == 4  # the fitted file's inflated LB is not in it
+    led.update(fit["id"], decision="keep")  # a decision made before the file was tagged
+    assert led.baseline()["id"] == base["id"] and led.baseline(fallback=False) is None
+    assert "| 0.99000 (fitted) |" in led.table()
+    assert E.own_score({"cv": 0.9, "holdout_path": "h.npy", "tags": []}, True)
+    assert not E.own_score({"cv": 0.9, "holdout_path": "h.npy", "tags": ["public-lb-fitted"]}, True)
+
+    monkeypatch.chdir(ws)
+    with pytest.raises(ValueError, match="public-lb-fitted"):
+        led.decide(fit["id"], "baseline")
+    with pytest.raises(SystemExit) as e:
+        cli.main(["ledger", "decide", fit["id"], "keep"])
+    assert "display only" in str(e.value) and "ledger tag" in str(e.value)
+    cli.main(["ledger", "decide", fit["id"], "discard", "display only"])
+    assert led.get(fit["id"])["decision"] == "discard"
+    capsys.readouterr()
+    cli.main(["status"])
+    assert "left out (public-lb-fitted)" in capsys.readouterr().out
+
+    cli.main(["ledger", "tag", base["id"], "public-lb-fitted", "tilt"])
+    out = capsys.readouterr().out
+    assert "tags public-lb-fitted, tilt" in out and "display only, never a final pick" in out
+    assert led.get(base["id"])["tags"] == ["public-lb-fitted", "tilt"]
+    cli.main(["ledger", "tag", base["id"], "public-lb-fitted", "--remove"])
+    assert led.get(base["id"])["tags"] == ["tilt"] and led.best(1)[0]["id"] == base["id"]
+    cli.main(["ledger", "add", "tilt-2", "lb-only", "--tag", "public-lb-fitted"])
+    assert "display only, never a final pick" in capsys.readouterr().out
+
+
+def test_scores_known_only_from_the_submission_log_count(ws):
+    led = Ledger(ws)
+    honest = led.log("stack", 0.9622)  # the ledger has no public score for it
+    log = S.submissions_log(ws)
+    log.parent.mkdir(parents=True, exist_ok=True)
+    rows = [{"exp_id": honest["id"], "public_score": 0.95, "status": "scored", "message": "stack"},
+            {"exp_id": None, "file": "sub/0001_stack.csv", "message": "again", "public_score": 0.96, "status": "scored"},
+            {"exp_id": None, "message": "0002 mystery [public-LB fitted]", "public_score": 0.97, "status": "scored"},
+            {"exp_id": None, "message": "broken", "public_score": 0.99, "status": "failed"},
+            {"exp_id": None, "message": "unscored", "public_score": None, "status": "submitted"}]
+    log.write_text("".join(json.dumps(r) + "\n" for r in rows))
+    st = S.load(ws)
+    sel = FN.selection(st, led.records(), S.submission_records(ws))
+    assert [(e["id"], e["score"], e["fitted"]) for e in sel["auto"]] == [(None, 0.97, True), (honest["id"], 0.96, False)]
+    assert sel["unlinked"] == 1
+    text = " ".join(FN.lines(ws, st, led.records()))
+    assert "unlinked: 0002 mystery [public-LB fitted] 0.97000 [public-LB fitted]" in text
+    assert "1 scored submission(s) in the log are not linked to a ledger record" in text
+
+
+def test_recorded_picks_replace_the_warning_until_one_is_fitted(tmp_path, monkeypatch, capsys):
+    from kgkit import cli
+
+    led = _finals_ws(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    cli.main(["config", "final_picks=0001,0002,gone"])
+    out = capsys.readouterr().out
+    assert "note: 'gone' is not a ledger record; kept as written" in out
+    assert "note: 3 picks, but the competition takes 2" in out
+    assert S.load(tmp_path).final_picks == ["0001_stack", "0002_blend", "gone"]
+    cli.main(["config", "final_picks=1,2"])
+    cli.main(["status"])
+    out = capsys.readouterr().out
+    assert "final picks (recorded): 0001_stack, 0002_blend; `python -m kgkit final` checks" in out
+    assert "WARNING" not in out
+
+    cli.main(["config", "final_picks=0001,0003"])
+    assert "WARNING: 0003_tilt-a is tagged public-lb-fitted" in capsys.readouterr().out
+    cli.main(["status"])
+    out = capsys.readouterr().out
+    assert "WARNING: recorded final pick(s) 0003_tilt-a are public-LB fitted" in out and "final picks (recorded)" not in out
+
+    cli.main(["config", "final_picks="])  # cleared: the auto-selection warning is back
+    cli.main(["status"])
+    out = capsys.readouterr().out
+    assert S.load(tmp_path).final_picks == [] and "WARNING: with no finals selected" in out
+
+
+def test_nothing_is_printed_after_the_deadline_or_without_a_fitted_file(tmp_path, monkeypatch, capsys):
+    from kgkit import cli
+
+    monkeypatch.chdir(tmp_path)
+    _finals_ws(tmp_path, days=-1)
+    cli.main(["status"])
+    out = capsys.readouterr().out
+    assert "WARNING" not in out and "best public LB: 0.96297 (0003_tilt-a, CV LB-only); public-LB fitted" in out
+
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    S.CompetitionState(slug="demo", metric="auc", deadline=_utc_in(3)).save(plain)
+    led = Ledger(plain)
+    led.attach_lb(led.log("stack", 0.9622)["id"], 0.96185)
+    led.attach_lb(led.log("blend", None, tags=["lb-blend"])["id"], 0.96214)
+    monkeypatch.chdir(plain)
+    cli.main(["status"])
+    out = capsys.readouterr().out
+    assert "WARNING" not in out and "final picks (recorded)" not in out and "fitted" not in out
+    assert FN.lines(plain, S.load(plain), led.records()) == []
+
+    S.CompetitionState(slug="demo", metric="auc").save(plain)  # no deadline: still warns, and says how to set it
+    led.attach_lb(led.log("tilt", None, tags=["public-lb-fitted"])["id"], 0.97)
+    text = " ".join(FN.lines(plain, S.load(plain), led.records()))
+    assert "WARNING" in text and "kgkit config deadline=YYYY-MM-DD" in text
+
+
+def test_the_brief_survives_malformed_records_and_state(tmp_path, plugin_root):
+    _finals_ws(tmp_path)
+    ledger = tmp_path / ".kaggle-gm" / "ledger.jsonl"
+    ledger.write_text(ledger.read_text() + "{not json\n" + json.dumps({"id": "0009_x", "lb_public": "0.9", "cv": "n/a",
+                                                                          "tags": "public-lb-fitted"}) + "\n")
+    S.submissions_log(tmp_path).write_text("garbage\n" + json.dumps({"public_score": "high", "exp_id": [1]}) + "\n")
+    ctx = _session_context(plugin_root, tmp_path)
+    assert "Competition workspace: **demo**" in ctx and "WARNING: with no finals selected" in ctx
+    state = tmp_path / ".kaggle-gm" / "competition.json"
+    state.write_text(json.dumps({**json.loads(state.read_text()), "final_picks": 5}))  # not a list
+    ctx = _session_context(plugin_root, tmp_path)
+    assert "Competition workspace: **demo**" in ctx and "Ledger: " in ctx
+
+
+def _fake_submissions_sdk(root):
+    """Just enough of kaggle and kagglesdk for kgkit.kaggle_submissions: three scored submissions over two pages,
+    those whose refs are in FAKE_SELECTED selected, an authenticate() that is chatty and fails with FAKE_NO_AUTH."""
+    files = {
+        "kaggle/__init__.py": "",
+        "kaggle/api/__init__.py": "",
+        "kaggle/api/kaggle_api_extended.py": textwrap.dedent("""\
+            import datetime, os
+            from types import SimpleNamespace as N
+            ROWS = [(1, '0001_stack.csv', 'honest stack', '0.96185'),
+                    (2, 'sub.csv', '0003 [public-LB fitted] tilt', '0.96297'),
+                    (3, '0004_tilt-b.csv', 'second tilt', '0.96285')]
+            class Client:
+                def __enter__(self): return self
+                def __exit__(self, *a): return False
+                @property
+                def competitions(self): return N(competition_api_client=self)
+                def list_submissions(self, r):
+                    assert r.competition_name == 'demo'
+                    rows = [N(ref=ref, date=datetime.datetime(2026, 10, 27, 7, ref), description=d, file_name=f,
+                              public_score=s, status=N(name='COMPLETE')) for ref, f, d, s in ROWS]
+                    if r.group == 2:
+                        chosen = {int(x) for x in os.environ.get('FAKE_SELECTED', '').split(',') if x}
+                        return N(submissions=[x for x in rows if x.ref in chosen], next_page_token='')
+                    if r.page_token == '':
+                        return N(submissions=rows[:2], next_page_token='p2')
+                    assert r.page_token == 'p2'
+                    return N(submissions=rows[2:], next_page_token='')
+            class KaggleApi:
+                def authenticate(self):
+                    if os.environ.get('FAKE_NO_AUTH'): raise SystemExit(1)
+                    print('Warning: outdated API version')
+                def build_kaggle_client(self): return Client()
+            """),
+        "kagglesdk/__init__.py": "",
+        "kagglesdk/competitions/__init__.py": "",
+        "kagglesdk/competitions/types/__init__.py": "",
+        "kagglesdk/competitions/types/competition_api_service.py": "class ApiListSubmissionsRequest:\n    page_token = ''\n",
+        "kagglesdk/competitions/types/competition_enums.py": (
+            "class SubmissionGroup:\n    SUBMISSION_GROUP_ALL = 0\n    SUBMISSION_GROUP_SUCCESSFUL = 1\n"
+            "    SUBMISSION_GROUP_SELECTED = 2\nclass SubmissionSortBy:\n    SUBMISSION_SORT_BY_DATE = 0\n"),
+    }
+    for rel, text in files.items():
+        (root / rel).parent.mkdir(parents=True, exist_ok=True)
+        (root / rel).write_text(text)
+
+
+@pytest.fixture
+def kaggle_sdk(tmp_path_factory, monkeypatch):
+    root = tmp_path_factory.mktemp("sdk")
+    _fake_submissions_sdk(root)
+    monkeypatch.setenv("PYTHONPATH", str(root))
+    monkeypatch.setenv("VERBOSE", "1")
+    monkeypatch.setattr(G, "kaggle_python", lambda: sys.executable)
+    return root
+
+
+def test_final_lists_what_kaggle_would_auto_select(tmp_path, monkeypatch, capsys, kaggle_sdk):
+    from kgkit import cli
+
+    _finals_ws(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    data, err = FN.live("demo")
+    assert err is None and data["selected"] == [] and [r["ref"] for r in data["scored"]] == [1, 2, 3]  # two pages
+    assert data["scored"][1]["public_score"] == 0.96297 and data["scored"][1]["description"].startswith("0003 ")
+    cli.main(["final"])
+    out = capsys.readouterr().out
+    assert "Kaggle lists 3 scored submission(s) for demo; 0 selected as finals." in out
+    assert "Nothing is selected. If it stays so, Kaggle takes the 2 best public score(s):" in out
+    top = [l for l in out.splitlines() if l.startswith("  0.96")]
+    assert [l.split()[1] for l in top] == ["0003_tilt-a", "0004_tilt-b"]  # linked by bare number, and by file name
+    assert all(l.endswith("[public-LB fitted]") for l in top)
+    assert "WARNING: that includes public-LB fitted file(s)" in out and f"before {_utc_in(3)} 23:59 UTC" in out
+    assert "https://www.kaggle.com/competitions/demo/submissions" in out and "Mark 2 submissions" in out
+    assert "(= " in out and " local, UTC" in out  # the deadline in this machine's time zone too
+    assert S.load(tmp_path).final_picks == []  # nothing selected: nothing to record
+
+
+def test_final_records_the_selection_and_flags_a_fitted_pick(tmp_path, monkeypatch, capsys, kaggle_sdk):
+    from kgkit import cli
+
+    _finals_ws(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("FAKE_SELECTED", "1,2")
+    cli.main(["final"])
+    out = capsys.readouterr().out
+    assert "3 scored submission(s) for demo; 2 selected as finals." in out and "Selected as finals (2 of 2):" in out
+    assert "WARNING: a selected final is public-LB fitted" in out
+    assert "recorded final_picks = 0001_stack, 0003_tilt-a" in out
+    assert S.load(tmp_path).final_picks == ["0001_stack", "0003_tilt-a"]
+    cli.main(["status"])
+    assert "WARNING: recorded final pick(s) 0003_tilt-a are public-LB fitted" in capsys.readouterr().out
+    monkeypatch.setenv("FAKE_SELECTED", "1")
+    cli.main(["final"])
+    out = capsys.readouterr().out
+    assert "Selected as finals (1 of 2):" in out and "Only 1 of 2 are selected" in out
+    assert S.load(tmp_path).final_picks == ["0001_stack"]
+
+
+def test_final_says_why_kaggle_could_not_be_asked(tmp_path, monkeypatch, capsys, kaggle_sdk):
+    from kgkit import cli
+
+    _finals_ws(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("FAKE_NO_AUTH", "1")
+    data, err = FN.live("demo")
+    assert data is None and "not authenticated with the Kaggle API" in err
+    cli.main(["final"])
+    out = capsys.readouterr().out
+    assert "Could not ask Kaggle which submissions are selected (not authenticated" in out
+    assert "WARNING: with no finals selected, Kaggle takes the 2 best public scores: 0003_tilt-a" in out  # the ledger's view
+    nosdk = tmp_path / "nosdk"
+    (nosdk / "kaggle").mkdir(parents=True)
+    (nosdk / "kaggle" / "__init__.py").write_text("raise ImportError('no kaggle here')\n")
+    monkeypatch.setenv("PYTHONPATH", str(nosdk))
+    data, err = FN.live("demo")
+    assert data is None and "no Kaggle SDK" in err
+
+    def timeout(cmd, **kw):
+        raise subprocess.TimeoutExpired(cmd, kw["timeout"])
+    monkeypatch.setattr(FN.subprocess, "run", timeout)
+    assert FN.live("demo") == (None, "the request to Kaggle timed out")
+
+
+def test_submissions_child_imports_only_the_standard_library_at_import_time(plugin_root):
+    """It runs under the Kaggle CLI's interpreter, which may have nothing else installed."""
+    tree = ast.parse((plugin_root / "kgkit" / "kaggle_submissions.py").read_text(encoding="utf-8"))
+    mods = {a.name.split(".")[0] for n in tree.body if isinstance(n, ast.Import) for a in n.names}
+    mods |= {n.module.split(".")[0] for n in tree.body if isinstance(n, ast.ImportFrom) and n.level == 0}
+    assert mods <= set(sys.stdlib_module_names) | {"__future__"}, mods

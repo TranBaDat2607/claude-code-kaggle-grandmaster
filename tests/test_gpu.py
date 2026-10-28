@@ -366,7 +366,7 @@ def test_image_template_timeout_resume_and_assemble(tmp_path, plugin_root):
 
 
 @pytest.mark.parametrize("rel", ["kgkit/gpu.py", "kgkit/budget.py", "kgkit/state.py", "kgkit/backlog.py", "kgkit/adopt.py",
-                                 "kgkit/evalset.py",
+                                 "kgkit/evalset.py", "kgkit/finals.py",
                                  "kgkit/kaggle_gpu_runner.py"])
 def test_stdlib_only(plugin_root, rel):
     """Hooks import gpu/budget/state, and the runner executes inside Kaggle: standard library only."""
