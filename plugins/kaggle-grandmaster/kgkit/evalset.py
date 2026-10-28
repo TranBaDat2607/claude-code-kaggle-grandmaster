@@ -38,6 +38,9 @@ from . import state as S
 # lb-only: no score of its own at all (logged with cv=None). lb-blend: blended with public submission files; in a
 # K-fold workspace such a blend has no OOF, so a CV logged for it was borrowed from a component.
 LB_ONLY_TAGS = ("lb-only", "lb-blend")
+# public-lb-fitted: tilted toward an estimate of the public labels. Its public score says nothing about private, and
+# Kaggle auto-selects the best public scores when no finals are selected, so it must never be a final pick.
+LB_FITTED_TAGS = ("public-lb-fitted",)
 DECIDED = ("keep", "discard", "inconclusive")
 COMPARISONS = "comparisons.jsonl"
 
@@ -277,14 +280,20 @@ def record_key(rec: dict, holdout: bool) -> str | None:
     return rec.get("eval_hash") if holdout else rec.get("folds_hash")
 
 
+def lb_fitted(rec: dict) -> bool:
+    """True for a record tagged ``public-lb-fitted``: display only, never a final pick."""
+    return isinstance(rec, dict) and bool(set(rec.get("tags") or ()) & set(LB_FITTED_TAGS))
+
+
 def own_score(rec: dict, holdout: bool = False) -> bool:
     """True when the record's score is its own on the evaluation set.
 
     K-fold: a record tagged ``lb-only`` or ``lb-blend`` has none (a blend with public files has no OOF, so its CV
     was borrowed from a component). Fixed holdout (``holdout=True``): the blend itself is scored on the holdout, so
     ``lb-blend`` only says it includes public files; only ``lb-only`` means no score of its own. A score recomputed
-    from the record's own stored holdout predictions is always its own."""
-    if not isinstance(rec.get("cv"), (int, float)):
+    from the record's own stored holdout predictions is always its own, except for a ``public-lb-fitted`` record
+    (in either mode): it was tilted toward the public labels, so no score of it is an honest estimate."""
+    if not isinstance(rec.get("cv"), (int, float)) or lb_fitted(rec):
         return False
     if rec.get("holdout_path"):
         return True

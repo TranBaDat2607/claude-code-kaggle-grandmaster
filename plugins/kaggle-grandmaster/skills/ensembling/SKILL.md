@@ -108,5 +108,9 @@ without OOF predictions. Such a blend cannot be cross-validated:
   `lb-blend` then only marks it as using public files, and its holdout score counts.
 - Its weights are a bet on the public LB, fitted on ~20-30 % of the test. Keep them few and round
   (e.g. 0.5/0.3/0.2) rather than tuned to the 5th decimal by LB probing.
+- A file that goes further and tilts the ranking toward an estimate of the public labels is *public-LB fitted*:
+  log it with `--tag public-lb-fitted` (or `kgkit ledger tag <id> public-lb-fitted`). It can be a display entry
+  but never a final pick, and Kaggle auto-selects the best public scores when nothing is selected, so
+  `kgkit status` warns until finals are selected on the website.
 - Keep an honest CV-only candidate (your nested-validated stack) as one of the two finals
   (`final-submission-selection`), and use the LB-only blend as the hedge, not the other way round.

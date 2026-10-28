@@ -20,6 +20,8 @@ parts of a competition that are easy to get subtly wrong:
 - ``kgkit.evalset``     the evaluation set's fingerprint and the paired noise measured on it
 - ``kgkit.backlog``     the ranked idea backlog and screen-vs-full fidelity
 - ``kgkit.kernels``     study and reproduce public notebooks; their public score on record and title claims
+- ``kgkit.finals``      which submissions Kaggle would auto-select as finals and whether one is public-LB fitted
+- ``kgkit.kaggle_submissions`` the team's scored and selected submissions from Kaggle's API (run in a child process)
 - ``kgkit.kaggle_search`` notebooks' best public scores from Kaggle's search API (run in a child process)
 - ``kgkit.kaggle_cli``  the Kaggle CLI with Kaggle's reason for a refused request (kgkit's CLI calls run through it)
 - ``kgkit.discussions`` competition forums (topics, search, write-ups, threads), live or from Meta Kaggle

@@ -279,9 +279,23 @@ class Ledger:
             fields["submission"] = submission
         return self.update(exp_id, **fields)
 
+    def tag(self, exp_id: str, *tags: str, remove: bool = False) -> dict:
+        """Add tags to a record (or remove them): the way to mark a record already logged, e.g. as
+        ``public-lb-fitted``."""
+        have = list(self.get(exp_id).get("tags") or ())
+        new = [t for t in have if t not in tags] if remove else have + [t for t in dict.fromkeys(tags) if t not in have]
+        return self.update(exp_id, tags=new)
+
     def decide(self, exp_id: str, decision: str, note: str = "", parent: str | None = None) -> dict:
-        """Record the keep/discard decision (and optionally the baseline it was compared against)."""
-        fields: dict[str, Any] = {"decision": _check_decision(decision), "decided_at": time.strftime("%Y-%m-%dT%H:%M:%S")}
+        """Record the keep/discard decision (and optionally the baseline it was compared against). A
+        ``public-lb-fitted`` record can be discarded but never accepted: it would become the baseline new ideas are
+        compared against."""
+        decision, rec = _check_decision(decision), self.get(exp_id)
+        if decision in ACCEPTED and E.lb_fitted(rec):
+            raise ValueError(f"{rec['id']} is tagged public-lb-fitted (tilted toward the public labels): it is display "
+                             f"only and cannot be {decision}; decide discard, or remove the tag with "
+                             f"`ledger tag {rec['id']} public-lb-fitted --remove` if it is not fitted")
+        fields: dict[str, Any] = {"decision": decision, "decided_at": time.strftime("%Y-%m-%dT%H:%M:%S")}
         if note:
             fields["decision_note"] = note
         if parent:
@@ -313,7 +327,7 @@ class Ledger:
         Falls back to the highest CV only when nothing has been accepted yet."""
         recs = self.records()
         for r in reversed(recs):
-            if r.get("decision") in ACCEPTED and not r.get("recheck"):
+            if r.get("decision") in ACCEPTED and not r.get("recheck") and not E.lb_fitted(r):
                 return r
         if fallback:
             best = self.best(1)
@@ -462,6 +476,7 @@ class Ledger:
         for r in recs:
             std = f"{r['cv_std']:.4f}" if r.get("cv_std") is not None else ""
             lb = f"{r['lb_public']:.5f}" if r.get("lb_public") is not None else ""
+            lb += " (fitted)" if lb and E.lb_fitted(r) else ""
             note = (r.get("notes") or "").replace("|", "/").replace("\n", " ")[:70]
             lines.append(f"| {r['id']} | {fmt_cv(r)} | {std} | {lb} | {r.get('decision') or ''} | "
                          f"{r.get('model') or ''} | {note} |")

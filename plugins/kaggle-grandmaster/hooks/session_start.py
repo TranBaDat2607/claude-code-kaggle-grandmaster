@@ -107,6 +107,11 @@ def brief(root: Path) -> str:
         if with_lb:
             bl = sorted(with_lb, key=lambda r: r["lb_public"], reverse=st.greater_is_better)[0]
             s += f"; best public LB {bl['lb_public']:.5f} ({bl['id']})"
+            try:
+                fitted = C.FN.not_fitted_note(recs, st)
+            except Exception:  # the brief must survive a malformed record
+                fitted = ""
+            s += f" [{fitted}]" if fitted else ""
             pairs = [r for r in with_lb if _own_cv(r, holdout) and not r.get("recheck")]
             corr = _pearson([r["cv"] for r in pairs], [r["lb_public"] for r in pairs])
             if corr is not None and len({round(r["cv"], 12) for r in pairs}) >= 4:
@@ -114,13 +119,14 @@ def brief(root: Path) -> str:
                       + (" (holdout CV: noisy)" if holdout else ""))
         lines.append(s + ".")
         accepted = next((r for r in reversed(recs) if r.get("decision") in ("baseline", "keep")
-                         and not r.get("recheck")), None)
+                         and not r.get("recheck") and not C.EV.lb_fitted(r)), None)
         if accepted is not None:
             cv = f"CV {accepted['cv']:.5f}" if isinstance(accepted.get("cv"), (int, float)) else "LB-only"
             lines.append(f"Accepted baseline (compare new ideas against this): {accepted['id']} {cv}.")
         elif len(scored) >= 2:
             lines.append("No accepted baseline yet: decide one (`kgkit ledger decide <id> baseline`) so experiments "
                          "are compared against a deliberate choice, not the luckiest CV.")
+        lines.extend(C.FN.lines(root, st, recs))  # a warning when Kaggle would auto-select a public-LB fitted file
         for r in recs[-3:]:
             note = (r.get("notes") or "").replace("\n", " ")[:80]
             cv = f"{r['cv']:.5f}" if isinstance(r.get("cv"), (int, float)) else "?"
