@@ -58,6 +58,10 @@ SESSION_LIMITS = {"GPU": 12.0, "TPU": 9.0, "CPU": 12.0}
 SESSION_SLOTS = {"GPU": 2, "TPU": 1}
 # How long a pushed run may sit in the queue before an entry that never reported "running" is stale.
 QUEUE_ALLOWANCE_H = {"GPU": 1.0, "TPU": 36.0, "CPU": 1.0}
+# `kaggle quota` is tried this many times, this many seconds apart: the CLI fails now and then on a flaky network.
+QUOTA_TRIES, QUOTA_RETRY_S = 2, 3.0
+# A run logged since a cached quota counts against it when it may have spent at least this many hours of it.
+UNSEEN_MIN_H = 0.01
 ACCELERATORS = {
     "NvidiaTeslaT4": "2x T4 16 GB (two GPUs per quota hour: run two folds in parallel)",
     "NvidiaTeslaP100": "1x P100 16 GB (one GPU; no Triton/torch.compile, sm_60)",
@@ -286,26 +290,62 @@ def quota_path(root: Path) -> Path:
     return root / S.STATE_DIR / QUOTA_FILE
 
 
-def fetch_quota(root: str | Path | None = None) -> dict | None:
-    """Live quota from the Kaggle API, cached in .kaggle-gm/gpu_quota.json. None when the CLI fails."""
+def _cli_failure(r: subprocess.CompletedProcess) -> str:
+    """What a failed CLI call says went wrong, on one line: Kaggle's reason when `run_kaggle` printed it, else the
+    last line of output (a traceback ends in its exception), else the exit status."""
+    lines = [l.strip() for l in f"{r.stdout or ''}\n{r.stderr or ''}".splitlines() if l.strip()]
+    why = next((l for l in lines if l.startswith(KC.REASON)), lines[-1] if lines else f"exit status {r.returncode}")
+    return why if len(why) <= 200 else why[:197] + "..."
+
+
+def live_quota(root: str | Path | None = None) -> tuple[dict | None, str | None]:
+    """(quota, None) from the Kaggle API, cached in .kaggle-gm/gpu_quota.json; (None, why) when the CLI failed
+    ``QUOTA_TRIES`` times, ``why`` being 'failed twice (<its last line>)'. A call that timed out or could not start is
+    not repeated: a hung network or a missing CLI does not recover in seconds."""
     root = _root(root)
-    try:
-        r = run_kaggle(["quota", "--format", "json"], timeout=60)
-    except (OSError, subprocess.SubprocessError):
-        return None
-    q = parse_quota(r.stdout) if r.returncode == 0 else None
-    if q is not None:
-        p = quota_path(root)
-        p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text(json.dumps(q, indent=1), encoding="utf-8")
-    return q
+    why = "(not tried)"
+    for i in range(QUOTA_TRIES):
+        if i:
+            time.sleep(QUOTA_RETRY_S)
+        try:
+            r = run_kaggle(["quota", "--format", "json"], timeout=60)
+        except subprocess.TimeoutExpired:
+            return None, "timed out after 60 s"
+        except (OSError, subprocess.SubprocessError) as e:
+            return None, f"could not run the Kaggle CLI ({type(e).__name__}: {e})"
+        q = parse_quota(r.stdout) if r.returncode == 0 else None
+        if q is not None:
+            p = quota_path(root)
+            try:
+                p.parent.mkdir(parents=True, exist_ok=True)
+                p.write_text(json.dumps(q, indent=1), encoding="utf-8")
+            except OSError:  # a read-only workspace: the live value is still good for this call
+                pass
+            return q, None
+        why = f"({_cli_failure(r) if r.returncode else 'no GPU row in its output'})"
+    return None, f"failed{' twice' if QUOTA_TRIES == 2 else f' {QUOTA_TRIES} times'} {why}"
+
+
+def fetch_quota(root: str | Path | None = None) -> dict | None:
+    """Live quota from the Kaggle API (`live_quota`), cached in .kaggle-gm/gpu_quota.json. None when the CLI fails."""
+    return live_quota(root)[0]
 
 
 def _rolled(q: dict) -> dict:
+    """``q`` as of now: when the week rolled over since it was taken, a full quota as of the latest reset that has
+    passed (``reset_at``, also ``as_of``), with ``refresh_at`` the next one."""
     refresh = _parse_time(q.get("refresh_at"))
-    if refresh is not None and _now() >= refresh:  # the week rolled over since we looked
-        q = {**q, "remaining_h": q.get("total_h", 0.0), "used_h": 0.0, "stale_reset": True}
-    return q
+    now = _now()
+    if refresh is None or now < refresh:
+        return q
+    reset = refresh + dt.timedelta(days=7) * ((now - refresh) // dt.timedelta(days=7))
+    return {**q, "remaining_h": q.get("total_h", 0.0), "used_h": 0.0, "stale_reset": True, "reset_at": _iso(reset),
+            "as_of": _iso(reset), "refresh_at": _iso(reset + dt.timedelta(days=7))}
+
+
+def _as_of(q: dict) -> dt.datetime:
+    """When ``q``'s figures were true: when it was fetched, or the reset it rolled over to."""
+    return _parse_time(q.get("as_of")) or _parse_time(q.get("fetched_at")) or _now()
 
 
 def cached_quota(root: str | Path, resource: str = "GPU") -> dict | None:
@@ -363,15 +403,110 @@ def reserved_hours(r: dict, fetched: dt.datetime | None = None) -> float:
 
 def in_flight_hours(root: str | Path, quota: dict | None = None, resource: str = "GPU") -> float:
     """Upper bound of quota that kernels still running will consume after the quota snapshot."""
-    fetched = _parse_time((quota or {}).get("fetched_at")) or _now()
+    fetched = _as_of(quota or {})
     return sum(reserved_hours(r, fetched) for r in active_runs(root, resource))
 
 
+def spent_since(r: dict, t: dt.datetime) -> float:
+    """The most quota hours a run that is no longer in flight may have spent after ``t``, the time of a quota
+    snapshot: its measured hours (``collect``), else its cap, less what it ran before ``t``, and never more than the
+    time between ``t`` (or its start) and when the log last saw it end. A TPU run never seen running spent nothing
+    unless collected: it may have sat in the queue."""
+    res = run_resource(r)
+    pushed = _parse_time(r.get("pushed_at"))
+    start = _parse_time(r.get("started_at")) or (pushed if res != "TPU" else None)
+    end = _parse_time(r.get("finished_at")) or _parse_time(r.get("collected_at")) or _now()
+    from_t = max(t, start or pushed or t)
+    window = (end - from_t).total_seconds() / 3600
+    if pushed is None or window <= 0:
+        return 0.0
+    measured = r.get("tpu_hours" if res == "TPU" else "gpu_hours")
+    if measured is None and start is None:
+        return 0.0
+    total = float(measured if measured is not None else r.get("hours") or session_limit(res))
+    before = max(0.0, (t - start).total_seconds() / 3600) if start is not None else 0.0
+    return min(window, max(0.0, total - before))
+
+
+def unseen_spend(root: str | Path, quota: dict, resource: str = "GPU") -> list[tuple[dict, float]]:
+    """(run, hours) for runs of ``resource`` that are no longer in flight but may have spent quota after ``quota``
+    was taken, so its figure is too high by that much. Nothing for a quota fetched live just now: every run it
+    could not see had ended before it."""
+    t, now = _as_of(quota), _now()
+    out = []
+    for r in runs(root):
+        if r.get("status") == PENDING or run_resource(r) != resource:
+            continue
+        if r.get("status") in ACTIVE and not _stale(r, now):  # still in flight: `in_flight_hours`
+            continue
+        h = spent_since(r, t)
+        if h >= UNSEEN_MIN_H:
+            out.append((r, h))
+    return out
+
+
 def available_hours(root: str | Path, quota: dict | None = None, resource: str = "GPU") -> float | None:
+    """Quota hours left to plan with: what ``quota`` says, less what running kernels may still spend and what runs
+    logged since the snapshot spent."""
     q = quota or cached_quota(root, resource)
     if q is None:
         return None
-    return q["remaining_h"] - in_flight_hours(root, q, resource)
+    return q["remaining_h"] - in_flight_hours(root, q, resource) - sum(h for _, h in unseen_spend(root, q, resource))
+
+
+def _when(q: dict) -> tuple[str, str]:
+    """('2026-10-24 06:27 UTC', '3.0 days'): when ``q`` was fetched and how long ago."""
+    t = _parse_time(q.get("fetched_at"))
+    if t is None:
+        return "an unknown time", "unknown age"
+    h = max(0.0, (_now() - t).total_seconds() / 3600)
+    return t.strftime("%Y-%m-%d %H:%M UTC"), "<1h" if h < 1 else f"{h:.0f}h" if h < 48 else f"{h / 24:.1f} days"
+
+
+def quota_age(q: dict) -> str:
+    """'cached 2026-10-24 06:27 UTC, 3.0 days ago' for a quota read from the cache, with the reset that passed since
+    when its week is over."""
+    when, age = _when(q)
+    s = f"cached {when}, {age} ago"
+    if q.get("stale_reset"):
+        s += f"; the weekly reset at {_iso(_as_of(q))} has passed since, so a full week is counted"
+    return s
+
+
+def _since_note(root: str | Path, q: dict, resource: str) -> str:
+    unseen = unseen_spend(root, q, resource)
+    return (f"; {len(unseen)} run(s) logged since then count {sum(h for _, h in unseen):.2f}h against it"
+            if unseen else "")
+
+
+def current_quota(root: str | Path | None = None, refresh: bool = True, resource: str = "GPU"
+                  ) -> tuple[dict | None, str]:
+    """(quota, note) of ``resource`` (its dict also carries ``tpu`` for the GPU one). With ``refresh`` the live quota
+    (note ''); when the live call fails, or without ``refresh``, the cached one with a note saying so, why, and how
+    old it is. (None, note) when there is nothing to show."""
+    root = _root(root)
+    why = None
+    if refresh:
+        live, why = live_quota(root)
+        if live is not None:
+            q = live.get("tpu") if resource == "TPU" else live
+            return (q, "") if q is not None else (None, "`kaggle quota` lists no TPU quota for this account")
+    q = cached_quota(root, resource)
+    if q is None:
+        return None, (f"`kaggle quota` {why} and nothing is cached" if why else
+                      "no quota cached yet (`python -m kgkit gpu quota` fetches it)")
+    when, age = _when(q)
+    note = (f"`kaggle quota` {why}; showing the cached value from {when} ({age} old, may be stale)" if why else
+            f"{when} ({age} old; not checked live)")
+    if q.get("stale_reset"):
+        note += f"; the weekly reset at {_iso(_as_of(q))} has passed since, so a full week is counted"
+    return q, note + _since_note(root, q, resource)
+
+
+def tpu_of(q: dict | None) -> dict | None:
+    """The TPU quota in a GPU quota dict, as of now."""
+    t = (q or {}).get("tpu")
+    return _rolled(t) if isinstance(t, dict) else None
 
 
 def quota_line(root: str | Path) -> str:
@@ -384,7 +519,10 @@ def quota_line(root: str | Path) -> str:
     s = ""
     if q is not None:
         avail = available_hours(root, q)
-        s = f"Kaggle GPU quota (cached {q.get('fetched_at', '?')}): {avail:.1f}h plannable of {q.get('total_h', 0):.0f}h"
+        s = f"Kaggle GPU quota ({quota_age(q)}): {avail:.1f}h plannable of {q.get('total_h', 0):.0f}h"
+        unseen = unseen_spend(root, q)
+        if unseen:
+            s += f" ({len(unseen)} run(s) logged since then counted, {sum(h for _, h in unseen):.1f}h)"
         refresh = _parse_time(q.get("refresh_at"))
         if refresh is not None:
             h = (refresh - _now()).total_seconds() / 3600
@@ -414,7 +552,7 @@ def resets_before(q: dict, deadline: str | None) -> int:
 
 
 def _reservation_lines(root: Path, q: dict, resource: str) -> list[str]:
-    fetched = _parse_time(q.get("fetched_at")) or _now()
+    fetched = _as_of(q)
     out = []
     for r in active_runs(root, resource):
         out.append(f"    - {run_label(r)} [{r.get('status')}, cap {float(r.get('hours') or 0):g}h"
@@ -426,39 +564,52 @@ def _reservation_lines(root: Path, q: dict, resource: str) -> list[str]:
     return out
 
 
-def quota_report(root: str | Path | None = None, refresh: bool = True) -> str:
-    root = _root(root)
-    if refresh:
-        refresh_runs(root)
-    q = fetch_quota(root) if refresh else None
-    live = q is not None
-    q = q or cached_quota(root)
-    if q is None:
-        return "GPU quota unknown: `kaggle quota` failed (is the Kaggle CLI >= 2.2 installed and authenticated?)"
+def _quota_lines(root: Path, q: dict, note: str = "", label: str = "cached") -> list[str]:
+    """The quota report for ``q``: its figures, where they come from (``note``, from `current_quota`, under
+    ``label``), the runs logged since it was taken and the ones still in flight, the reset, and the TPU quota."""
+    unseen = unseen_spend(root, q)
+    spent = sum(h for _, h in unseen)
     inflight = in_flight_hours(root, q)
-    lines = [f"Kaggle GPU quota: {q['used_h']:.2f}h used, {q['remaining_h']:.2f}h of {q['total_h']:.2f}h left"
-             + ("" if live else f" (cached {q.get('fetched_at')})")]
+    left = q["remaining_h"] - spent - inflight
+    lines = [f"Kaggle GPU quota: {q['used_h']:.2f}h used, {q['remaining_h']:.2f}h of {q['total_h']:.2f}h left"]
+    if note:
+        lines.append(f"  {label}: {note}")
+    if unseen:
+        lines.append("  logged since then: " + ", ".join(f"{run_label(r)} ~{h:.2f}h" for r, h in unseen)
+                     + " (spent after the figures above were taken)")
     if inflight:
-        lines.append(f"  in flight: up to {inflight:.2f}h more for running kernels -> "
-                     f"{q['remaining_h'] - inflight:.2f}h plannable")
+        lines.append(f"  in flight: up to {inflight:.2f}h more for running kernels -> {left:.2f}h plannable")
         lines += _reservation_lines(root, q, "GPU")
+    elif unseen:
+        lines.append(f"  -> {left:.2f}h plannable")
     refresh_at = _parse_time(q.get("refresh_at"))
     if refresh_at:
         h = (refresh_at - _now()).total_seconds() / 3600
         lines.append(f"  resets {_iso(refresh_at)} (in {h:.1f}h). Unused quota does NOT roll over.")
-        left = q["remaining_h"] - inflight
         if 0 < h <= 36 and left >= 1.0:
             lines.append(f"  USE IT OR LOSE IT: {left:.1f}h expire in {h:.0f}h - queue long, useful jobs now "
                          "(extra seeds / full-fold runs of the current best, final-resolution models).")
-    tq = cached_quota(root, "TPU")
+    tq = tpu_of(q)
     if tq is not None:
         tin = in_flight_hours(root, tq, "TPU")
+        tleft = available_hours(root, tq, "TPU")
         lines.append(f"Kaggle TPU quota: {tq['remaining_h']:.2f}h of {tq['total_h']:.2f}h left"
-                     + (f", up to {tin:.2f}h in flight -> {tq['remaining_h'] - tin:.2f}h plannable" if tin else "")
+                     + (f", up to {tin:.2f}h in flight" if tin else "")
+                     + (f" -> {tleft:.2f}h plannable" if tleft != tq["remaining_h"] else "")
                      + " (separate quota; 9h sessions, one batch TPU session at a time, queued 10-24h)")
         if tin:
             lines += _reservation_lines(root, tq, "TPU")
-    return "\n".join(lines)
+    return lines
+
+
+def quota_report(root: str | Path | None = None, refresh: bool = True) -> str:
+    root = _root(root)
+    if refresh:
+        refresh_runs(root)
+    q, note = current_quota(root, refresh)
+    if q is None:
+        return f"GPU quota unknown: {note} (is the Kaggle CLI >= 2.2 installed and authenticated?)"
+    return "\n".join(_quota_lines(root, q, note, "NOT LIVE" if refresh else "cached"))
 
 
 # ----------------------------------------------------------------------------- run log
@@ -1341,16 +1492,19 @@ def push(root: str | Path | None, kdir: str | Path, force: bool = False, hours: 
         if check_sessions:
             _session_preflight(root, res, force)
         refresh_runs(root)
-        q = fetch_quota(root)
-        q = (q.get("tpu") if q and res == "TPU" else q) or cached_quota(root, res)
+        q, note = current_quota(root, True, res)
         avail = available_hours(root, q, res) if q else None
         if avail is None:
-            print(f"warning: {res} quota unknown (kaggle quota failed); pushing without a budget check")
+            print(f"warning: {res} quota unknown - {note}; pushing without a budget check")
         elif avail < hours and not force:
             raise SystemExit(f"refusing to push: run is capped at {hours:.2f}h but only {avail:.2f}h of {res} quota "
-                             f"is plannable before {q.get('refresh_at')}. Lower --hours, wait for the reset, "
-                             "check the reservations (`kgkit gpu quota`), or pass --force.")
-        elif avail is not None:
+                             f"is plannable before {q.get('refresh_at')}"
+                             + (f" (a cached quota: {note})" if note else "")
+                             + ". Lower --hours, wait for the reset, check the reservations (`kgkit gpu quota`), "
+                             "or pass --force.")
+        else:
+            if note:
+                print(f"warning: {res} budget checked against a cached quota, not a live one: {note}")
             print(f"{res} budget: run capped at {hours:.2f}h; {avail:.2f}h plannable -> "
                   f"{avail - hours:.2f}h left in the worst case")
     args = ["kernels", "push", "-p", str(kdir), "-t", str(int(hours * 3600))]
@@ -1712,14 +1866,15 @@ def plan(root: str | Path | None = None, refresh: bool = True, deadline: str | N
     st = S.load(root)
     if refresh:
         refresh_runs(root)
-    q = (fetch_quota(root) if refresh else None) or cached_quota(root)
-    lines = [quota_report(root, refresh=False) if q else "GPU quota unknown (run `kaggle quota`)."]
+    q, note = current_quota(root, refresh)
+    lines = (_quota_lines(root, q, note, "NOT LIVE" if refresh else "cached") if q else
+             [f"GPU quota unknown: {note} (run `kaggle quota` to see why)."])
     deadline = deadline or (st.deadline if st else "")
     dl = _parse_time(deadline[:10] + "T23:59:00Z") if deadline else None
     now = _now()
     if q and dl:
         weekly = q.get("total_h") or 30.0
-        avail_now = max(0.0, q["remaining_h"] - in_flight_hours(root, q))
+        avail_now = max(0.0, available_hours(root, q))
         resets = resets_before(q, deadline)
         total = avail_now + resets * weekly
         days = (dl - now).total_seconds() / 86400
@@ -1738,10 +1893,10 @@ def plan(root: str | Path | None = None, refresh: bool = True, deadline: str | N
                          f"~{max(0.0, total - final_reserve):.0f}h for exploration. Exploration = 1-fold screens "
                          "at reduced resolution/epochs with pruning; promote only ideas that beat the baseline "
                          "fold by more than its fold std.")
-    tq = cached_quota(root, "TPU")
+    tq = tpu_of(q)
     if tq is not None:
-        tpu_left = max(0.0, tq["remaining_h"] - in_flight_hours(root, tq, "TPU"))
-        gpu_left = max(0.0, q["remaining_h"] - in_flight_hours(root, q)) if q else None
+        tpu_left = max(0.0, available_hours(root, tq, "TPU"))
+        gpu_left = max(0.0, available_hours(root, q)) if q else None
         if tpu_left >= 1.0:
             lines.append(f"TPU: {tpu_left:.1f}h of {tq.get('total_h', 0):.0f}h plannable (separate weekly quota, also "
                          "lost at the reset). Batch TPU jobs wait 10-24h in the queue (one at a time per account, "

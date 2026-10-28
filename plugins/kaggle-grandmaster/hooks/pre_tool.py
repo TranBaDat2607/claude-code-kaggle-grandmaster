@@ -145,7 +145,9 @@ def gpu_push_guard(payload: dict, push: dict) -> bool:
         cap = float(push["timeout"]) / 3600 if push.get("timeout") else None
     except ValueError:
         cap = None
-    when = f" (quota checked {q.get('fetched_at')}, resets {q.get('refresh_at')})"
+    since = len(C.G.unseen_spend(root, q, res))
+    when = (f" (quota {C.G.quota_age(q)}" + (f", {since} run(s) logged since then counted" if since else "")
+            + f", resets {q.get('refresh_at')})")
     kernel = target[1].get("id") or target[0].name
     if avail <= 0.05:
         C.emit("PreToolUse", permissionDecision="ask",

@@ -13,7 +13,10 @@ Unused quota expires at the weekly reset, so hours you don't spend are also lost
 - `kaggle quota` (CLI ≥ 2.2): GPU hours (30 h/week) and **TPU hours (20 h/week, a separate quota)**
   used/remaining and `refreshAt` (weekly reset, UTC). `python -m kgkit gpu quota` caches both in
   `.kaggle-gm/gpu_quota.json`, re-checks the runs it has as in flight (finished ones release their
-  reservation), lists what still holds hours, and warns when hours are about to expire unused.
+  reservation), lists what still holds hours, and warns when hours are about to expire unused. The live call is
+  tried twice; when it still fails the report says `NOT LIVE`, why, and how old the cached value is, and counts the
+  runs logged since against it (it cannot see sessions started elsewhere, such as the website or another machine:
+  run `gpu quota` again before committing hours on a cached figure).
 - Per-session limit 12 h (GPU/CPU), 9 h (TPU). The push timeout `-t` caps a run below that, and a capped
   run never burns more than its cap. A push without `-t` reserves the full session limit until the run is
   seen finished.
