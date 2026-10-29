@@ -240,7 +240,7 @@ def test_status_and_hook_read_the_measured_paired_noise(hws, capsys, plugin_root
     assert entry["new"] == "0002_b" and entry["eval"] == EV.spec_hash(hws, SPEC) and entry["se_public"] < entry["se"]
     _cli("status")
     out = capsys.readouterr().out
-    assert f"paired SE of differences ~{entry['se']:.4f}" in out and "not measured yet" not in out
+    assert f"paired SE of differences ~{EV.fmt_se(entry['se'])}" in out and "not measured yet" not in out
     _cli("ledger", "noise", "1", "--boot", "200", "--public-n", "600")
     out = capsys.readouterr().out
     assert "SE of the score" in out and "CV-LB gap within" in out and "(paired), not with this" in out

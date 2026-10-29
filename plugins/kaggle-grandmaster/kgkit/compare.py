@@ -29,6 +29,7 @@ from typing import Callable, Sequence
 import numpy as np
 
 from . import metrics as M
+from .evalset import fmt_gain, fmt_se
 
 
 def compare_folds(new_scores: Sequence[float], base_scores: Sequence[float], greater_is_better: bool = True) -> dict:
@@ -331,7 +332,7 @@ def paired_bootstrap(
 
 def describe(res: dict) -> str:
     """One line that names the question and the method, e.g.
-    'paired SE of the difference 0.00340 (bootstrap, 1000 resamples over 58 rows)'."""
+    'paired SE of the difference 0.0034 (bootstrap, 1000 resamples over 58 rows)'."""
     what = "paired SE of the difference" if res["question"] == "paired" else "SE of the score"
     at = f" at n={res['size']}" if res.get("size") else ""
     how = res["method"]
@@ -340,7 +341,7 @@ def describe(res: dict) -> str:
     how += f", {res['n_boot']} resamples" if "bootstrap" in res["method"] else ""
     src = f"of {res['size']} rows drawn from" if res.get("size") else "over"
     redrawn = f"; {res['n_redrawn']} redrawn to keep every class/label" if res.get("n_redrawn") else ""
-    return f"{what}{at} {res['se']:.5f} ({how} {src} {res['n_units']} {res['unit']}{redrawn})"
+    return f"{what}{at} {fmt_se(res['se'])} ({how} {src} {res['n_units']} {res['unit']}{redrawn})"
 
 
 def verdict(folds: dict | None, boot: dict | None = None, z: float = 2.0) -> dict:
@@ -359,13 +360,13 @@ def verdict(folds: dict | None, boot: dict | None = None, z: float = 2.0) -> dic
     boot_strong = boot is not None and boot["z"] == boot["z"] and boot["z"] >= z
     boot_against = boot is not None and boot["gain"] < 0
     if folds is not None:
-        reasons.append(f"folds: gain {folds['gain']:+.5f}, improved {folds['folds_improved']}/{folds['k']}, "
-                       f"paired SE {folds['se']:.5f} (t={folds['t']:.2f}); baseline fold std "
-                       f"{folds['base_fold_std']:.5f}")
+        reasons.append(f"folds: gain {fmt_gain(folds['gain'])}, improved {folds['folds_improved']}/{folds['k']}, "
+                       f"paired SE {fmt_se(folds['se'])} (t={folds['t']:.2f}); baseline fold std "
+                       f"{fmt_se(folds['base_fold_std'])}")
         if folds["base_fold_std"] > 0 and gain > 3 * folds["base_fold_std"]:
             flags.append("gain > 3x the baseline fold std: audit for leakage (validation-auditor) before accepting")
     if boot is not None:
-        reasons.append(f"{boot.get('method', 'bootstrap')}: gain {boot['gain']:+.5f} +/- {boot['se']:.5f} "
+        reasons.append(f"{boot.get('method', 'bootstrap')}: gain {fmt_gain(boot['gain'])} +/- {fmt_se(boot['se'])} "
                        f"(z={boot['z']:.2f}, P(better)={boot['p_better']:.2f}, "
                        f"{boot.get('n_units', boot['n_rows'])} {boot.get('unit', 'rows')})")
     equivalent = boot is not None and boot.get("p_rope") is not None and boot["p_rope"] >= 0.95
@@ -387,7 +388,7 @@ def verdict(folds: dict | None, boot: dict | None = None, z: float = 2.0) -> dic
 
 
 def format_comparison(new_id: str, base_id: str, res: dict) -> str:
-    lines = [f"{new_id} vs {base_id}: {res['decision']} (gain {res['gain']:+.5f}, positive = better)"]
+    lines = [f"{new_id} vs {base_id}: {res['decision']} (gain {fmt_gain(res['gain'])}, positive = better)"]
     lines += [f"  {r}" for r in res["reasons"]]
     lines += [f"  WARNING: {f}" for f in res["flags"]]
     return "\n".join(lines)
@@ -448,7 +449,7 @@ def with_seed_noise(res: dict, seed: dict, r_new: int = 1, r_base: int = 1) -> d
     out.update(se=se, se_rows=res["se"], z=gain / se if se > 0 else float("nan"),
                p_better=_phi(gain / se) if se > 0 else float("nan"),
                ci95=[gain - 1.96 * se, gain + 1.96 * se],
-               method=f"{res['method']} + seed noise (sd {seed['sd']:.5f}, df {seed['df']})")
+               method=f"{res['method']} + seed noise (sd {fmt_se(seed['sd'])}, df {seed['df']})")
     for k in ("rope", "p_rope", "p_above_rope", "p_below_rope"):
         out.pop(k, None)
     if res.get("rope"):

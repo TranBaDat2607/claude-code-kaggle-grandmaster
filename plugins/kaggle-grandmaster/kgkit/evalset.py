@@ -357,8 +357,28 @@ def recent_noise(root: str | Path, key: str | None, k: int = 5) -> dict | None:
             "n_units": last[-1].get("n_units"), "last": f"{last[-1].get('new')} vs {last[-1].get('base')}"}
 
 
+def fmt_se(x: float) -> str:
+    """A noise scale (an SE, an SD, a threshold of a few SEs) to 2 significant digits: 0.0034, 7.7e-06, 340. Its size
+    follows the metric's scale and the size of the evaluation set (a paired SE of an AUC over 700k rows is ~1e-5):
+    any fixed number of decimals rounds it to 0 in some competition."""
+    return _sig(x, 2)
+
+
+def fmt_gain(x: float) -> str:
+    """A signed difference of two scores (a gain, a delta) to 3 significant digits, so that it can be read against
+    its noise (``fmt_se``) at any scale: +0.00213, +1.23e-05, -340."""
+    return _sig(x, 3, "+")
+
+
+def _sig(x: float, digits: int, sign: str = "") -> str:
+    """``x`` to ``digits`` significant digits as format 'g' writes it (an exponent below 1e-4); a value with more
+    digits before the point is written whole, 340 rather than 3.4e+02."""
+    s = f"{x:{sign}.{digits}g}"
+    return f"{x:{sign}.0f}" if "e+" in s else s
+
+
 def format_noise(noise: dict) -> str:
     """'paired SE of differences ~0.0034 (bootstrap over 58 rows, median of 3 compares)'."""
     units = f" over {noise['n_units']} {noise.get('unit') or 'rows'}" if noise.get("n_units") else ""
     many = f", median of {noise['n']} compares" if noise.get("n", 1) > 1 else ""
-    return f"paired SE of differences ~{noise['se']:.4f} ({'/'.join(noise['methods'])}{units}{many})"
+    return f"paired SE of differences ~{fmt_se(noise['se'])} ({'/'.join(noise['methods'])}{units}{many})"

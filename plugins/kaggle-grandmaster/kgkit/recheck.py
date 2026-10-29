@@ -32,6 +32,7 @@ import pandas as pd
 
 from . import state as S
 from .compare import compare_folds, format_comparison, paired_bootstrap, verdict
+from .evalset import fmt_gain
 from .experiment import Ledger
 
 
@@ -107,9 +108,9 @@ def report(old_rc: dict, new_rc: dict, gib: bool, orig: tuple[dict, dict] | None
         o = (o_new["cv"] - o_old["cv"]) * (1 if gib else -1)
         r_gain = v["gain"]
         kept = r_gain / o if o > 0 else float("nan")
-        lines += ["", f"original split: {o_old['id']} -> {o_new['id']} gain {o:+.5f}",
-                  f"fresh split:    gain {r_gain:+.5f} ({kept:.0%} of the original gain survived)" if o > 0
-                  else f"fresh split:    gain {r_gain:+.5f}"]
+        lines += ["", f"original split: {o_old['id']} -> {o_new['id']} gain {fmt_gain(o)}",
+                  f"fresh split:    gain {fmt_gain(r_gain)} ({kept:.0%} of the original gain survived)" if o > 0
+                  else f"fresh split:    gain {fmt_gain(r_gain)}"]
         if o <= 0:
             lines.append("VERDICT: nothing to recheck - the current pipeline was not better than the old one on the "
                          "frozen split either (check the order: --exp OLD NEW, old --run first).")

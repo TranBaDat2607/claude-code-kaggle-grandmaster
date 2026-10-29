@@ -40,6 +40,7 @@ import pandas as pd
 
 from . import metrics as M
 from .compare import compare_folds
+from .evalset import fmt_gain
 from .features import oof_target_encode
 
 GRP_AGGS = ("mean", "std", "min", "max", "median", "nunique", "diff_mean", "ratio_mean", "rank")
@@ -294,7 +295,7 @@ def feature_search(train: pd.DataFrame, y, folds, cat_cols: Sequence[str], num_c
             entry.update(accepted=len(chosen), gain=cmp["gain"], cv=float(np.mean(cur["scores"])))
         history.append(entry)
         if verbose:
-            print(f"batch {bi + 1}/{len(batches)}: {entry['n']} cand, gain {entry['gain']:+.5f} "
+            print(f"batch {bi + 1}/{len(batches)}: {entry['n']} cand, gain {fmt_gain(entry['gain'])} "
                   f"(t={entry['t']:.2f}) -> kept {entry['accepted']}; total kept {len(kept)}", flush=True)
     res = {
         "metric": metric, "model": cur["model"], "screen_folds": list(screen_folds) if screen_folds else None,
@@ -332,7 +333,7 @@ def report(res: dict) -> str:
              + (f" on folds {res['screen_folds']}" if res.get("screen_folds") else "")]
     rc = res.get("recheck")
     if rc:
-        lines.append(f"- recheck on an independent fold split: gain {rc['gain']:+.5f}, folds improved "
+        lines.append(f"- recheck on an independent fold split: gain {fmt_gain(rc['gain'])}, folds improved "
                      f"{rc['folds_improved']}/{rc['k']}, t={rc['t']:.2f}"
                      + ("" if rc["gain"] > 0 else "  <- NOT confirmed: the search overfit the screening folds"))
     else:
