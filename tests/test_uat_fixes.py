@@ -2975,3 +2975,103 @@ def test_collect_of_a_folder_while_kaggle_still_runs_the_kernel_charges_nothing_
     assert "collected me/k v3: running (Kaggle has it running)" in out and "no hours accounted yet" in out
     run = G.runs(ws)[-1]
     assert run["status"] == "running" and "gpu_hours" not in run
+
+
+# ----------------------------------------------------------------------------- #61 noise numbers to significant digits
+@pytest.mark.parametrize("x, se, gain", [(7.695e-06, "7.7e-06", "+7.7e-06"), (1.539e-05, "1.5e-05", "+1.54e-05"),
+                                         (0.0034, "0.0034", "+0.0034"), (0.012345, "0.012", "+0.0123"),
+                                         (0.00213, "0.0021", "+0.00213"), (99.7, "100", "+99.7"),
+                                         (-340.4, "-340", "-340"), (12345.6, "12346", "+12346"), (0.0, "0", "+0")])
+def test_noise_scales_and_gains_are_printed_to_significant_digits(x, se, gain):
+    assert (EV.fmt_se(x), EV.fmt_gain(x)) == (se, gain)
+
+
+@pytest.mark.parametrize("scale", [1e-9, 1e-7, 3e-6, 1e-4, 0.003, 0.2, 7.0, 340.0, 1e5])
+def test_a_printed_noise_scale_or_gain_keeps_its_value_at_any_scale(scale):
+    for x in scale * np.array([1.0, 1.234, 4.56, 9.49]):
+        assert float(EV.fmt_se(x)) == pytest.approx(x, rel=0.05)
+        assert float(EV.fmt_gain(-x)) == pytest.approx(-x, rel=0.005)
+
+
+def _issue_61_noise(root, key):
+    """The two paired SEs the issue's comparisons.jsonl held (`ledger compare`, clt, 699635 OOF rows)."""
+    for se in (1.27e-05, 2.69e-06):
+        EV.log_comparison(root, {"new": "0002", "base": "0001", "eval": key, "question": "paired", "gain": 1e-05,
+                                 "se": se, "decision": "inconclusive", "method": "clt", "unit": "rows",
+                                 "n_units": 699635})
+
+
+ISSUE_61_LINE = ("paired SE of differences ~7.7e-06 (clt over 699635 rows, median of 2 compares): gains under "
+                 "~1.5e-05 are within noise")
+
+
+def test_ledger_lb_and_status_print_the_issues_paired_se_and_threshold(ws, monkeypatch, capsys):
+    """'~0.0000' and 'gains under ~0.0000' before: :.4f rounded a median SE of 7.7e-06 away."""
+    from kgkit import cli
+
+    (ws / "data").mkdir()
+    pd.DataFrame({"id": range(10), "fold": [0, 1, 2, 3, 4] * 2}).to_csv(ws / "data" / "folds.csv", index=False)
+    led = Ledger(ws)
+    led.log("stack_a", 0.96221, decision="baseline")
+    new = led.log("stack_b", 0.96222)
+    _issue_61_noise(ws, EV.folds_file_hash(ws))
+    monkeypatch.chdir(ws)
+    cli.main(["ledger", "lb", new["id"], "0.96214"])
+    assert f"  noise: {ISSUE_61_LINE}" in capsys.readouterr().out.splitlines()
+    cli.main(["status"])
+    assert f"  noise: {ISSUE_61_LINE}" in capsys.readouterr().out.splitlines()
+
+
+def test_the_holdout_noise_note_and_the_brief_print_them_too(tmp_path, plugin_root):
+    pd.DataFrame({"y": [0, 1] * 5}).to_csv(tmp_path / "h.csv", index=False)
+    S.CompetitionState(slug="demo", metric="auc", validation="holdout+lb", holdout_n=699635, holdout_se=0.00021,
+                       eval_truth="h.csv:y").save(tmp_path)
+    _issue_61_noise(tmp_path, EV.spec_hash(tmp_path, "h.csv:y"))
+    note = Ledger(tmp_path).noise_note()
+    assert f"; {ISSUE_61_LINE};" in note and "holdout_se 0.00021 is the SE of one absolute score" in note
+    ctx = _session_context(plugin_root, tmp_path)
+    assert "measured paired SE of differences ~7.7e-06 (clt over 699635 rows, median of 2 compares)" in ctx
+
+
+def test_compare_prints_a_measured_paired_se_below_1e_5_and_the_noise_line_reads_it(ws, monkeypatch, capsys):
+    """The issue's repro end to end: two models ~1e-5 of an AUC apart, compared paired (clt), then `ledger lb`."""
+    from kgkit import cli
+    from kgkit import metrics as M
+
+    rng = np.random.default_rng(61)
+    n = 20_000
+    y = (rng.random(n) < 0.3).astype(int)
+    a = y + rng.normal(0, 1.0, n)
+    b = a + rng.normal(0, 1e-3, n)
+    (ws / "data").mkdir()
+    pd.DataFrame({"id": np.arange(n), "target": y}).to_csv(ws / "data" / "train.csv", index=False)
+    pd.DataFrame({"id": np.arange(n), "fold": np.arange(n) % 5}).to_csv(ws / "data" / "folds.csv", index=False)
+    led = Ledger(ws)
+    base = led.log("stack_a", M.score("auc", y, a), oof=a, decision="baseline")
+    new = led.log("stack_b", M.score("auc", y, b), oof=b)
+    monkeypatch.chdir(ws)
+    cli.main(["ledger", "compare", new["id"], base["id"], "--truth", "data/train.csv:target"])
+    out = capsys.readouterr().out
+    entry = EV.comparisons(ws)[-1]
+    se = entry["se"]
+    assert entry["method"] == "clt" and se < 1e-5  # :.5f printed it as 0.00000
+    shown = re.search(r"paired SE of the difference (\S+) \(influence-function CLT over 20000 rows\)", out)
+    assert float(shown[1]) == pytest.approx(se, rel=0.05)
+    assert f"gain {EV.fmt_gain(entry['gain'])} +/- {EV.fmt_se(se)} (z=" in out and "0.00000" not in out
+    cli.main(["ledger", "lb", new["id"], "0.96214"])
+    assert (f"noise: paired SE of differences ~{EV.fmt_se(se)} (clt over 20000 rows): gains under "
+            f"~{EV.fmt_se(2 * se)} are within noise") in capsys.readouterr().out
+
+
+def test_fold_paired_compare_and_recheck_print_gains_and_ses_below_1e_5():
+    from kgkit.compare import compare_folds, format_comparison, verdict
+    from kgkit.recheck import report
+
+    base = [0.96210, 0.96190, 0.96230, 0.96205, 0.96215]
+    new = [s + d for s, d in zip(base, [1.1e-05, 0.9e-05, 1.3e-05, 1.0e-05, 1.2e-05])]
+    text = format_comparison("0002", "0001", verdict(compare_folds(new, base)))
+    assert "0002 vs 0001: KEEP (gain +1.1e-05, positive = better)" in text
+    assert "folds: gain +1.1e-05, improved 5/5, paired SE 7.1e-07 (t=15.56); baseline fold std 0.00013" in text
+    rc = report({"id": "0001", "fold_scores": base}, {"id": "0002", "fold_scores": new}, True,
+                orig=({"id": "0001", "cv": 0.96210}, {"id": "0002", "cv": 0.962112}))
+    assert "original split: 0001 -> 0002 gain +1.2e-05" in rc and "gain +1.1e-05 (92% of the original" in rc

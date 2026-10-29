@@ -569,6 +569,7 @@ def _fitted_note(r: dict) -> str:
 
 
 def cmd_ledger(a):
+    from . import evalset as E
     from .experiment import Ledger, fmt_cv
 
     led = Ledger()
@@ -629,7 +630,7 @@ def cmd_ledger(a):
         chain = led.lineage(a.args[0] if a.args else led.baseline()["id"])
         prev = None
         for r in chain:
-            d = f"{r['cv'] - prev:+.5f}" if prev is not None and r.get("cv") is not None else "root"
+            d = E.fmt_gain(r["cv"] - prev) if prev is not None and r.get("cv") is not None else "root"
             print(f"{r['id']:40s} CV {fmt_cv(r)} ({d})  {r.get('decision') or '-':12s} "
                   f"{(r.get('decision_note') or r.get('notes') or '')[:60]}")
             prev = r.get("cv")
@@ -646,7 +647,7 @@ def cmd_ledger(a):
         folds = _col(a.folds).to_numpy() if a.folds else None
         r = led.import_preds(a.args[0], arr(a.args[1]), arr(a.test) if a.test else None, y_true=y, folds=folds,
                              cv=a.cv, notes=a.notes or "", source=a.source)
-        print(f"logged {r['id']}: CV {r['cv']:.5f}" + (f" +/- {r['cv_std']:.5f}" if r.get("cv_std") else "")
+        print(f"logged {r['id']}: CV {r['cv']:.5f}" + (f" +/- {E.fmt_se(r['cv_std'])}" if r.get("cv_std") else "")
               + f" [{a.source}]")
 
 
@@ -717,6 +718,7 @@ def _ledger_compare(led, a):
     from . import metrics as M
     from . import state as S
     from .compare import compare_folds, describe, estimate, format_comparison, verdict
+    from .evalset import fmt_se
 
     st = S.load()
     holdout = st is not None and st.holdout
@@ -799,8 +801,8 @@ def _ledger_compare(led, a):
         public_n = a.public_n or (st.public_lb_n if st else None)
         if public_n:
             lb = estimate(y, pa, pb, m.name, method=_method(a), n_boot=a.boot, groups=groups, mask=ok, size=public_n)
-            print(f"  public LB (n={public_n}): {describe(lb)}: LB gaps between these two under ~{2 * lb['se']:.5f} "
-                  "are noise (assumes the public rows look like the evaluation rows)")
+            print(f"  public LB (n={public_n}): {describe(lb)}: LB gaps between these two under "
+                  f"~{fmt_se(2 * lb['se'])} are noise (assumes the public rows look like the evaluation rows)")
     _log_comparison(led, new_id, base_id, folds_res, boot, lb, v["decision"])
     print(f"\nrecord it: python -m kgkit ledger decide {new_id} keep|discard|inconclusive \"<why>\" --parent {base_id}")
 
@@ -858,6 +860,7 @@ def _ledger_noise(led, a):
     from . import metrics as M
     from . import state as S
     from .compare import describe, estimate
+    from .evalset import fmt_se
 
     st = S.load()
     truth_spec = a.truth or (st.eval_truth if st else "")
@@ -877,7 +880,7 @@ def _ledger_noise(led, a):
     if public_n:
         lb = estimate(y, p, None, m.name, method=_method(a), n_boot=a.boot, groups=groups, size=public_n)
         gap = math.hypot(res["se"], lb["se"])
-        print(f"public LB (n={public_n}): {describe(lb)}; a CV-LB gap within ~{2 * gap:.5f} (2 x sqrt(SE_eval^2 + "
+        print(f"public LB (n={public_n}): {describe(lb)}; a CV-LB gap within ~{fmt_se(2 * gap)} (2 x sqrt(SE_eval^2 + "
               "SE_LB^2)) is sampling noise, not a validation problem (assumes the public rows look like the "
               "evaluation rows)")
     print("this is the noise of one absolute score: judge a difference between two models with `kgkit ledger "
@@ -1294,6 +1297,7 @@ def cmd_whoami(a):
 
 
 def cmd_gpu(a):
+    from . import evalset as E
     from . import gpu as G
 
     if a.gpu_cmd == "quota":
@@ -1317,7 +1321,7 @@ def cmd_gpu(a):
         if set(folders) != {"data"}:
             print("inputs: " + "; ".join(f"{d}/ <- {', '.join(refs)}" for d, refs in folders.items()))
         if tm.get("prune"):
-            print(f"pruning against {tm['prune']['baseline']} with margin {tm['prune']['margin']:.5f}")
+            print(f"pruning against {tm['prune']['baseline']} with margin {E.fmt_se(tm['prune']['margin'])}")
         if G.source_problem(kdir):
             print("next: make room as the WARNING above says and build again (`gpu push` refuses this script)")
         else:

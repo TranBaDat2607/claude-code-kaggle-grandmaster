@@ -2140,15 +2140,15 @@ def collect(root: str | Path | None, kernel: str, from_dir: str | Path | None = 
         rec = by_name.get(j["name"])
         if rec is not None:
             lines.append(f"    ledger {rec['id']} CV {rec['cv']:.5f}"
-                         + (f" +/- {rec['cv_std']:.5f}" if rec.get("cv_std") is not None else "")
+                         + (f" +/- {E.fmt_se(rec['cv_std'])}" if rec.get("cv_std") is not None else "")
                          + (f", submission {rec['submission']}" if rec.get("submission") else ""))
             continue
         for k, v in sorted(fold_scores[j["name"]].items()):
             bid, base, std = _baseline_fold_score(root, prune.get("baseline"), int(k))
             extra = ""
             if base is not None:
-                sd = f", baseline fold std {std:.5f}" if std is not None else ""
-                extra = f" vs {bid} fold {k} {base:.5f} (delta {v - base:+.5f}{sd})"
+                sd = f", baseline fold std {E.fmt_se(std)}" if std is not None else ""
+                extra = f" vs {bid} fold {k} {base:.5f} (delta {E.fmt_gain(v - base)}{sd})"
             lines.append(f"    fold {k}: best {v:.5f} [{j['fold_status'][k].get('status')}]{extra}")
         for k, txt in (j.get("errors") or {}).items():
             lines.append(f"    fold {k} FAILED - last lines:\n" + "\n".join("      " + l for l in txt.splitlines()[-15:]))

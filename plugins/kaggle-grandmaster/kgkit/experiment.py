@@ -433,7 +433,8 @@ class Ledger:
         if st is None:
             return ""
         noise = E.recent_noise(self.root, self.eval_key())
-        measured = f"{E.format_noise(noise)}: gains under ~{2 * noise['se']:.4f} are within noise" if noise else ""
+        measured = (f"{E.format_noise(noise)}: gains under ~{E.fmt_se(2 * noise['se'])} are within noise"
+                    if noise else "")
         if not st.holdout:
             return f"noise: {measured}" if noise else ""
         n = st.holdout_n or (noise or {}).get("n_units")
@@ -441,7 +442,7 @@ class Ledger:
                                               "(`kgkit ledger add <name> auto --pred FILE:COLS`) and run "
                                               "`kgkit ledger compare` (paired)")
         if st.holdout_se:
-            body += (f"; holdout_se {st.holdout_se:.4f} is the SE of one absolute score, not a threshold for "
+            body += (f"; holdout_se {E.fmt_se(st.holdout_se)} is the SE of one absolute score, not a threshold for "
                      "differences between models")
         size = f"n={n}" if n else "size unknown"
         return f"CV here is a fixed holdout ({size}{body}); the public LB is the second opinion"
@@ -474,7 +475,7 @@ class Ledger:
             return "(ledger is empty)"
         lines = ["| id | cv | ±std | LB | decision | model | notes |", "|---|---|---|---|---|---|---|"]
         for r in recs:
-            std = f"{r['cv_std']:.4f}" if r.get("cv_std") is not None else ""
+            std = E.fmt_se(r["cv_std"]) if r.get("cv_std") is not None else ""
             lb = f"{r['lb_public']:.5f}" if r.get("lb_public") is not None else ""
             lb += " (fitted)" if lb and E.lb_fitted(r) else ""
             note = (r.get("notes") or "").replace("|", "/").replace("\n", " ")[:70]
