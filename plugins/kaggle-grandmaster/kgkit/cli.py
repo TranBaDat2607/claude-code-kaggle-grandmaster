@@ -614,13 +614,15 @@ def cmd_ledger(a):
         print(json.dumps(led.get(a.args[0]), indent=2))
     elif a.action == "lb":
         priv = float(a.args[2]) if len(a.args) > 2 else None
-        r = led.attach_lb(a.args[0], float(a.args[1]), priv)
+        r = led.attach_lb(a.args[0], float(a.args[1]), priv, submission=a.sub)
         print(f"{r['id']}: CV {fmt_cv(r)} -> public LB {r['lb_public']}" + _fitted_note(r))
         agreement = led.cv_lb_summary()
         if agreement:
             print(agreement)
     elif a.action == "add":
         extra = {"variant": a.variant} if a.variant else {}
+        if a.sub:
+            extra["submission"] = a.sub
         if a.pred:
             r = _ledger_add_preds(led, a, extra)
             _auto_compare(led, a, r)
@@ -762,10 +764,15 @@ def _ledger_compare(led, a):
         if base is None:
             raise SystemExit("the ledger is empty: nothing to compare against")
         base_ref = base["id"]
-    for ref in (a.args[0], base_ref):
-        if not Path(ref).is_dir():
+    refs = (a.args[0], base_ref)
+    for ref in refs:
+        if not Path(ref).is_dir() and not _is_file_ref(led, ref):
             led.get(ref)  # fail early on a typo
-    if not Path(a.args[0]).is_dir() and not Path(base_ref).is_dir():
+    if not any(Path(r).is_dir() for r in refs):
+        why = _test_route(led, refs, holdout, bool(a.truth))
+        if why:  # no predictions on the evaluation set for one of them: compare the files the LB scored
+            return _ledger_compare_test(led, a, st, refs, why)
+    if not any(Path(r).is_dir() or _is_file_ref(led, r) for r in refs):
         ha, hb = (led.eval_record_key(led.get(r)) for r in (a.args[0], base_ref))
         if led.get(a.args[0])["id"] == led.get(base_ref)["id"]:
             raise SystemExit(f"{base_ref} is both the new experiment and the baseline (no accepted baseline yet? "
@@ -827,6 +834,11 @@ def _ledger_compare(led, a):
     v = verdict(folds_res, boot)
     print(format_comparison(new_id, base_id, v))
     lb = None
+    if boot is None and (a.public_n or (st.public_lb_n if st else None)):
+        try:  # fold scores say nothing about the LB: the files that were submitted do
+            _ledger_compare_test(led, a, st, refs, "the fold scores carry no public-LB noise")
+        except SystemExit as e:
+            print(f"  public LB noise not estimated: {e}")
     if boot is not None:
         print(f"  {describe(boot)}")
         for c in boot["caveats"]:
@@ -838,6 +850,192 @@ def _ledger_compare(led, a):
                   f"~{fmt_se(2 * lb['se'])} are noise (assumes the public rows look like the evaluation rows)")
     _log_comparison(led, new_id, base_id, folds_res, boot, lb, v["decision"])
     print(f"\nrecord it: python -m kgkit ledger decide {new_id} keep|discard|inconclusive \"<why>\" --parent {base_id}")
+
+
+def _is_file_ref(led, ref: str) -> bool:
+    """A prediction file given in place of a ledger id (a ledger id or name wins when both exist)."""
+    if not Path(ref).is_file():
+        return False
+    try:
+        led.get(ref)
+    except KeyError:
+        return True
+    return False
+
+
+def _test_route(led, refs, holdout: bool, truth_given: bool) -> str:
+    """Why two refs are compared on their test files instead of the evaluation set ('' when they are not): a file was
+    given, or a record has no predictions on the evaluation set and the fold scores cannot stand in."""
+    recs = [None if _is_file_ref(led, r) else led.get(r) for r in refs]
+    if any(r is None for r in recs):
+        return "a prediction file was given"
+    key = "holdout_path" if holdout else "oof_path"
+    lacking = [r["id"] for r in recs if not r.get(key)]
+    if not lacking:
+        return ""
+    folds = [r.get("fold_scores") for r in recs]
+    if not holdout and not truth_given and all(folds) and len(folds[0]) == len(folds[1]):
+        return ""  # the fold-paired test applies
+    what = "holdout" if holdout else "OOF"
+    return f"{' and '.join(lacking)} {'has' if len(lacking) == 1 else 'have'} no {what} predictions on the evaluation set"
+
+
+def _test_pred(led, ref: str, rec: dict | None):
+    """(data, path) of the test predictions of a ledger record or of a file given as the ref: the record's
+    `submission` (what the LB scored), else the newest file of its rows in submissions.jsonl, else `test_path`."""
+    import numpy as np
+    import pandas as pd
+
+    from . import finals as FN
+    from . import state as S
+
+    def find(p):
+        for c in (Path(p), led.root / p):
+            if c.is_file():
+                return c
+        return None
+
+    if rec is None:
+        names = [ref]
+    else:
+        names = [rec.get("submission")] if rec.get("submission") else []
+        names += FN.submission_files(led.records(), S.submission_records(led.root), rec["id"])
+        names += [rec["test_path"]] if rec.get("test_path") else []
+    for name in names:
+        f = find(name)
+        if f is not None:
+            if f.suffix.lower() == ".npy":
+                return np.load(f), str(name)
+            if f.suffix.lower() in (".csv", ".gz", ".tsv"):
+                return pd.read_csv(f, sep="\t" if f.suffix.lower() == ".tsv" else ","), str(name)
+    rid = rec["id"] if rec else ref
+    raise SystemExit(f"{rid} has no test predictions on file to compare: attach its submission file with "
+                     f"`kgkit ledger lb {rid} <public_score> --sub FILE` (or `ledger add <name> lb-only --sub FILE`), "
+                     "or pass the file path in place of the id")
+
+
+def _align_test_pair(da, db, st, kind: str):
+    """(pa, pb, note): the prediction arrays of two test files on the same rows. Two CSVs are matched on the id column
+    (competition.json id_col, else the first column); with an .npy the row order is assumed to be the same."""
+    import numpy as np
+    import pandas as pd
+
+    id_col = st.id_col if st else ""
+    notes = ""
+    if isinstance(da, pd.DataFrame) and isinstance(db, pd.DataFrame):
+        idc = id_col if id_col and id_col in da.columns and id_col in db.columns else da.columns[0]
+        if idc not in db.columns:
+            raise SystemExit(f"the two files have no common id column ({idc!r} is missing from the second)")
+        ia, ib = pd.Index(da[idc]), pd.Index(db[idc])
+        if not (ia.is_unique and ib.is_unique):
+            raise SystemExit(f"{idc} has duplicate values: cannot match the rows of the two files")
+        if len(ia) != len(ib) or set(ia) != set(ib):
+            raise SystemExit(f"the two files hold different rows: {len(ia)} and {len(ib)} {idc} values, "
+                             f"{len(set(ia) ^ set(ib))} not in both")
+        db = db.iloc[ib.get_indexer(ia)]
+        ca, cb = [c for c in da.columns if c != idc], [c for c in db.columns if c != idc]
+        if len(ca) != len(cb):
+            raise SystemExit(f"the two files have {len(ca)} and {len(cb)} prediction columns")
+        pa, pb = da[ca].to_numpy(), db[cb if set(ca) != set(cb) else ca].to_numpy()
+    else:
+        def arr(d):
+            if isinstance(d, pd.DataFrame):
+                return d[[c for c in d.columns if c != id_col]].to_numpy()
+            return np.asarray(d)
+
+        pa, pb = arr(da), arr(db)
+        if len(pa) != len(pb):
+            raise SystemExit(f"the two files have {len(pa)} and {len(pb)} rows")
+        notes = "; an .npy file is assumed to hold its rows in the same order as the other file"
+    if pa.dtype == object or pb.dtype == object:
+        if kind != "label":
+            raise SystemExit("the predictions are not numeric")
+        classes, inv = np.unique(np.concatenate([pa.ravel(), pb.ravel()]).astype(str), return_inverse=True)
+        pa, pb = inv[:pa.size].reshape(pa.shape), inv[pa.size:].reshape(pb.shape)
+        notes += f"; labels encoded {', '.join(f'{c}={i}' for i, c in enumerate(classes))}"
+    if pa.shape != pb.shape:
+        raise SystemExit(f"the predictions have shapes {pa.shape} and {pb.shape}")
+    if pa.ndim == 2 and pa.shape[1] == 1:
+        pa, pb = pa[:, 0], pb[:, 0]
+    return pa, pb, notes
+
+
+def _label_reference(led, a, st, recs):
+    """(y, p, id): labels and predictions of a record with predictions on the evaluation set, to calibrate the
+    simulated test labels. `--ref`, else a record of the pair, else the accepted baseline; none when there is no
+    such record or no labels."""
+    key = "holdout_path" if (st is not None and st.holdout) else "oof_path"
+    want = getattr(a, "ref", None)
+    cands = [want] if want else [r["id"] for r in recs if r and r.get(key)]
+    if not want:
+        base = led.baseline(fallback=False)
+        if base is not None and base.get(key):
+            cands.append(base["id"])
+    truth_spec = a.truth or (st.eval_truth if st else "")
+    if not cands or not truth_spec:
+        if want:
+            raise SystemExit("--ref needs the evaluation labels: `kgkit config eval_truth=FILE:COL` or --truth")
+        return None, None, None
+    y = _truth(truth_spec)
+    p, rid = _load_pred(led, cands[0], len(y))
+    if len(p) != len(y):
+        raise SystemExit(f"{rid} has {len(p)} predictions but {truth_spec} has {len(y)} rows")
+    return y, p, rid
+
+
+def _ledger_compare_test(led, a, st, refs, why: str) -> None:
+    """`ledger compare` on the two files the leaderboard scored, for records with no predictions on the evaluation
+    set (a blend with public files, a fork). Without labels the SD of the public-LB gap is an estimate from simulated
+    labels (`compare.label_model`, `compare.simulated_gap`); it answers whether an LB gap is noise, not whether one
+    model is better, so there is no decision to record."""
+    import math
+
+    from . import compare as C
+    from . import metrics as M
+    from .evalset import fmt_se
+
+    metric_name = a.metric or (st.metric if st else None)
+    if not metric_name:
+        raise SystemExit("--metric required (no competition state found)")
+    m = M.get(metric_name)
+    recs = [None if _is_file_ref(led, r) else led.get(r) for r in refs]
+    (da, fa), (db, fb) = (_test_pred(led, r, rec) for r, rec in zip(refs, recs))
+    pa, pb, note = _align_test_pair(da, db, st, m.kind)
+    print(f"public-LB noise from the two test files ({why}): {fa} vs {fb}, {len(pa)} rows{note}")
+    sim = C.similarity(pa, pb, m.kind)
+    if "disagree" in sim:
+        print(f"  the files disagree on {100 * sim['disagree']:.2f}% of the rows")
+    else:
+        print(f"  Pearson {sim['pearson']:.4f}, Spearman {sim['spearman']:.4f}, SD of the rank difference "
+              f"{sim['rank_diff_sd']:.4f} (ranks scaled to 0-1)")
+    public_n = a.public_n or (st.public_lb_n if st else None)
+    if not public_n:
+        print("  pass --public-n <rows in the public LB> (or `kgkit config public_lb_n=...`) for the estimated noise "
+              "of their LB gap")
+        return
+    y_ref, p_ref, ref_id = _label_reference(led, a, st, recs)
+    draw, how = C.label_model(m.kind, pa, pb, y_ref, p_ref)
+    if draw is None:
+        hint = "" if ref_id else " (`--ref <id>` of a record with predictions on the evaluation set, with eval_truth set, calibrates it)"
+        print(f"  no estimate of the LB noise: {how}{hint}")
+        return
+    res = C.simulated_gap(pa, pb, m.name, draw, public_n, n_sim=getattr(a, "boot", None))
+    if not (math.isfinite(res["se_public"]) and res["se_public"] > 0):
+        print("  no estimate of the LB noise: the simulated gaps could not be scored")
+        return
+    private = (f"; private ({res['n_rows'] - res['size']} rows): {fmt_se(res['se_private'])}, "
+               f"public minus private: {fmt_se(res['se_shift'])}" if res["size"] else "")
+    print(f"  ESTIMATED SD of the {m.name} gap between them on the public LB (n={public_n}): "
+          f"{fmt_se(res['se_public'])}; LB gaps under ~{fmt_se(2 * res['se_public'])} are noise{private}")
+    print(f"  {how}{f' ({ref_id})' if ref_id else ''}; {res['n_sim']} draws")
+    gaps = [r.get("lb_public") if r else None for r in recs]
+    if all(isinstance(g, (int, float)) for g in gaps):
+        g = gaps[0] - gaps[1]
+        print(f"  observed LB gap {g:+.5f} = {abs(g) / res['se_public']:.1f} x the estimated SD: "
+              + ("within 2 SD, indistinguishable on the public LB" if abs(g) <= 2 * res["se_public"]
+                 else "beyond 2 SD, more than public noise"))
+    for c in res["caveats"]:
+        print(f"  note: {c}")
 
 
 def _method(a) -> str:
@@ -1481,6 +1679,10 @@ _LEDGER_OPTIONS = [
     ("--pred", dict(help="FILE:COL[,COL...] or .npy predictions on the evaluation set (holdout+lb: the holdout; else "
                          "OOF); the score is recomputed, the predictions stored and compared with the baseline")),
     ("--variant", dict(help="name shared by re-runs of one pipeline with other seeds (seed noise)")),
+    ("--sub", dict(help="the submission file of the record (CSV or .npy): without predictions on the evaluation set, "
+                        "`ledger compare` estimates the public-LB noise between two records from these files")),
+    ("--ref", dict(help="compare: a record with predictions on the evaluation set, used to calibrate the labels "
+                        "simulated for records that have none (default: the pair's, else the baseline)")),
 ]
 _EXP = ("exp_id", None, "ledger id (e.g. 0012) or name")
 _PAIRED = "--truth --folds --fold --groups --boot --method --rope --public-n --metric"
@@ -1489,18 +1691,18 @@ _LEDGER_ACTIONS = {
     "best": ("experiments by CV, best first", [], "-n"),
     "show": ("one record as JSON", [_EXP], ""),
     "lb": ("attach a submission's leaderboard score", [_EXP, ("public_score", None, "public LB score"),
-                                                      ("private_score", "?", "private LB score, once known")], ""),
+                                                      ("private_score", "?", "private LB score, once known")], "--sub"),
     "add": ("log an experiment", [("name", None, "experiment name (the id gets a number prefix)"),
                                   ("cv|auto|lb-only", None, "its CV (holdout+lb: holdout) score; 'auto': recomputed from --pred; "
                                                "'lb-only': no validation score (fork of public notebooks, blend "
                                                "with public files)"),
                                   ("notes", "*", "free text")],
-            "--parent --tag --variant --notes --pred " + _PAIRED),
+            "--parent --tag --variant --notes --pred --sub " + _PAIRED),
     "tag": ("add tags to a record, or remove them (--remove): mark a logged file public-lb-fitted",
             [_EXP, ("tag", "+", "tags to add (or remove)")], "--remove"),
     "compare": ("paired comparison of two experiments (or artifacts/<name> folders of per-fold OOFs)",
                 [("new", None, "ledger id/name or artifacts folder"),
-                 ("baseline", "?", "default: the accepted baseline")], _PAIRED),
+                 ("baseline", "?", "default: the accepted baseline")], _PAIRED + " --ref"),
     "noise": ("noise of one absolute score: bounds its CV-LB gap, not a difference between two models",
               [_EXP], "--truth --groups --boot --method --public-n --metric"),
     "decide": ("record the decision on a compared experiment",

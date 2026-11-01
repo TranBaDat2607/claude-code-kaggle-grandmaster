@@ -100,8 +100,9 @@ score, you're overfitting the blend — use fewer models, simpler weights, or pl
 
 Late in a Playground, the public-LB crowd is usually a blend of public submission files that come
 without OOF predictions. Such a blend cannot be cross-validated:
-- Log it as **LB-only**: `kgkit ledger add <name> lb-only "<members and weights>"`, then
-  `kgkit ledger lb <id> <score>`. Do not log it with its base stack's CV (or tag such a record
+- Log it as **LB-only**: `kgkit ledger add <name> lb-only "<members and weights>" --sub <file>`, then
+  `kgkit ledger lb <id> <score>`. The `--sub` file is what lets `ledger compare <id> <other> --public-n <rows>`
+  estimate the noise of the LB gap to another candidate without OOF. Do not log it with its base stack's CV (or tag such a record
   `--tag lb-blend`): CV-LB correlation is computed only over records with their own CV and at least 4
   distinct CVs, so borrowed CVs cannot make it look like CV tracks the LB. In a `holdout+lb` workspace the
   blend itself is scored on the holdout, so log that score (better: `--pred` with its holdout predictions);

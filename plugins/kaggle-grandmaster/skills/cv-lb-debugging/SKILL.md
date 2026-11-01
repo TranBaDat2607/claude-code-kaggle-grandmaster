@@ -29,7 +29,8 @@ description: Systematic diagnosis when cross-validation and leaderboard disagree
 5. **Public LB noise estimate**: ask the right question. Two submissions are scored on the *same*
    public rows, so the noise of their LB *gap* is the paired SE, often several times smaller than the
    SE of one score: `python -m kgkit ledger compare <a> <b> --public-n <rows>` (paired bootstrap of
-   their OOF/holdout predictions at the public-set size). The SE of one *absolute* score at that size,
+   their OOF/holdout predictions at the public-set size; for a record with no OOF it reads the two submission
+   files and prints an *estimated* SD from simulated labels). The SE of one *absolute* score at that size,
    `python -m kgkit ledger noise <id> --public-n <rows>`, is only the yardstick for a single
    submission's CV-LB gap. Both assume the public rows look like your evaluation rows.
 6. **CV-LB correlation across subs**: `python -m kgkit status`. Low correlation with several diverse

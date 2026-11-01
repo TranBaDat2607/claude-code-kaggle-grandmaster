@@ -3161,3 +3161,170 @@ def test_fold_paired_compare_and_recheck_print_gains_and_ses_below_1e_5():
     rc = report({"id": "0001", "fold_scores": base}, {"id": "0002", "fold_scores": new}, True,
                 orig=({"id": "0001", "cv": 0.96210}, {"id": "0002", "cv": 0.962112}))
     assert "original split: 0001 -> 0002 gain +1.2e-05" in rc and "gain +1.1e-05 (92% of the original" in rc
+
+
+# ----------------------------------------------------------------------------- #65 LB-only hedge in `ledger compare --public-n`
+def _sig(x):
+    return 1 / (1 + np.exp(-x))
+
+
+def _world65(rng, n, rho=0.9):
+    """Labels from a latent score, and two correlated models (b = a with partly shared noise)."""
+    z = rng.normal(size=n)
+    y = (rng.random(n) < _sig(1.5 * z - 1)).astype(int)
+    e1 = rng.normal(size=n)
+    e2 = rho * e1 + np.sqrt(1 - rho**2) * rng.normal(size=n)
+    return y, _sig(1.5 * z - 1 + 0.6 * e1), _sig(1.5 * z - 1 + 0.6 * e2)
+
+
+def _true_sd65(metric, y, pa, pb, size, draws=150, seed=0):
+    from kgkit import metrics as M
+
+    m, rng = M.get(metric), np.random.default_rng(seed)
+    gaps = []
+    for _ in range(draws):
+        s = rng.choice(len(y), size, replace=False)
+        gaps.append(m(y[s], pa[s]) - m(y[s], pb[s]))
+    return float(np.std(gaps, ddof=1))
+
+
+def test_65_simulated_gap_is_close_to_the_true_public_noise_for_proba_and_value_metrics():
+    from kgkit import compare as C
+
+    rng = np.random.default_rng(1)
+    y_ref, a_ref, _ = _world65(rng, 4000)
+    y, pa, pb = _world65(rng, 20_000)
+    for metric in ("auc", "logloss"):
+        draw, how = C.label_model("proba", pa, pb, y_ref, a_ref)
+        res = C.simulated_gap(pa, pb, metric, draw, 6000, n_sim=100)
+        true = _true_sd65(metric, y, pa, pb, 6000)
+        assert 0.7 < res["se_public"] / true < 1.7, (metric, res["se_public"], true)
+        assert res["se_private"] < res["se_public"] and res["se_shift"] > 0 and "rank" in how
+    # regression: residuals resampled from the reference record
+    x = rng.normal(size=24_000)
+    t = 2 * x + rng.normal(size=24_000)
+    ra, rb = 2 * x + 0.3 * rng.normal(size=24_000), 2 * x + 0.3 * rng.normal(size=24_000)
+    draw, _ = C.label_model("value", ra[20_000:], rb[20_000:], t[:4000], ra[:4000])
+    res = C.simulated_gap(ra[20_000:], rb[20_000:], "rmse", draw, 2000, n_sim=100)
+    true = _true_sd65("rmse", t[20_000:], ra[20_000:], rb[20_000:], 2000)
+    assert 0.5 < res["se_public"] / true < 2.0, (res["se_public"], true)
+
+
+def test_65_label_models_say_when_they_cannot():
+    from kgkit import compare as C
+
+    rng = np.random.default_rng(2)
+    pa, pb = rng.random(500), rng.random(500)
+    assert C.label_model("ranking", pa, pb)[0] is None
+    assert C.label_model("value", pa, pb)[0] is None and "reference" in C.label_model("value", pa, pb)[1]
+    assert C.label_model("label", pa.round(), pb.round())[0] is None
+    # scores outside [0, 1] and no reference: no calibration to speak of
+    assert C.label_model("proba", pa * 10, pb * 10)[0] is None
+    # ... with a reference the ranks are calibrated, whatever the scale
+    y_ref = (rng.random(800) < 0.3).astype(int)
+    draw, _ = C.label_model("proba", pa * 10, pb * 10, y_ref, rng.random(800) + y_ref)
+    assert set(np.unique(draw(rng))) <= {0, 1} and 0.05 < draw(rng).mean() < 0.95
+    # multiclass distributions
+    q = rng.dirichlet(np.ones(4), 500)
+    assert set(np.unique(C.label_model("proba", q, q)[0](rng))) <= {0, 1, 2, 3}
+    assert C.label_model("proba", q * 2, q * 2)[0] is None
+    # hard labels: P(y | predicted label) of the reference
+    yr = rng.integers(0, 3, 900)
+    pr = np.where(rng.random(900) < 0.7, yr, rng.integers(0, 3, 900))
+    draw, how = C.label_model("label", pr[:500], pr[400:], yr, pr)
+    assert set(np.unique(draw(rng))) <= {0, 1, 2} and "predicted label" in how
+    assert C.similarity(pr[:500], pr[400:], "label")["disagree"] > 0
+
+
+def _ws65(root, monkeypatch, *, holdout=False, public_n=6000):
+    """A (OOF/holdout predictions, test file) and B (LB-only, test file with shuffled rows), as in the issue."""
+    rng = np.random.default_rng(65)
+    y_tr, a_tr, _ = _world65(rng, 3000)
+    y_te, pa, pb = _world65(rng, 20_000)
+    (root / "data").mkdir()
+    (root / "subs").mkdir()
+    ids = np.arange(20_000)
+    pd.DataFrame({"id": np.arange(3000), "target": y_tr}).to_csv(root / "data" / "train.csv", index=False)
+    pd.DataFrame({"id": ids, "target": pa}).to_csv(root / "subs" / "a.csv", index=False)
+    pd.DataFrame({"id": ids, "target": pb}).sample(frac=1, random_state=3).to_csv(root / "subs" / "b.csv", index=False)
+    S.CompetitionState(slug="demo", metric="auc", id_col="id", eval_truth="data/train.csv:target", public_lb_n=public_n,
+                       **({"validation": "holdout+lb", "holdout_n": 3000} if holdout else {})).save(root)
+    monkeypatch.chdir(root)
+    led = Ledger(root)
+    from kgkit import metrics as M
+
+    cv = M.score("auc", y_tr, a_tr)
+    a = led.log("stack", cv, **({"holdout_pred": a_tr} if holdout else {"oof": a_tr, "fold_scores": [cv] * 5}))
+    led.attach_lb(a["id"], 0.8123, submission="subs/a.csv")
+    return led, a, (y_te, pa, pb)
+
+
+def _cli65(*args):
+    from kgkit import cli
+
+    cli.main(list(args))
+
+
+def test_65_compare_estimates_the_lb_noise_for_an_lb_only_record(tmp_path, monkeypatch, capsys):
+    from kgkit import evalset as EV
+
+    led, a, (y_te, pa, pb) = _ws65(tmp_path, monkeypatch)
+    _cli65("ledger", "add", "blend", "lb-only", "--sub", "subs/b.csv")
+    b = led.records()[-1]
+    assert b["cv"] is None and b["submission"] == "subs/b.csv"
+    _cli65("ledger", "lb", b["id"], "0.8101")
+    capsys.readouterr()
+    _cli65("ledger", "compare", b["id"], a["id"], "--public-n", "6000")  # the issue's command: used to exit
+    out = capsys.readouterr().out
+    assert "public-LB noise from the two test files" in out and "0002_blend has no OOF predictions" in out
+    assert "20000 rows" in out and "Pearson" in out and "Spearman" in out and "SD of the rank difference" in out
+    est = float(re.search(r"ESTIMATED SD of the auc gap between them on the public LB \(n=6000\): (\S+);", out)[1])
+    assert 0.6 < est / _true_sd65("auc", y_te, pb, pa, 6000) < 1.8
+    assert "observed LB gap -0.00220 = " in out and "private (14000 rows)" in out
+    assert "simulated" in out and "decide" not in out and EV.comparisons(tmp_path) == []  # not a keep/discard decision
+
+
+def test_65_the_file_is_found_through_the_submission_log_and_a_missing_one_says_how_to_attach_it(tmp_path, monkeypatch, capsys):
+    led, a, _ = _ws65(tmp_path, monkeypatch)
+    _cli65("ledger", "add", "blend", "lb-only")
+    b = led.records()[-1]
+    with pytest.raises(SystemExit, match=r"ledger lb 0002_blend <public_score> --sub FILE"):
+        _cli65("ledger", "compare", b["id"], a["id"], "--public-n", "6000")
+    S.submissions_log(tmp_path).write_text(json.dumps(
+        {"time_utc": "2026-10-30T10:00:00", "file": "subs/b.csv", "message": f"{b['id']} blend", "status": "complete",
+         "exp_id": b["id"]}) + "\n")
+    capsys.readouterr()
+    _cli65("ledger", "compare", b["id"], a["id"], "--public-n", "6000")
+    out = capsys.readouterr().out
+    assert "subs/b.csv" in out and "ESTIMATED SD" in out
+    _cli65("ledger", "compare", b["id"], a["id"], "--public-n", "6000", "--ref", a["id"], "--boot", "30")
+    assert "30 draws" in capsys.readouterr().out
+
+
+def test_65_without_a_public_n_the_files_are_still_compared(tmp_path, monkeypatch, capsys):
+    led, a, _ = _ws65(tmp_path, monkeypatch, public_n=None)
+    _cli65("ledger", "compare", "subs/b.csv", "subs/a.csv")  # plain files, no records at all
+    out = capsys.readouterr().out
+    assert "a prediction file was given" in out and "Pearson" in out and "pass --public-n" in out
+
+
+def test_65_holdout_workspace_falls_back_to_the_test_files(tmp_path, monkeypatch, capsys):
+    led, a, _ = _ws65(tmp_path, monkeypatch, holdout=True)
+    _cli65("ledger", "add", "blend", "lb-only", "--sub", "subs/b.csv")
+    capsys.readouterr()
+    _cli65("ledger", "compare", "2", "1", "--public-n", "6000")
+    out = capsys.readouterr().out
+    assert "no holdout predictions on the evaluation set" in out and "ESTIMATED SD" in out
+    assert "rank" in out  # calibrated on the stored holdout predictions of 0001_stack
+
+
+def test_65_fold_scores_only_pairs_keep_their_public_n(tmp_path, monkeypatch, capsys):
+    led, a, _ = _ws65(tmp_path, monkeypatch)
+    b = led.log("other", 0.80, fold_scores=[0.79, 0.81, 0.80, 0.80, 0.80])
+    led.attach_lb(b["id"], 0.8101, submission="subs/b.csv")
+    led.update(a["id"], oof_path=None)  # no OOF on either side: the fold-paired test applies
+    capsys.readouterr()
+    _cli65("ledger", "compare", b["id"], a["id"], "--public-n", "6000")
+    out = capsys.readouterr().out
+    assert re.search(r"(KEEP|DISCARD|INCONCLUSIVE)", out) and "ESTIMATED SD" in out
+    assert "the fold scores carry no public-LB noise" in out

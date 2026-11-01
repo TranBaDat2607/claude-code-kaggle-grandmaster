@@ -455,3 +455,151 @@ def with_seed_noise(res: dict, seed: dict, r_new: int = 1, r_base: int = 1) -> d
     if res.get("rope"):
         _rope(out, res["rope"])
     return out
+
+
+# ---------------------------------------------------------------------------- two test files, no labels
+# A record without predictions on the evaluation set (a blend with public files, a fork) still has the file the
+# leaderboard scored. Its labels are unknown, so the noise of the LB gap between two such files is *estimated*: labels
+# are simulated from the pair's own predictions, and each draw is split into a public and a private part and scored
+# with the exact metric.
+def _ranks01(x: np.ndarray) -> np.ndarray:
+    """Ranks scaled to (0, 1), per column."""
+    from scipy.stats import rankdata
+
+    x = np.asarray(x, dtype=float)
+    if x.ndim == 1:
+        return (rankdata(x) - 0.5) / len(x)
+    return np.column_stack([_ranks01(x[:, j]) for j in range(x.shape[1])])
+
+
+def similarity(pa, pb, kind: str = "proba") -> dict:
+    """How alike two prediction arrays are: Pearson and Spearman correlation and the SD of the rank difference
+    (ranks scaled to 0-1), over all columns; for hard labels, the share of rows where they disagree."""
+    pa, pb = np.asarray(pa), np.asarray(pb)
+    if kind == "label":
+        diff = pa != pb
+        return {"disagree": float(diff.any(1).mean() if diff.ndim > 1 else diff.mean()), "n": int(len(pa))}
+    a, b = pa.astype(float), pb.astype(float)
+    ra, rb = _ranks01(a), _ranks01(b)
+    flat = lambda x, y: float(np.corrcoef(x.ravel(), y.ravel())[0, 1]) if x.std() > 0 and y.std() > 0 else float("nan")
+    cols = [j for j in range(a.shape[1])] if a.ndim > 1 else [None]
+    pick = lambda x, j: x if j is None else x[:, j]
+    return {"pearson": float(np.nanmean([flat(pick(a, j), pick(b, j)) for j in cols])),
+            "spearman": float(np.nanmean([flat(pick(ra, j), pick(rb, j)) for j in cols])),
+            "rank_diff_sd": float(np.mean([np.std(pick(ra, j) - pick(rb, j)) for j in cols])), "n": int(len(pa))}
+
+
+def _categorical(q: np.ndarray, classes: np.ndarray | None = None) -> Callable:
+    """A sampler of one class per row from the row probabilities ``q`` (n, K)."""
+    q = np.clip(np.asarray(q, dtype=float), 0, None)
+    cum = np.cumsum(q / q.sum(1, keepdims=True), axis=1)
+
+    def draw(rng):
+        idx = np.minimum((rng.random((len(cum), 1)) > cum).sum(1), cum.shape[1] - 1)
+        return idx if classes is None else classes[idx]
+
+    return draw
+
+
+def label_model(kind: str, pa, pb, y_ref=None, p_ref=None) -> tuple[Callable | None, str]:
+    """``(draw, how)``: ``draw(rng)`` simulates the unknown test labels from two prediction arrays, optionally
+    calibrated on a reference (``y_ref``, ``p_ref``: labels and predictions of a record with predictions on the
+    evaluation set). ``draw`` is None when the metric's kind has no such model; ``how`` says what was done, or why not."""
+    pa, pb = np.asarray(pa), np.asarray(pb)
+    n = len(pa)
+    ref = y_ref is not None and p_ref is not None
+    if ref:
+        y_ref, p_ref = np.asarray(y_ref), np.asarray(p_ref)
+    if kind == "proba":
+        multiclass = pa.ndim == 2 and pa.shape[1] > 2 and (y_ref is None or np.asarray(y_ref).ndim == 1)
+        if multiclass:
+            if not (np.allclose(pa.sum(1), 1, atol=1e-3) and np.allclose(pb.sum(1), 1, atol=1e-3)):
+                return None, "multiclass predictions whose rows do not sum to 1 have no label model"
+            return _categorical((pa.astype(float) + pb) / 2), \
+                "classes drawn from the mean of the two predicted distributions (treated as calibrated)"
+        if ref and y_ref.shape == p_ref.shape and y_ref.ndim == pa.ndim and \
+                (pa.ndim == 1 or pa.shape[1] == p_ref.shape[1]):
+            from sklearn.isotonic import IsotonicRegression
+
+            ya = y_ref.reshape(len(y_ref), -1).astype(float)
+            pr = p_ref.reshape(len(p_ref), -1).astype(float)
+            mean_rank = _ranks01((_ranks01(pa) + _ranks01(pb)) / 2).reshape(n, -1)
+            q = np.empty_like(mean_rank)
+            eps = 1.0 / (2 * len(ya))
+            for j in range(q.shape[1]):
+                iso = IsotonicRegression(y_min=eps, y_max=1 - eps, increasing="auto", out_of_bounds="clip")
+                q[:, j] = iso.fit(_ranks01(pr[:, j]), ya[:, j]).predict(mean_rank[:, j])
+            q = q.reshape(pa.shape)
+            return (lambda rng: (rng.random(q.shape) < q).astype(int)), \
+                "labels drawn from P(y | rank) fitted on the reference record's predictions"
+        lo, hi = float(min(pa.min(), pb.min())), float(max(pa.max(), pb.max()))
+        if lo >= 0 and hi <= 1:
+            q = (pa.astype(float) + pb) / 2
+            return (lambda rng: (rng.random(q.shape) < q).astype(int)), \
+                "labels drawn from the mean of the two predictions (treated as calibrated probabilities)"
+        return None, "the predictions are not probabilities in [0, 1] and there is no reference record to calibrate them"
+    if kind == "value":
+        if not ref or pa.ndim != 1 or p_ref.ndim != 1:
+            return None, "a regression target needs a reference record with predictions on the evaluation set"
+        resid = y_ref.astype(float) - p_ref.astype(float)
+        mean = (pa.astype(float) + pb) / 2
+        lo, hi = float(np.min(y_ref)), float(np.max(y_ref))
+        return (lambda rng: np.clip(mean + rng.choice(resid, n), lo, hi)), \
+            "targets drawn as the mean of the two predictions plus residuals resampled from the reference record"
+    if kind == "label":
+        if not ref:
+            return None, "label metrics need a reference record with predictions on the evaluation set"
+        classes = np.unique(y_ref)
+        if not (np.isin(np.unique(p_ref), classes).all() and np.isin(np.unique(np.concatenate([pa.ravel(), pb.ravel()])),
+                                                                       classes).all()) or pa.ndim != 1:
+            return None, "the reference or the test files do not hold hard labels from the target's classes"
+        cm = np.ones((len(classes), len(classes)))  # Laplace smoothing
+        np.add.at(cm, (np.searchsorted(classes, p_ref), np.searchsorted(classes, y_ref)), 1)
+        cm /= cm.sum(1, keepdims=True)
+        q = (cm[np.searchsorted(classes, pa)] + cm[np.searchsorted(classes, pb)]) / 2
+        return _categorical(q, classes), "labels drawn from P(y | predicted label) of the reference record"
+    return None, f"no label model for {kind} metrics"
+
+
+def simulated_gap(pa, pb, metric: str, draw: Callable, size: int | None, n_sim: int | None = None,
+                  seed: int = 0) -> dict:
+    """Noise of the gap ``metric(pa) - metric(pb)`` between two test files, from simulated labels. Each draw makes the
+    labels, splits the rows into a public part of ``size`` rows and the rest (private), and scores both gaps with the
+    exact metric. ``se_public`` / ``se_private`` are the SDs of those gaps over the draws, ``se_shift`` the SD of
+    public minus private. An estimate: the labels are simulated and the rows assumed independent."""
+    m = M.get(metric)
+    pa, pb = np.asarray(pa), np.asarray(pb)
+    n = len(pa)
+    caveats = ["estimated from simulated labels, not from the real ones",
+               "assumes the public rows are a random sample of the test rows and that rows are independent "
+               "(groups are not resampled whole)"]
+    if not size or size >= n:
+        if size and size > n:
+            caveats.append(f"public n ({size}) is above the {n} rows of the files: the whole file is used as the public part")
+        size = None
+    n_sim = n_sim or (100 if n > 100_000 else 200)
+    rng = np.random.default_rng(seed)
+    pub, priv, failed = [], [], 0
+    for _ in range(n_sim):
+        y = draw(rng)
+        perm = rng.permutation(n) if size else np.arange(n)
+        a_idx = perm[:size] if size else perm
+        try:
+            gap_pub = m(y[a_idx], pa[a_idx]) - m(y[a_idx], pb[a_idx])
+            gap_priv = None
+            if size:
+                b_idx = perm[size:]
+                gap_priv = m(y[b_idx], pa[b_idx]) - m(y[b_idx], pb[b_idx])
+        except (ValueError, ZeroDivisionError, IndexError):
+            failed += 1
+            continue
+        pub.append(gap_pub)
+        if size:
+            priv.append(gap_priv)
+    if failed > 0.05 * n_sim:
+        caveats.append(f"{failed} of {n_sim} draws could not be scored")
+    sd = lambda v: float(np.std(v, ddof=1)) if len(v) > 1 else float("nan")
+    return {"method": "simulated labels", "n_sim": len(pub), "n_failed": failed, "n_rows": n,
+            "size": int(size) if size else None, "se_public": sd(pub),
+            "se_private": sd(priv) if size else None,
+            "se_shift": sd(np.asarray(pub) - np.asarray(priv)) if size else None, "caveats": caveats}
