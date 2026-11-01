@@ -35,7 +35,10 @@ class CompetitionState:
     gpu: str = ""
     daily_submissions: int = 5
     final_submissions: int = 2
-    final_picks: list[str] = field(default_factory=list)  # ledger ids selected as finals on the website
+    # Ledger ids chosen as finals: what the user intends (`kgkit config final_picks=`), or Kaggle's own selection once
+    # `kgkit final` has read it back (then final_picks_confirmed holds when). Only a confirmed list silences the warning.
+    final_picks: list[str] = field(default_factory=list)
+    final_picks_confirmed: str = ""   # UTC time `kgkit final` read exactly final_picks from Kaggle; "" = intended only
     deadline: str = ""                # ISO date of the final submission deadline (UTC)
     team_merger_deadline: str = ""
     external_data_allowed: str = "unknown"

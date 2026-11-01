@@ -5,8 +5,10 @@ often *public-LB-fitted* files (a ranking tilted toward an estimate of the publi
 never as finals, since their public score says nothing about the private one. A ledger record tagged
 ``public-lb-fitted`` (``kgkit.evalset.lb_fitted``) is such a file. ``kgkit status`` and the session brief print
 ``lines(...)``: a warning when a fitted record is among the submissions Kaggle would auto-select, a one-line note once
-the picks are recorded (``kgkit config final_picks=<id>,<id>``). ``kgkit final`` asks Kaggle what is selected
-(``live``, through ``kgkit.kaggle_submissions`` in a child process) and records the answer.
+Kaggle's selection has been confirmed. Picks typed by hand (``kgkit config final_picks=<id>,<id>``) are only
+*intended*: the warning stays, and lists them as not confirmed, because nothing has asked Kaggle. ``kgkit final`` asks
+Kaggle what is selected (``live``, through ``kgkit.kaggle_submissions`` in a child process), records the answer and
+stamps ``final_picks_confirmed``: that alone silences the warning.
 
 Kaggle has an API to list the selected submissions, none to select them: only the website does.
 
@@ -139,8 +141,10 @@ def selection(st: S.CompetitionState, recs: list[dict], subs=()) -> dict:
         rec = _find(index, ref)
         picks.append({"ref": str(ref), "id": rec["id"] if rec else None,
                       "fitted": rec is not None and E.lb_fitted(rec)})
+    confirmed = st.final_picks_confirmed if isinstance(st.final_picks_confirmed, str) and picks else ""
     return {"n": n, "auto": auto, "fitted_auto": [e for e in auto if e["fitted"]], "picks": picks,
-            "honest": _honest(st, by_id, score), "unlinked": len(loose), "days": S.deadline_days(st)}
+            "confirmed": confirmed, "honest": _honest(st, by_id, score), "unlinked": len(loose),
+            "days": S.deadline_days(st)}
 
 
 def _honest(st: S.CompetitionState, by_id: dict, score: dict) -> list[tuple[str, list[str]]]:
@@ -211,17 +215,34 @@ def _warning(sel: dict, st: S.CompetitionState, recs: dict) -> list[str]:
         return []
     left = f" ({sel['days']} day{'s' if sel['days'] != 1 else ''} left)" if sel["days"] is not None else ""
     url = URL.format(slug=st.slug)
-    if sel["picks"]:
-        bad = [p for p in sel["picks"] if p["fitted"]]
-        if not bad:
-            names = ", ".join(p["id"] or p["ref"] for p in sel["picks"])
-            return [f"final picks (recorded): {names}; `python -m kgkit final` checks what Kaggle has selected"]
-        names = ", ".join(p["id"] for p in bad)
-        return [f"WARNING: recorded final pick(s) {names} are public-LB fitted (tilted toward the public labels: the "
-                f"public score says nothing about the private one). Replace them on the website by "
-                f"{utc_deadline(st)}{left}: {url}. Honest candidates: {_candidates(sel, recs)}."]
+    picks = sel["picks"]
+    names = ", ".join(p["id"] or p["ref"] for p in picks)
+    bad = ", ".join(p["id"] for p in picks if p["fitted"])
+    if picks and sel["confirmed"]:  # `kgkit final` read these from Kaggle
+        when = f"checked {sel['confirmed']}"
+        if bad:
+            return [f"WARNING: final(s) selected on Kaggle ({when}) {bad} are public-LB fitted (tilted toward the public "
+                    f"labels: the public score says nothing about the private one). Replace them on the website by "
+                    f"{utc_deadline(st)}{left}: {url}, then run `python -m kgkit final`. "
+                    f"Honest candidates: {_candidates(sel, recs)}."]
+        if len(picks) < sel["n"]:
+            return [f"WARNING: only {len(picks)} of {sel['n']} finals are selected on Kaggle ({when}): {names}. Select the "
+                    f"other {sel['n'] - len(picks)} on the website by {utc_deadline(st)}{left}: {url}, then run "
+                    f"`python -m kgkit final`. Honest candidates: {_candidates(sel, recs)}."]
+        return [f"finals selected on Kaggle ({when}): {names}; after any change on the website run "
+                "`python -m kgkit final` again"]
+    # nothing confirmed by Kaggle: what is recorded is only intended, and Kaggle would still auto-select
+    intended = f" Intended picks (NOT confirmed on Kaggle): {names}." if picks else ""
+    if bad:
+        return [f"WARNING: intended final pick(s) {bad} are public-LB fitted (tilted toward the public labels: the "
+                f"public score says nothing about the private one); choose others and select them on the website by "
+                f"{utc_deadline(st)}{left}: {url}. Honest candidates: {_candidates(sel, recs)}. Then run "
+                f"`python -m kgkit final`.{intended}"]
     fitted = sel["fitted_auto"]
     if not fitted:
+        if picks:
+            return [f"final picks (intended, NOT confirmed on Kaggle): {names}; select them on the website by "
+                    f"{utc_deadline(st)}{left}: {url}, then run `python -m kgkit final`"]
         return []
     auto = sel["auto"]
     ties = " (tied at the cut: Kaggle takes some of these)" if len(auto) > sel["n"] else ""
@@ -231,9 +252,8 @@ def _warning(sel: dict, st: S.CompetitionState, recs: dict) -> list[str]:
     return [f"WARNING: with no finals selected, Kaggle takes the {sel['n']} best public scores: "
             f"{', '.join(_show(e) for e in auto)}{ties}; {which} public-LB fitted, so their public score says nothing "
             f"about the private one. Select finals by hand on the website by {utc_deadline(st)}{left}: {url}. "
-            f"Honest candidates: {_candidates(sel, recs)}. Then record the picks: "
-            f"`python -m kgkit config final_picks=<id>,<id>` (`python -m kgkit final` checks what Kaggle has "
-            f"selected).{unlinked}"]
+            f"Honest candidates: {_candidates(sel, recs)}. Then run `python -m kgkit final`: it reads Kaggle's "
+            f"selection back, and this warning stays until it confirms the picks.{intended}{unlinked}"]
 
 
 def lines(root, st: S.CompetitionState, recs: list[dict], subs=None) -> list[str]:

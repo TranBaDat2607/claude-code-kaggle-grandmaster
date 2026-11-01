@@ -26,9 +26,11 @@ Follow the `final-submission-selection` skill.
    auto-selects the best public scores, which late in a Playground are often the fitted files: say which ones
    they are. Then tell the user to **select the picks on the website** before the deadline (Kaggle has no API
    for it), with the steps and the deadline in UTC and local time that `kgkit final` prints. Once they have
-   selected, run `kgkit final` again: it reads Kaggle's selection back, records it (`final_picks`), and the
-   warning in `kgkit status` and the session brief gives way to a one-line note, or to a louder warning if a
-   selected file is fitted.
+   selected, run `kgkit final` again: it reads Kaggle's selection back, records it (`final_picks`) and stamps
+   when it did, and only then does the warning in `kgkit status` and the session brief give way to a one-line
+   note, or to a louder warning if a selected file is fitted or fewer than the allowed finals are selected.
+   `kgkit config final_picks=...` records *intended* picks only: the warning stays, listing them as not
+   confirmed on Kaggle, so never use it as a substitute for `kgkit final`.
 Write the decision and reasoning to `reports/final-selection.md`: the picks (with the file name, description
 and date as the Submissions page shows them), the submissions Kaggle would auto-select and why that must not
 stand when one is fitted, the website steps and the deadline from `kgkit final`.
