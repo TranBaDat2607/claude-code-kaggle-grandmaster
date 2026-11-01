@@ -18,6 +18,6 @@ winner only if `kgkit ledger compare` says it beats the simpler blend → re-tun
 blended OOF → validate the submission.
 
 Blends that include public submission files (no OOF) cannot be scored this way: log them LB-only
-(`kgkit ledger add <name> lb-only`, then `kgkit ledger lb`) and follow `ensembling` §6.
+(`kgkit ledger add <name> lb-only --sub <file>`, then `kgkit ledger lb`) and follow `ensembling` §6.
 
 Report members, weights, single vs blended (honest) CV, and whether it deserves a submission slot.

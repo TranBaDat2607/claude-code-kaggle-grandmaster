@@ -17,6 +17,10 @@ Follow the `final-submission-selection` skill.
    paired SE of their LB gap; not the SE of one score, see `cv-lb-debugging`) and the CV-LB correlation.
    LB-only records (blends with public files) are left out of that correlation; in a `holdout+lb` workspace
    compare candidates on their stored holdout predictions (`kgkit status` prints the measured paired noise).
+   A pair with an LB-only record has no OOF to resample, so the same command compares the two submission files
+   instead (a file path works in place of an id; log the blend with `ledger add <name> lb-only --sub FILE`, or
+   `ledger lb <id> <score> --sub FILE`). It prints their correlation and an *estimated* SD of the public LB gap
+   from simulated labels; say it is an estimate, and `--ref <id>` calibrates it on a record that has OOF.
 3. Recommend pick 1 (best honest CV) and pick 2 (credible hedge on a different risk axis), with a
    short argument for each and what scenario each protects against. An LB-only blend can only be the hedge;
    a public-LB-fitted file cannot be either.

@@ -88,6 +88,20 @@ def _find(index: tuple[dict, dict], ref: str) -> dict | None:
     return hits[0] if len(hits) == 1 else None
 
 
+def submission_files(recs: list[dict], subs, rec_id: str) -> list[str]:
+    """File names of the submissions in ``submissions.jsonl`` that belong to ledger record ``rec_id`` (by ``exp_id``
+    or the id/number in the message or file name), newest first. Tolerates malformed rows."""
+    index = _index([r for r in recs if isinstance(r, dict)])
+    rows = []
+    for row in subs:
+        if not isinstance(row, dict) or row.get("status") == "failed" or not row.get("file"):
+            continue
+        rec = _link(index, row.get("message"), row.get("file"), row.get("exp_id"))
+        if rec is not None and rec["id"] == rec_id:
+            rows.append((str(row.get("time_utc") or ""), str(row["file"])))
+    return [f for _, f in sorted(rows, key=lambda t: t[0], reverse=True)]
+
+
 def _top(entries: list[dict], n: int, greater: bool) -> list[dict]:
     """The ``n`` best of entries sorted best first, and whoever ties with the last of them."""
     if not entries:

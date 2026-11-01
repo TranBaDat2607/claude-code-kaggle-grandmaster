@@ -25,7 +25,11 @@ Formalise per pair of candidates: `python -m kgkit ledger compare <a> <b> --publ
 paired SE of their gap at the public-set size (both are scored on the same public rows, so this is far
 smaller than the SE of one score); treat LB gaps below ~2 paired SE as ties broken by CV. The SE of one
 absolute score (`kgkit ledger noise <id> --public-n <rows>`) is for judging one candidate's CV-LB gap,
-not the gap between two candidates. See `cv-lb-debugging`.
+not the gap between two candidates. See `cv-lb-debugging`. A pair that includes an LB-only candidate has no
+OOF: the same command then reads the two submission files (`ledger lb <id> <score> --sub FILE` attaches one) and
+prints their correlation plus an *estimated* gap SD from simulated labels. Report it as an estimate, never as a
+measured SE; the rule of thumb "public SD = 0.003 x SD of the rank difference" depends on the metric's scale and
+measured about 3x too small on a binary AUC task.
 
 ## 3. Default selection policy
 
