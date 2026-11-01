@@ -2218,7 +2218,7 @@ def test_status_and_the_brief_warn_that_kaggle_would_select_the_fitted_files(tmp
     honest = warning.split("Honest candidates: ")[1]
     assert "0001_stack (accepted baseline, best CV; CV 0.96220, LB 0.96185)" in honest
     assert "0002_blend (best public score not fitted; LB-only, LB 0.96214)" in honest
-    assert "final_picks=<id>,<id>" in warning
+    assert "Then run `python -m kgkit final`" in warning and "final_picks=<id>,<id>" not in warning
     assert ("best public LB: 0.96297 (0003_tilt-a, CV LB-only); public-LB fitted; best not fitted: 0.96214 "
             "(0002_blend, LB-only)") in out
     assert "| 0.96297 (fitted) |" in out
@@ -2304,7 +2304,7 @@ def test_scores_known_only_from_the_submission_log_count(ws):
     assert "1 scored submission(s) in the log are not linked to a ledger record" in text
 
 
-def test_recorded_picks_replace_the_warning_until_one_is_fitted(tmp_path, monkeypatch, capsys):
+def test_hand_recorded_picks_do_not_silence_the_warning_until_kaggle_confirms(tmp_path, monkeypatch, capsys):
     from kgkit import cli
 
     led = _finals_ws(tmp_path)
@@ -2313,23 +2313,81 @@ def test_recorded_picks_replace_the_warning_until_one_is_fitted(tmp_path, monkey
     out = capsys.readouterr().out
     assert "note: 'gone' is not a ledger record; kept as written" in out
     assert "note: 3 picks, but the competition takes 2" in out
+    assert "intended picks only" in out
     assert S.load(tmp_path).final_picks == ["0001_stack", "0002_blend", "gone"]
     cli.main(["config", "final_picks=1,2"])
-    cli.main(["status"])
+    capsys.readouterr()
+    cli.main(["status"])  # the issue's repro: intended honest picks, nothing selected on Kaggle
     out = capsys.readouterr().out
-    assert "final picks (recorded): 0001_stack, 0002_blend; `python -m kgkit final` checks" in out
-    assert "WARNING" not in out
+    warning = next(l for l in out.splitlines() if l.startswith("WARNING: with no finals selected"))
+    assert "Intended picks (NOT confirmed on Kaggle): 0001_stack, 0002_blend." in warning
+    assert "final picks (recorded)" not in out and S.load(tmp_path).final_picks_confirmed == ""
 
     cli.main(["config", "final_picks=0001,0003"])
-    assert "WARNING: 0003_tilt-a is tagged public-lb-fitted" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "WARNING: 0003_tilt-a is tagged public-lb-fitted" in out
     cli.main(["status"])
     out = capsys.readouterr().out
-    assert "WARNING: recorded final pick(s) 0003_tilt-a are public-LB fitted" in out and "final picks (recorded)" not in out
+    assert "WARNING: intended final pick(s) 0003_tilt-a are public-LB fitted" in out
 
-    cli.main(["config", "final_picks="])  # cleared: the auto-selection warning is back
+    cli.main(["config", "final_picks="])  # cleared: the plain auto-selection warning
     cli.main(["status"])
     out = capsys.readouterr().out
     assert S.load(tmp_path).final_picks == [] and "WARNING: with no finals selected" in out
+    assert "Intended picks" not in out
+
+    # no fitted file among the auto-selected ones: intended picks are a reminder, never "recorded"
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    S.CompetitionState(slug="demo", metric="auc", deadline=_utc_in(3), final_picks=["0001_stack"]).save(plain)
+    pled = Ledger(plain)
+    pled.attach_lb(pled.log("stack", 0.9622)["id"], 0.96185)
+    text = " ".join(FN.lines(plain, S.load(plain), pled.records()))
+    assert text.startswith("final picks (intended, NOT confirmed on Kaggle): 0001_stack; select them on the website")
+    assert "then run `python -m kgkit final`" in text
+
+    with pytest.raises(SystemExit, match="set by `python -m kgkit final`"):
+        cli.main(["config", "final_picks_confirmed=2026-10-30"])
+
+
+def test_a_confirmation_belongs_to_the_exact_list_kaggle_returned(tmp_path, monkeypatch, capsys):
+    from kgkit import cli
+
+    _finals_ws(tmp_path, final_submissions=1, final_picks=["0001_stack"], final_picks_confirmed="2026-10-30 09:15 UTC")
+    monkeypatch.chdir(tmp_path)
+    cli.main(["status"])
+    out = capsys.readouterr().out
+    assert ("finals selected on Kaggle (checked 2026-10-30 09:15 UTC): 0001_stack; after any change on the website "
+            "run `python -m kgkit final` again") in out
+    assert "WARNING" not in out
+
+    cli.main(["config", "final_picks=0001"])  # the same list: still confirmed
+    assert "intended picks only" not in capsys.readouterr().out
+    assert S.load(tmp_path).final_picks_confirmed == "2026-10-30 09:15 UTC"
+
+    cli.main(["config", "final_picks=0002"])  # another list: back to intended, and the warning is back
+    assert "intended picks only" in capsys.readouterr().out
+    assert S.load(tmp_path).final_picks_confirmed == ""
+    cli.main(["status"])
+    out = capsys.readouterr().out
+    assert "Intended picks (NOT confirmed on Kaggle): 0002_blend." in out and "finals selected on Kaggle" not in out
+
+    # confirmed, but a fitted file or too few picks: a warning even though Kaggle was asked
+    st = S.load(tmp_path)
+    st.final_picks, st.final_picks_confirmed = ["0003_tilt-a"], "2026-10-30 09:15 UTC"
+    st.save(tmp_path)
+    cli.main(["status"])
+    assert "WARNING: final(s) selected on Kaggle (checked 2026-10-30 09:15 UTC) 0003_tilt-a are public-LB fitted" in (
+        capsys.readouterr().out)
+    st.final_submissions, st.final_picks = 2, ["0001_stack"]
+    st.save(tmp_path)
+    cli.main(["status"])
+    assert "WARNING: only 1 of 2 finals are selected on Kaggle" in capsys.readouterr().out
+
+    state = tmp_path / ".kaggle-gm" / "competition.json"  # a malformed stamp must not break the brief
+    state.write_text(json.dumps({**json.loads(state.read_text()), "final_picks_confirmed": 5}))
+    cli.main(["status"])
+    assert "Intended picks (NOT confirmed on Kaggle): 0001_stack." in capsys.readouterr().out
 
 
 def test_nothing_is_printed_after_the_deadline_or_without_a_fitted_file(tmp_path, monkeypatch, capsys):
@@ -2461,15 +2519,42 @@ def test_final_records_the_selection_and_flags_a_fitted_pick(tmp_path, monkeypat
     out = capsys.readouterr().out
     assert "3 scored submission(s) for demo; 2 selected as finals." in out and "Selected as finals (2 of 2):" in out
     assert "WARNING: a selected final is public-LB fitted" in out
-    assert "recorded final_picks = 0001_stack, 0003_tilt-a" in out
-    assert S.load(tmp_path).final_picks == ["0001_stack", "0003_tilt-a"]
+    assert "recorded final_picks = 0001_stack, 0003_tilt-a (confirmed on Kaggle)" in out
+    st = S.load(tmp_path)
+    assert st.final_picks == ["0001_stack", "0003_tilt-a"] and st.final_picks_confirmed.endswith(" UTC")
     cli.main(["status"])
-    assert "WARNING: recorded final pick(s) 0003_tilt-a are public-LB fitted" in capsys.readouterr().out
+    assert "WARNING: final(s) selected on Kaggle (checked " in capsys.readouterr().out
     monkeypatch.setenv("FAKE_SELECTED", "1")
     cli.main(["final"])
     out = capsys.readouterr().out
     assert "Selected as finals (1 of 2):" in out and "Only 1 of 2 are selected" in out
     assert S.load(tmp_path).final_picks == ["0001_stack"]
+    cli.main(["status"])
+    assert "WARNING: only 1 of 2 finals are selected on Kaggle" in capsys.readouterr().out
+
+
+def test_final_replaces_intended_picks_and_clears_a_stale_confirmation(tmp_path, monkeypatch, capsys, kaggle_sdk):
+    from kgkit import cli
+
+    _finals_ws(tmp_path, final_submissions=1)
+    monkeypatch.chdir(tmp_path)
+    cli.main(["config", "final_picks=0002"])  # intends the blend; the website has the stack selected
+    capsys.readouterr()
+    monkeypatch.setenv("FAKE_SELECTED", "1")
+    cli.main(["final"])
+    out = capsys.readouterr().out
+    assert "replaced the intended picks 0002_blend with Kaggle's selection" in out
+    cli.main(["status"])
+    out = capsys.readouterr().out
+    assert "finals selected on Kaggle (checked " in out and "0001_stack" in out and "WARNING" not in out
+
+    monkeypatch.setenv("FAKE_SELECTED", "")  # deselected on the website since: nothing is confirmed any more
+    cli.main(["final"])
+    out = capsys.readouterr().out
+    assert "intended picks 0001_stack are not selected on Kaggle yet" in out
+    assert S.load(tmp_path).final_picks == ["0001_stack"] and S.load(tmp_path).final_picks_confirmed == ""
+    cli.main(["status"])
+    assert "Intended picks (NOT confirmed on Kaggle): 0001_stack." in capsys.readouterr().out
 
 
 def test_final_says_why_kaggle_could_not_be_asked(tmp_path, monkeypatch, capsys, kaggle_sdk):

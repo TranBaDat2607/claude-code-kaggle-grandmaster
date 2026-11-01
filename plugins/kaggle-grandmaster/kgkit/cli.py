@@ -314,6 +314,9 @@ def cmd_config(a):
         k = k.strip().replace("-", "_")
         if not sep or k not in fields:
             raise SystemExit(f"expected KEY=VALUE with KEY one of {', '.join(fields)}; got {kv!r}")
+        if k == "final_picks_confirmed":
+            raise SystemExit("final_picks_confirmed is set by `python -m kgkit final`, which reads Kaggle's selection; "
+                             "it cannot be set by hand")
         cur = getattr(st, k)
         if v.strip().lower() in ("", "none", "null"):
             val = (None if k in ("runtime_limit_hours", "holdout_n", "holdout_se", "public_lb_n", "rope")
@@ -339,6 +342,12 @@ def cmd_config(a):
                 print(f"greater_is_better = {json.dumps(gib)} (the metric's direction)")
         setattr(st, k, val)
         print(f"{k} = {json.dumps(val)}")
+        if k == "final_picks":
+            if val != cur:  # a hand-typed list is only intended until `kgkit final` reads it back from Kaggle
+                st.final_picks_confirmed = ""
+            if val and not st.final_picks_confirmed:
+                print("note: intended picks only; `kgkit status` and the session brief keep warning until "
+                      "`python -m kgkit final` reads them back from Kaggle")
     st.save(root)
 
 
@@ -380,7 +389,10 @@ def _import_scored(root, slug: str, rows: list[dict]) -> int:
 
 def cmd_final(a):
     """Ask Kaggle which submissions are selected as finals; with none selected, which ones its auto-selection would
-    take, and whether any is a public-lb-fitted file. Records the selection in ``final_picks``."""
+    take, and whether any is a public-lb-fitted file. Records the selection in ``final_picks`` and stamps
+    ``final_picks_confirmed``: only this read of Kaggle silences the auto-selection warning."""
+    import datetime as dt
+
     from . import finals as FN
     from . import state as S
     from .experiment import Ledger
@@ -396,9 +408,16 @@ def cmd_final(a):
     text, picks = FN.report(st, recs, data, error, local=FN.lines(root, st, recs))
     print("\n".join(text))
     if picks:
+        if st.final_picks and st.final_picks != picks and not st.final_picks_confirmed:
+            print(f"replaced the intended picks {', '.join(st.final_picks)} with Kaggle's selection")
         st.final_picks = picks
+        st.final_picks_confirmed = dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
         st.save(root)
-        print(f"recorded final_picks = {', '.join(picks)}")
+        print(f"recorded final_picks = {', '.join(picks)} (confirmed on Kaggle)")
+    elif data is not None and st.final_picks:  # Kaggle answered: nothing is selected, so nothing is confirmed
+        st.final_picks_confirmed = ""
+        st.save(root)
+        print(f"intended picks {', '.join(st.final_picks)} are not selected on Kaggle yet")
     print()
     print("\n".join(FN.steps(st)))
 
