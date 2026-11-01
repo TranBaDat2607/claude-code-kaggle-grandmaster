@@ -235,10 +235,8 @@ def cmd_init(a):
 def cmd_adopt(a):
     """Workspace state for an existing project: only .kaggle-gm/ is written, the repo layout is left alone."""
     import datetime as dt
-    import subprocess
 
     from . import adopt as A
-    from . import safety as SF
     from . import state as S
 
     root = Path(a.dir).resolve()
@@ -274,16 +272,9 @@ def cmd_adopt(a):
     elif a.submissions_file:
         text = Path(a.submissions_file).read_text(encoding="utf-8")
     else:
-        cmd = [shutil.which("kaggle") or "kaggle", "competitions", "submissions", slug, "--format", "json"]
-        try:
-            r = subprocess.run(cmd, capture_output=True, encoding="utf-8", errors="replace", timeout=120,
-                               env=SF.kaggle_env())
-            text = r.stdout if r.returncode == 0 else None
-            err = (r.stderr or r.stdout).strip().splitlines()[-1:] if r.returncode else []
-        except (OSError, subprocess.TimeoutExpired) as e:
-            text, err = None, [str(e)]
+        text, err = A.fetch_history(slug)
         if text is None:
-            print(f"could not fetch the submission history ({' '.join(err) or 'kaggle CLI failed'}); "
+            print(f"could not fetch the submission history ({err or 'kaggle CLI failed'}); "
                   f"retry with `kaggle competitions submissions {slug} --format json > subs.json` and "
                   f"`python -m kgkit adopt {slug} --submissions-file subs.json`")
     if text is not None:
@@ -374,6 +365,19 @@ def _final_picks(root, st, refs: list[str]) -> list[str]:
     return out
 
 
+def _import_scored(root, slug: str, rows: list[dict]) -> int:
+    """Add scored submissions that Kaggle lists (``kgkit.kaggle_submissions`` rows) and the local log misses."""
+    from . import adopt as A
+
+    recs = A.parse_submissions(json.dumps([{"date": r.get("date"), "description": r.get("description"),
+                                            "fileName": r.get("file"), "status": "complete",
+                                            "publicScore": r.get("public_score")} for r in rows]), slug)
+    added = A.import_submissions(root, recs)[0]
+    if added:
+        print(f"added {added} scored submission(s) from Kaggle's list that the local log was missing")
+    return added
+
+
 def cmd_final(a):
     """Ask Kaggle which submissions are selected as finals; with none selected, which ones its auto-selection would
     take, and whether any is a public-lb-fitted file. Records the selection in ``final_picks``."""
@@ -387,6 +391,8 @@ def cmd_final(a):
         raise SystemExit("not inside a kaggle-grandmaster workspace (no .kaggle-gm/competition.json)")
     recs = Ledger(root).records()
     data, error = FN.live(st.slug)
+    if data is not None:
+        _import_scored(root, st.slug, data["scored"])
     text, picks = FN.report(st, recs, data, error, local=FN.lines(root, st, recs))
     print("\n".join(text))
     if picks:
@@ -423,6 +429,14 @@ def cmd_status(a):
 
     # the same lines as the session brief (one implementation, so the two cannot drift)
     print(S.deadline_line(st))
+    if not a.offline:
+        from . import adopt as A
+
+        added, why = A.sync(root, st.slug)
+        if why:
+            print(f"could not ask Kaggle for the submission list ({why}); counting the local log only")
+        elif added:
+            print(f"added {added} submission(s) from Kaggle's list that the local log was missing")
     print(S.submissions_line(root, st))
     print(G.quota_line(root) or "Kaggle GPU quota: not fetched yet (`python -m kgkit gpu quota` caches it)")
     print(f"experiments logged: {len(recs)}")
@@ -1558,6 +1572,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     s = sub.add_parser("status", help="workspace summary")
     s.add_argument("--dir", default=".")
+    s.add_argument("--offline", action="store_true",
+                   help="do not ask Kaggle for the submission list (the count then comes from the local log only)")
     s.add_argument("-n", type=int, default=10)
     s.set_defaults(fn=cmd_status)
 

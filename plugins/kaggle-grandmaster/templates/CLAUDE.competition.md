@@ -29,7 +29,7 @@ kernels/     Kaggle notebooks / datasets for code-competition inference
 3. **One change per experiment, compared and decided.** Compare against the *accepted baseline* (`python -m kgkit ledger baseline`), not the highest CV, with the same seed(s) and folds: `python -m kgkit ledger compare <new> --truth data/train.csv:<target> --folds data/folds.csv:fold`. Judge noise by the paired per-fold differences, not the fold std (fold difficulty cancels). Record the verdict with `python -m kgkit ledger decide <new> keep|discard|inconclusive "<why>" --parent <baseline>`. Ideas live in `python -m kgkit backlog`.
 4. **Trust CV, verify with LB.** Record every public LB score with `python -m kgkit ledger lb <id> <score>` and watch the CV↔LB correlation. A rising LB with flat CV is overfitting the public split.
 5. **No target leakage**: target-derived statistics are computed out-of-fold; scalers/encoders/feature selection are fit inside the fold; no future information in time-series features.
-6. **Validate every submission** with `python -m kgkit validate subs/<file>.csv data/sample_submission.csv` before submitting.
+6. **Validate every submission** with `python -m kgkit validate subs/<file>.csv data/sample_submission.csv` before submitting. A wrapper script may do this and submit, but let `kaggle competitions submit` print Kaggle's reply (no `-q`, no redirect): the hook reads the script and logs the submit from that reply; any submit it misses, `python -m kgkit status` adds from Kaggle's list.
 7. **Commit code before long runs** so the ledger's git hash points at the exact code.
 
 ## Commands

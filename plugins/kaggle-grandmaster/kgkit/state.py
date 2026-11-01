@@ -122,12 +122,44 @@ def server_remaining_today(root: Path, records: list[dict] | None = None) -> int
     return None
 
 
+def sync_stamp(root: Path) -> Path:
+    return Path(root) / STATE_DIR / "submissions_sync.json"
+
+
+def write_sync_stamp(root: Path, error: str | None, added: int = 0) -> None:
+    """Record that the log was checked against Kaggle's list (``kgkit.adopt.sync``). Never raises."""
+    try:
+        p = sync_stamp(root)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        at = dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        p.write_text(json.dumps({"at": at, "error": error, "added": added}), encoding="utf-8")
+    except OSError:
+        pass
+
+
+def synced_today(root: Path) -> str | None:
+    """HH:MM (UTC) of today's successful check of the log against Kaggle's list, None when there was none."""
+    try:
+        d = json.loads(sync_stamp(root).read_text(encoding="utf-8"))
+        at = str(d.get("at", ""))
+        return at[11:16] if not d.get("error") and at.startswith(today_utc()) else None
+    except (OSError, ValueError, AttributeError):
+        return None
+
+
 def submissions_line(root: Path, st: CompetitionState, records: list[dict] | None = None) -> str:
-    """Today's submissions against the daily limit, and Kaggle's own count when the last submit printed one."""
+    """Today's submissions against the daily limit, Kaggle's own count when the last submit printed one, and where
+    the number comes from: the hooks log only the submits they see, so a count is unchecked until
+    ``kgkit status`` has compared the log with Kaggle's list."""
     recs = submission_records(root) if records is None else records
     s = f"Submissions logged today (UTC): {submissions_today(root, recs)}/{st.daily_submissions}"
     left = server_remaining_today(root, recs)
-    return s + (f"; Kaggle reported {left} left today for the team after the last submit" if left is not None else "")
+    s += f"; Kaggle reported {left} left today for the team after the last submit" if left is not None else ""
+    at = synced_today(root)
+    if at:
+        return s + f"; checked against Kaggle's list at {at} UTC"
+    return (s + "; local log only, not checked against Kaggle today (submits made by a script, on the website or "
+            "by a teammate may be missing): `python -m kgkit status` checks")
 
 
 def deadline_date(st: CompetitionState) -> dt.date | None:

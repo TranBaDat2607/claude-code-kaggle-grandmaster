@@ -174,29 +174,80 @@ def _seconds(t: str) -> float:
     return dt.datetime.strptime(t, "%Y-%m-%dT%H:%M:%SZ").timestamp()
 
 
-def import_submissions(root: str | Path, records: list[dict], window_s: float = 900) -> tuple[int, int]:
+def _base(path) -> str:
+    """A file name as Kaggle lists it: the hook logs ``subs/a.csv``, Kaggle ``a.csv``."""
+    return re.split(r"[\\/]", str(path or "").strip())[-1].lower()
+
+
+def _same_submission(local: dict, row: dict) -> bool:
+    """Whether a logged submit and a row of Kaggle's list can be one submission: the same message, the same file
+    name, or a logged submit whose identity is unknown (no message and file, or an unresolved ``$VAR``)."""
+    lm, lf = str(local.get("message") or ""), _base(local.get("file"))
+    if (lm and lm == str(row.get("message") or "")) or (lf and lf == _base(row.get("file"))):
+        return True
+    return not (lm or lf) or "$" in lm or "$" in lf
+
+
+def import_submissions(root: str | Path, records: list[dict], window_s: float = 3600) -> tuple[int, int]:
     """Append records not already in ``.kaggle-gm/submissions.jsonl``; returns (added, skipped).
 
-    A record is a duplicate when one with the same message (or file) is logged within ``window_s``
-    seconds: the hook logs a submission when the CLI returns, Kaggle dates it a little earlier.
+    A logged submit absorbs at most one row of Kaggle's list (the closest in time that is the same submission, see
+    ``_same_submission``), so two submits of one file within ``window_s`` seconds are two, and running this again
+    adds nothing. The window is wide because the hook logs a submit when the CLI returns and Kaggle dates it
+    earlier: a wrapper script that polls for the score returns a quarter of an hour later.
     """
     log = S.submissions_log(root)
-    existing = S.submission_records(root)
-
-    def key(r):
-        return r.get("message") or r.get("file") or ""
-
-    known = [(key(r), _seconds(r["time_utc"])) for r in existing if _time(r.get("time_utc"))]
+    free = [(r, _seconds(t)) for r in S.submission_records(root) if (t := _time(r.get("time_utc")))]
     added = []
-    for r in records:
+    for r in sorted(records, key=lambda r: r["time_utc"]):
         t = _seconds(r["time_utc"])
-        if any(k == key(r) and abs(t - kt) <= window_s for k, kt in known):
+        near = [(abs(t - kt), i) for i, (lr, kt) in enumerate(free)
+                if abs(t - kt) <= window_s and _same_submission(lr, r)]
+        if near:
+            free.pop(min(near)[1])
             continue
         added.append(r)
-        known.append((key(r), t))
     if added:
         log.parent.mkdir(parents=True, exist_ok=True)
         with log.open("a", encoding="utf-8") as f:
             for r in added:
                 f.write(json.dumps(r) + "\n")
     return len(added), len(records) - len(added)
+
+
+def fetch_history(slug: str, timeout: float = 120) -> tuple[str | None, str | None]:
+    """``kaggle competitions submissions <slug> --format json`` as (stdout, None), or (None, why). Never raises."""
+    import shutil
+    import subprocess
+
+    from . import safety
+
+    exe = shutil.which("kaggle")
+    if exe is None:
+        return None, "no kaggle CLI on PATH"
+    try:
+        r = subprocess.run([exe, "competitions", "submissions", slug, "--format", "json"], capture_output=True,
+                           encoding="utf-8", errors="replace", timeout=timeout, env=safety.kaggle_env())
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return None, str(e) or type(e).__name__
+    if r.returncode:
+        tail = (r.stderr or r.stdout).strip().splitlines()[-1:]
+        return None, " ".join(tail) or f"kaggle CLI exit {r.returncode}"
+    return r.stdout, None
+
+
+def sync(root: str | Path, slug: str, timeout: float = 60) -> tuple[int, str | None]:
+    """Add the submissions Kaggle lists that the local log misses (a wrapper script, the website, a teammate) and
+    stamp the check (``S.sync_stamp``) so the status line can say the count was checked. Returns (added, error);
+    does nothing when KGKIT_OFFLINE is set. Never raises."""
+    if os.environ.get("KGKIT_OFFLINE"):
+        return 0, "KGKIT_OFFLINE is set"
+    added, error = 0, None
+    try:
+        text, error = fetch_history(slug, timeout)
+        if text is not None:
+            added, _ = import_submissions(root, parse_submissions(text, slug))
+    except Exception as e:  # a malformed listing must not break status
+        error = f"{type(e).__name__}: {e}"[:200]
+    S.write_sync_stamp(root, error, added)
+    return added, error

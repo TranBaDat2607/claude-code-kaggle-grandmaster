@@ -774,7 +774,8 @@ def test_status_shows_submissions_deadline_and_gpu_like_the_brief(plugin_root, w
     monkeypatch.chdir(ws)
     cli.main(["status"])
     out = capsys.readouterr().out
-    assert "Submissions logged today (UTC): 1/5\n" in out and "days left; phase: exploration" in out
+    assert "Submissions logged today (UTC): 1/5; local log only, not checked against Kaggle today" in out
+    assert "days left; phase: exploration" in out
     assert "Kaggle GPU quota: not fetched yet" in out
 
     with S.submissions_log(ws).open("a") as f:

@@ -106,3 +106,74 @@ def test_cli_adopt_needs_slug_unless_detected_once(tmp_path):
     with pytest.raises(SystemExit, match="none detected"):
         cli.main(["adopt", "--dir", str(empty), "--no-submissions"])
     assert not (tmp_path / ".kaggle-gm").exists() and not (empty / ".kaggle-gm").exists()
+
+
+# ----------------------------------------------------------------------------- #63 the log checked against Kaggle's list
+def _row(when, name="a.csv", desc="0001_x | CV 0.8"):
+    return {"fileName": name, "date": when.strftime("%Y-%m-%d %H:%M:%S"), "description": desc,
+            "status": "SubmissionStatus.COMPLETE", "publicScore": "0.7", "privateScore": None}
+
+
+def _log(tmp_path, *recs):
+    S.CompetitionState(slug="demo").save(tmp_path)
+    S.submissions_log(tmp_path).write_text("".join(json.dumps(r) + "\n" for r in recs))
+
+
+def test_import_matches_one_to_one_and_by_file_name(tmp_path):
+    t = NOW - dt.timedelta(minutes=30)
+    # the wrapper logged it 20 min after Kaggle's date, by file path and a message Kaggle shows differently
+    _log(tmp_path, {"time_utc": (t + dt.timedelta(minutes=20)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                    "file": "subs/a.csv", "message": "x", "status": "submitted"})
+    recs = A.parse_submissions(json.dumps([_row(t)]), "demo")
+    assert A.import_submissions(tmp_path, recs) == (0, 1)
+    # two submits of one file within an hour are two; one logged record absorbs only one of them
+    recs = A.parse_submissions(json.dumps([_row(t), _row(t + dt.timedelta(minutes=5))]), "demo")
+    assert A.import_submissions(tmp_path, recs) == (1, 1)
+    assert A.import_submissions(tmp_path, recs) == (0, 2)
+    assert len(S.submission_records(tmp_path)) == 2
+
+
+def test_import_unknown_identity_absorbs_one_row(tmp_path):
+    t = NOW - dt.timedelta(minutes=10)
+    _log(tmp_path, {"time_utc": t.strftime("%Y-%m-%dT%H:%M:%SZ"), "file": "$FILE", "message": None, "status": "submitted"})
+    recs = A.parse_submissions(json.dumps([_row(t, "b.csv", "m1"), _row(t, "c.csv", "m2")]), "demo")
+    assert A.import_submissions(tmp_path, recs) == (1, 1)
+
+
+def test_sync_adds_missing_submits_and_stamps_the_check(tmp_path, monkeypatch):
+    _log(tmp_path)
+    st = S.load(tmp_path)
+    assert "local log only, not checked against Kaggle today" in S.submissions_line(tmp_path, st)
+    rows = [_row(NOW - dt.timedelta(minutes=m), desc=f"000{m}_x") for m in (5, 15, 25)]
+    monkeypatch.delenv("KGKIT_OFFLINE")
+    monkeypatch.setattr(A, "fetch_history", lambda slug, timeout=120: (json.dumps(rows), None))
+    assert A.sync(tmp_path, "demo") == (3, None)
+    line = S.submissions_line(tmp_path, st)
+    assert "Submissions logged today (UTC): 3/5" in line and "checked against Kaggle's list at" in line
+    assert A.sync(tmp_path, "demo") == (0, None)  # again: nothing new
+
+
+def test_sync_failure_keeps_the_local_only_note(tmp_path, monkeypatch):
+    _log(tmp_path)
+    monkeypatch.delenv("KGKIT_OFFLINE")
+    monkeypatch.setattr(A, "fetch_history", lambda slug, timeout=120: (None, "no kaggle CLI on PATH"))
+    assert A.sync(tmp_path, "demo") == (0, "no kaggle CLI on PATH")
+    assert "local log only" in S.submissions_line(tmp_path, S.load(tmp_path))
+
+
+def test_sync_is_off_with_kgkit_offline(tmp_path, monkeypatch):
+    _log(tmp_path)
+    monkeypatch.setattr(A, "fetch_history", lambda *a, **k: pytest.fail("asked Kaggle"))
+    assert A.sync(tmp_path, "demo")[0] == 0 and not S.sync_stamp(tmp_path).exists()
+
+
+def test_cli_status_syncs_unless_offline(tmp_path, capsys, monkeypatch):
+    _log(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("KGKIT_OFFLINE")
+    monkeypatch.setattr(A, "fetch_history", lambda slug, timeout=120: (json.dumps([_row(NOW - dt.timedelta(minutes=5))]), None))
+    cli.main(["status", "--offline"])
+    assert "local log only" in capsys.readouterr().out
+    cli.main(["status"])
+    out = capsys.readouterr().out
+    assert "added 1 submission(s) from Kaggle's list" in out and "1/5; checked against Kaggle's list" in out

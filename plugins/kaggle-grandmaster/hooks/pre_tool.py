@@ -212,12 +212,16 @@ def main() -> None:
             return
 
     subs = C.parse_submits(cmd)
+    from_script = not subs
+    if from_script:
+        subs = C.script_submits(payload, cmd)  # a wrapper script's submit: its arguments are inferred
     if not subs:
         return
     root = C.workspace(payload)
     records = C.submission_records(root) if root is not None else []
     problems, notes, asks = [], [], []
-    for n, sub in enumerate(subs, 1):
+    # A script's submit gets only the daily budget check below: the script may change the file or message first.
+    for n, sub in enumerate([] if from_script else subs, 1):
         tag = f"submit {n} ({C.submit_label(sub)}): " if len(subs) > 1 else ""
         for out, found in zip((problems, notes, asks), submit_checks(payload, root, records, sub)):
             out += [tag + x for x in found]

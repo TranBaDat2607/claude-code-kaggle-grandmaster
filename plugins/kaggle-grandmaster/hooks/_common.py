@@ -497,6 +497,70 @@ def _parse_submit_args(rest: str) -> dict | None:
     return out
 
 
+# A submit made by a script the command runs (`bash src/submit.sh subs/a.csv "msg"`) is not in the command text.
+# The script is read one level deep: its `kaggle competitions submit` lines, with the invocation's arguments put in.
+SCRIPT_RUN_RE = re.compile(r"(?:^|[\s;&|(])(?:(?:ba|z|da|k)?sh|source|\.|python[\d.]*|py)\s+(?P<rest>[^;&|\n]*)"
+                           r"|(?:^|[;&|(]|\n)[ \t]*(?P<direct>(?:\./|/|~/)[^\s;&|()'\"<>]*\.(?:sh|py))")
+SCRIPT_MAX_BYTES = 1_000_000
+PY_SUBMIT_RE = re.compile(r"['\"]competitions['\"]\s*,\s*['\"]submit['\"]|\bcompetition_submit\w*\s*\(")
+ASSIGN_LINE_RE = re.compile(r"^[ \t]*(?:export[ \t]+)?([A-Za-z_]\w*)=(.*)$", re.MULTILINE)
+
+
+def _fill_arguments(text: str, args: list[str]) -> str:
+    """A shell script with `$1`..`$9`, `${N}`, `"$@"` and the plain `NAME=value` variables set from them filled in."""
+    quote = shlex.quote
+    def put(src: str, name: str, value: str) -> str:
+        pat = rf"\"\$\{{{name}\}}\"|\"\${name}(?![\w])\"|\$\{{{name}\}}|\${name}(?![\w])"
+        return re.sub(pat, lambda _m: quote(value), src)
+    for i, a in enumerate(args[:9], 1):
+        text = put(text, str(i), a)
+    joined = " ".join(quote(a) for a in args)
+    text = re.sub(r"\"\$[@*]\"|\$[@*]", lambda _m: joined, text)
+    for m in ASSIGN_LINE_RE.finditer(text):  # FILE=subs/a.csv ... -f "$FILE"
+        try:
+            words = shlex.split(m.group(2), comments=True)
+        except ValueError:
+            continue
+        if len(words) == 1 and not DYNAMIC & set(words[0]):
+            text = put(text, m.group(1), words[0])
+    return text
+
+
+def script_submits(payload: dict, command: str, ran: bool = False) -> list[dict]:
+    """The submits made by the scripts a command runs (`bash x.sh ARGS`, `./x.sh`, `python x.py`), as `parse_submits`
+    gives them plus ``script`` (its path). ``at`` is where the invocation starts, so a -f file is read after the
+    `cd` steps before it. A script whose arguments cannot be told leaves its fields as written (`$VAR`).
+    ``ran``: a PostToolUse payload (see `path_at`). Never raises."""
+    try:
+        text, out, seen = _text_heredocs_blanked(command), [], set()
+        for m in SCRIPT_RUN_RE.finditer(text):
+            # the rest of the command from the script on, cut at the first separator outside quotes by _tokens
+            toks = _tokens(text[m.start("rest") if m.group("rest") is not None else m.start("direct"):])
+            if m.group("rest") is not None:
+                if any(t in ("-c", "-m") for t in toks if t.startswith("-")):
+                    continue
+                toks = toks[next((i for i, t in enumerate(toks) if not t.startswith("-")), len(toks)):]
+            if not toks or toks[0] == "kaggle" or DYNAMIC & set(toks[0]):
+                continue
+            at = m.start("rest") if m.group("rest") is not None else m.start("direct")
+            script = path_at(payload, toks[0], at, ran)
+            if (script is None or script in seen or script.suffix.lower() not in (".sh", ".bash", ".zsh", ".py")
+                    or not script.is_file() or script.stat().st_size > SCRIPT_MAX_BYTES):
+                continue
+            seen.add(script)
+            body = script.read_text(encoding="utf-8", errors="replace")
+            if script.suffix.lower() == ".py":
+                subs = parse_submits(body) or ([{"competition": None, "file": None, "message": None, "kernel": None,
+                                                 "version": None, "quiet": False}] if PY_SUBMIT_RE.search(body) else [])
+            else:
+                body = "\n".join(l for l in body.splitlines() if not l.lstrip().startswith("#"))
+                subs = parse_submits(_fill_arguments(_text_heredocs_blanked(body), toks[1:]))
+            out += [dict(s, script=str(script), at=at) for s in subs]
+    except Exception:
+        return []
+    return out
+
+
 def submit_label(sub: dict) -> str:
     """A parsed submit as messages name it: its notebook and version, or its file."""
     if sub.get("kernel"):

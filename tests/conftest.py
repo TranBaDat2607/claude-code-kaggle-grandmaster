@@ -1,3 +1,4 @@
+import os
 import sys
 from pathlib import Path
 
@@ -7,6 +8,7 @@ import pytest
 
 PLUGIN_ROOT = Path(__file__).resolve().parents[1] / "plugins" / "kaggle-grandmaster"
 sys.path.insert(0, str(PLUGIN_ROOT))
+os.environ.setdefault("KGKIT_OFFLINE", "1")  # no test asks Kaggle (kgkit status / adopt sync)
 
 
 @pytest.fixture
