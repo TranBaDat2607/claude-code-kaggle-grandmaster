@@ -287,10 +287,11 @@ def _match_replies(subs: list[dict], replies: list, unseen: bool) -> list[tuple]
     are logged as the last one's."""
     out, i = [], 0
     for sub in subs:
-        silent = bool(sub.get("kernel")) and bool(sub.get("quiet") or not sub.get("competition"))
+        script = bool(sub.get("script"))  # a script's submit may not have run: only Kaggle's reply says it did
+        silent = bool(sub.get("kernel")) and bool(sub.get("quiet") or not sub.get("competition")) and not script
         if i < len(replies) and (replies[i][0] == "failed" or not silent):
             i = _take_reply(sub, replies, i, out)
-        elif silent or unseen:
+        elif (silent or unseen) and not script:
             out.append((sub, "unknown", None, None))
     while subs and i < len(replies):
         if replies[i][0] == "failed":
@@ -380,7 +381,8 @@ def _logged_note(root: Path, st, sub: dict, rec: dict, label: str) -> str:
     count = (f"Kaggle reports {left} left today for the team" if left is not None
              else f"{C.submissions_today(root)}/{st.daily_submissions if st else 5} today in the local log, UTC")
     unknown = "" if rec["status"] == "submitted" else ", outcome unknown: Kaggle's reply is not in this output"
-    ctx = (f"kaggle-grandmaster: submission{label} logged{unknown} ({count}). {_poll_hint(root, sub, st, slug)}; "
+    via = f" (made by {Path(sub['script']).name})" if sub.get("script") else ""
+    ctx = (f"kaggle-grandmaster: submission{label}{via} logged{unknown} ({count}). {_poll_hint(root, sub, st, slug)}; "
            f"when the public score appears, run `python -m kgkit ledger lb {exp_id or '<exp_id>'} <score>` and "
            f"compare with CV.")
     if not exp_id:
@@ -388,13 +390,28 @@ def _logged_note(root: Path, st, sub: dict, rec: dict, label: str) -> str:
     return ctx
 
 
+def unlogged_submit_note(payload: dict, subs: list[dict]) -> str | None:
+    """Kaggle's reply to a submit is in the output, but no submit was found in the command or the script it runs
+    (`make submit`, `uv run`, a wrapper that calls another): it is not in the local log."""
+    root = C.workspace(payload)
+    if subs or root is None or _backgrounded(payload):
+        return None
+    if not any(kind in ("left", "ok") for kind, _ in _replies(_response_text(payload))):
+        return None
+    return ("kaggle-grandmaster: Kaggle replied to a submit in this output, but the command is not one the hook can "
+            "read, so the submission is not in the local log (the daily count and the repeat-file check miss it). "
+            "`python -m kgkit status` adds it from Kaggle's list; call `kaggle competitions submit` in the command "
+            "or in a script it runs (and let it print Kaggle's reply) to have it logged with its file hash.")
+
+
 def main() -> None:
     payload = C.read_input()
     cmd = C.command_of(payload)
     # One command can chain an upload, pushes and submits: report on each, in one message.
     pushes = C.parse_pushes(cmd)
+    subs = C.parse_submits(cmd) or C.script_submits(payload, cmd, ran=True)
     notes = [silent_failure_note(payload), *push_reply_notes(payload, pushes), *log_gpu_pushes(payload, pushes),
-             *log_submissions(payload, C.parse_submits(cmd))]
+             *log_submissions(payload, subs), unlogged_submit_note(payload, subs)]
     notes = [n for n in notes if n]
     if notes:
         C.emit("PostToolUse", additionalContext="\n\n".join(notes))

@@ -410,3 +410,47 @@ def test_stale_remaining_count_is_not_reused(plugin_root, ws, monkeypatch):
     assert C.server_remaining_today(ws) is None
     hook(plugin_root, "post_tool.py", _post(cmd, "Could not submit to competition", ws))  # failed: skipped
     assert C.server_remaining_today(ws) is None
+
+
+# ----------------------------------------------------------------------------- #63 submits made by a script
+WRAPPER = '#!/bin/bash\nset -e\n# validate, submit, poll\nkaggle competitions submit demo -f "$1" -m "$2"\n'
+
+
+def test_post_logs_a_submit_made_by_a_wrapper_script(plugin_root, ws):
+    (ws / "submit.sh").write_text(WRAPPER)
+    cmd = 'bash submit.sh subs/good.csv "0001_lgbm | CV 0.8"'
+    ctx = hook(plugin_root, "post_tool.py", _post(cmd, "4 submissions remaining today.", ws))["additionalContext"]
+    (rec,) = _sub_log(ws)
+    assert rec["file"] == "subs/good.csv" and rec["sha256"] and rec["remaining_today"] == 4
+    assert rec["exp_id"] == "0001_lgbm" and rec["status"] == "submitted"
+    assert "made by submit.sh" in ctx and "ledger lb 0001_lgbm" in ctx
+
+
+def test_post_script_that_stopped_before_submitting_logs_nothing(plugin_root, ws):
+    (ws / "submit.sh").write_text(WRAPPER)
+    out = hook(plugin_root, "post_tool.py", _post('bash submit.sh subs/bad.csv "0001_x"', "validation failed", ws))
+    assert out is None and not (ws / ".kaggle-gm" / "submissions.jsonl").exists()
+
+
+def test_post_script_variables_and_direct_run(plugin_root, ws):
+    (ws / "go.sh").write_text('FILE=subs/good.csv\nkaggle competitions submit demo -f "$FILE" -m "$1"\n')
+    (ws / "go.sh").chmod(0o755)
+    hook(plugin_root, "post_tool.py", _post("./go.sh 0002_cnn", "3 submissions remaining today.", ws))
+    assert _sub_log(ws)[-1]["file"] == "subs/good.csv" and _sub_log(ws)[-1]["exp_id"] == "0002_cnn"
+
+
+def test_post_notes_a_reply_it_cannot_attribute(plugin_root, ws):
+    ctx = hook(plugin_root, "post_tool.py", _post("make submit", "4 submissions remaining today.", ws))["additionalContext"]
+    assert "not in the local log" in ctx and "kgkit status" in ctx
+    assert not (ws / ".kaggle-gm" / "submissions.jsonl").exists()
+    assert hook(plugin_root, "post_tool.py", _post("make test", "all passed", ws)) is None
+
+
+def test_pre_asks_on_the_budget_for_a_script_submit_only(plugin_root, ws):
+    (ws / "submit.sh").write_text(WRAPPER)
+    cmd = 'bash submit.sh subs/bad.csv "0001_x"'
+    assert hook(plugin_root, "pre_tool.py", bash(cmd, ws)) is None  # the file is not judged: the script may fix it
+    for _ in range(2):
+        hook(plugin_root, "post_tool.py", _post(cmd, "1 submissions remaining today.", ws))
+    out = hook(plugin_root, "pre_tool.py", bash(cmd, ws))
+    assert out["permissionDecision"] == "ask" and "2/2 submissions already logged" in out["permissionDecisionReason"]

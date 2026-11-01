@@ -9,10 +9,13 @@ allowed-tools: [Read, Glob, Grep]
 1. `python -m kgkit status -n 15` (kgkit home from the session context or `$KGKIT_HOME`). It prints
    the deadline with days left and the endgame phase (see `final-submission-selection`), submissions
    logged today (UTC) against the daily limit (plus Kaggle's own count when the last submit printed
-   one) and the cached GPU quota.
+   one) and the cached GPU quota. It first adds to the log the submissions Kaggle lists that the hooks
+   never saw (a script, the website, a teammate) and says whether the count was "checked against
+   Kaggle's list" or is "local log only" (no CLI or login, or `--offline`): trust a local-only count
+   no further than that.
 2. If the Kaggle CLI is authenticated: `kaggle competitions submissions <slug> --format json` →
-   submissions teammates or the website used today, which the local log cannot see, and the latest
-   scores not yet attached to the ledger (offer to attach them with `python -m kgkit ledger lb`).
+   the latest scores not yet attached to the ledger (offer to attach them with
+   `python -m kgkit ledger lb`).
 3. If the GPU quota is stale or missing and remote runs are planned: `python -m kgkit gpu quota`.
 4. `python -m kgkit backlog list` and the CLAUDE.md notes. Flag experiments that were run but never
    decided (no `decision` in the ledger table) and offer to compare/decide them.

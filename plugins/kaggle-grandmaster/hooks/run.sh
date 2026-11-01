@@ -1,7 +1,9 @@
 #!/bin/sh
 # Launch a kaggle-grandmaster hook script with a working Python 3.
 # - Tool hooks (pre/post) bail out before starting Python unless the command mentions kaggle,
-#   so ordinary shell commands pay no measurable cost.
+#   so ordinary shell commands pay no measurable cost. A wrapper script that submits (`bash go.sh x.csv`) shows
+#   neither in its command, so a payload that mentions a submit, or Kaggle's "N submissions remaining today" reply,
+#   passes too.
 # - On Windows `python3` may be the Microsoft Store stub, so every candidate is test-run.
 # - Hooks fail open: any problem here exits 0 and never blocks the user.
 DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -11,7 +13,7 @@ INPUT="$(cat)"
 case "$SCRIPT" in
   pre_tool.py|post_tool.py)
     case "$INPUT" in
-      *kaggle*|*KAGGLE*|*Kaggle*) ;;
+      *kaggle*|*KAGGLE*|*Kaggle*|*submit*|*Submit*|*SUBMIT*|*"remaining today"*) ;;
       *) exit 0 ;;
     esac
     ;;
