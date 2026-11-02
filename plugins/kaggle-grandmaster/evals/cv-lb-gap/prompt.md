@@ -1,5 +1,7 @@
 ---
-max_turns: 6
+description: "CV-LB gap from shuffled KFold, unshifted rolling features and full-train target encoding on time data"
+tags: [portable, regression, validation]
+max_turns: 10
 allowed_tools: [Read, Glob, Grep, Skill]
 ---
 

@@ -1,5 +1,7 @@
 ---
-max_turns: 6
+description: "Spend a weekly Kaggle GPU quota well: preprocess once, both T4s, 1-fold screening, reset math"
+tags: [portable, regression, gpu]
+max_turns: 10
 allowed_tools: [Read, Glob, Grep, Skill]
 ---
 

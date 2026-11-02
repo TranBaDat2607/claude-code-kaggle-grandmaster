@@ -1,5 +1,7 @@
 ---
-max_turns: 6
+description: "Pseudo-labels from the all-fold ensemble leak validation labels into every fold"
+tags: [portable, regression, boosters]
+max_turns: 10
 allowed_tools: [Read, Glob, Grep, Skill]
 ---
 

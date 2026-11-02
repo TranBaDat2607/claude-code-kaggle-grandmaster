@@ -1,5 +1,7 @@
 ---
-max_turns: 6
+description: "Judge a gain by per-fold paired differences, not the fold std"
+tags: [portable, regression, experiments]
+max_turns: 10
 allowed_tools: [Read, Glob, Grep, Skill]
 ---
 

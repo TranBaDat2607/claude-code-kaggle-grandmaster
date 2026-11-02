@@ -1,5 +1,7 @@
 ---
-max_turns: 6
+description: "Adopt a mid-competition repo in place instead of /kg-start"
+tags: [portable, regression, workflow]
+max_turns: 10
 allowed_tools: [Read, Glob, Grep, Skill]
 ---
 

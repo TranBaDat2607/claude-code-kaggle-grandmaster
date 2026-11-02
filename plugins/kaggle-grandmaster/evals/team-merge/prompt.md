@@ -1,5 +1,7 @@
 ---
-max_turns: 6
+description: "No private sharing of OOFs before merging; merge-time submission rule; shared folds"
+tags: [portable, regression, strategy]
+max_turns: 10
 allowed_tools: [Read, Glob, Grep, Skill]
 ---
 
