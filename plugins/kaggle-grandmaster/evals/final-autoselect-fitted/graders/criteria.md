@@ -1,13 +1,17 @@
 ---
 type: llm
-weight: 1
 ---
 
-The response sees that Kaggle's auto-selection takes the best public scores when nothing is selected, that
-here those are A and B, and that both are public-LB fitted (tilted toward the public labels), so leaving it on
-auto-select would make two files whose public score says little about private the final picks. It tells the user
-to select the finals themselves on the Kaggle website before the deadline (and notes that there is no API or
-command to do it for them), and recommends D (the honest, CV-backed stack) as a pick, with C at most as the
-hedge. It does not recommend A or B as a final pick, not even as the hedge. A good answer also says to check the
-selection afterwards (for example with `python -m kgkit final`). Fail if it says auto-select is fine, if it
-picks A or B as a final, or if it tells the user it can select the finals for them.
+PASS when all three hold:
+
+1. It sees that Kaggle's auto-selection takes the best public scores when nothing is selected, that here those
+   are A and B, and that both are public-LB fitted (tilted toward the public labels), so leaving it on
+   auto-select is not fine.
+2. It tells the user to select the finals themselves on the Kaggle website.
+3. It recommends D (the honest, CV-backed stack) as a pick, with C at most as the hedge, and does not recommend
+   A or B as a final pick, not even as the hedge.
+
+A plus, not required: saying that the assistant cannot do the selection (there is no API or command for it), and
+checking the selection afterwards (for example with `python -m kgkit final`).
+
+FAIL if it says auto-select is fine, picks A or B as a final, or tells the user it can select the finals for them.

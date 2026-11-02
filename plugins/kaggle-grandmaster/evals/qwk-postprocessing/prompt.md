@@ -1,5 +1,7 @@
 ---
-max_turns: 6
+description: "QWK: regression + OOF-fitted thresholds with an honest check"
+tags: [portable, regression, metric]
+max_turns: 10
 allowed_tools: [Read, Glob, Grep, Skill]
 ---
 

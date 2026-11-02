@@ -1,5 +1,7 @@
 ---
-max_turns: 6
+description: "A small fixed holdout is still useful: paired noise of differences, not SE of one score"
+tags: [portable, regression, experiments]
+max_turns: 10
 allowed_tools: [Read, Glob, Grep, Skill]
 ---
 

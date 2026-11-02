@@ -1,5 +1,7 @@
 ---
-max_turns: 6
+description: "Kaggle auto-select would pick public-LB-fitted files: select finals yourself"
+tags: [portable, regression, final-selection]
+max_turns: 10
 allowed_tools: [Read, Glob, Grep, Skill]
 ---
 

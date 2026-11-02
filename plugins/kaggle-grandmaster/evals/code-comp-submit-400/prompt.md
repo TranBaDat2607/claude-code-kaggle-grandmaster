@@ -1,5 +1,7 @@
 ---
-max_turns: 6
+description: "A bare 400 on a code-competition submit: read the response body, non-versioned datasets"
+tags: [portable, regression, kaggle-cli]
+max_turns: 10
 allowed_tools: [Read, Glob, Grep, Skill]
 ---
 

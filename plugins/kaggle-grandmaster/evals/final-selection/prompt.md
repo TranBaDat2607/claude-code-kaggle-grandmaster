@@ -1,5 +1,7 @@
 ---
-max_turns: 6
+description: "Pick 2 finals: honest CV over a small noisy public LB, no LB-tuned blend"
+tags: [portable, regression, final-selection]
+max_turns: 10
 allowed_tools: [Read, Glob, Grep, Skill]
 ---
 

@@ -1,5 +1,7 @@
 ---
-max_turns: 6
+description: "Patient-grouped CV for multi-image patients"
+tags: [portable, regression, validation]
+max_turns: 10
 allowed_tools: [Read, Glob, Grep, Skill]
 ---
 

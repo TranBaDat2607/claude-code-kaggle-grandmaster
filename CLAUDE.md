@@ -7,7 +7,10 @@ This repo is a Claude Code marketplace (`.claude-plugin/marketplace.json`) conta
 - Tests: `python -m pytest tests -q` (template tests need torch/timm/transformers; LightGBM test is skipped if absent)
 - Validate manifests/skills/agents: `claude plugin validate plugins/kaggle-grandmaster`
 - Inventory + token cost: `claude --plugin-dir plugins/kaggle-grandmaster plugin details kaggle-grandmaster`
-- Evals (cheap): `cd plugins/kaggle-grandmaster && claude plugin eval . --runs 3 --model haiku --no-publish`
+- Evals (see `plugins/kaggle-grandmaster/evals/README.md`), from `plugins/kaggle-grandmaster`:
+  advice cases, any OS incl. native Windows: `claude plugin eval . --tag portable --model haiku --judge-model sonnet --no-publish`;
+  workflow cases, Linux/macOS/WSL2: `claude plugin eval . --tag shell --scaffold --allow-tools Bash --model haiku --judge-model sonnet --no-publish`.
+  Runs use your plan's usage (or API billing): batch large runs with `--case` / `--tag`.
 
 ## Conventions
 - `kgkit/state.py`, `kgkit/gpu.py`, `kgkit/budget.py`, `kgkit/backlog.py`, `kgkit/adopt.py`, `kgkit/safety.py`,
@@ -27,8 +30,9 @@ This repo is a Claude Code marketplace (`.claude-plugin/marketplace.json`) conta
 - Templates and `kgkit/kaggle_gpu_runner.py` print ASCII only (Windows consoles are often cp1252).
 - Skills: knowledge skills are model-invoked; `kg-*` skills are slash commands. Side-effectful commands
   (`kg-submit`, `kg-grind`, `kg-kernel`, `kg-gpu`) set `disable-model-invocation: true`.
-- When a new skill is added, add a route for it in `hooks/prompt_router.py` and, if it encodes non-obvious
-  judgement, an eval case under `evals/`.
+- When a new skill is added, add a route for it in `hooks/prompt_router.py`, add it to the `no-plugin-skill`
+  grader of every `negative` eval case (`tests/test_evals.py` enforces this) and, if it encodes non-obvious
+  judgement, an eval case under `evals/` (tagged `capability` until it passes reliably, then `regression`).
 - Don't bump versions by hand. Every push to `main` runs `.github/workflows/release.yml`, which runs
   `scripts/bump_version.py` to bump `plugin.json`, `marketplace.json` and `kgkit/__init__.py` (patch by default;
   PR labels `release:minor` / `release:major` / `no-release`), tags and makes a GitHub release.

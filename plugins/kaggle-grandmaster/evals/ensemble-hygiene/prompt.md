@@ -1,5 +1,7 @@
 ---
-max_turns: 6
+description: "Blending OOFs made on different fold splits"
+tags: [portable, regression, ensembling]
+max_turns: 10
 allowed_tools: [Read, Glob, Grep, Skill]
 ---
 

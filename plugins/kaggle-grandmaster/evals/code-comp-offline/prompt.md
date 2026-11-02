@@ -1,5 +1,7 @@
 ---
-max_turns: 6
+description: "Packaging an offline code-competition notebook for a 20x hidden test"
+tags: [portable, regression, code-comp]
+max_turns: 10
 allowed_tools: [Read, Glob, Grep, Skill]
 ---
 

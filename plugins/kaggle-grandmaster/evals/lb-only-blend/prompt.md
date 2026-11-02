@@ -1,5 +1,7 @@
 ---
-max_turns: 6
+description: "Blends with public files carry no CV: the 1.00 CV-LB correlation is an artefact"
+tags: [portable, regression, final-selection]
+max_turns: 10
 allowed_tools: [Read, Glob, Grep, Skill]
 ---
 

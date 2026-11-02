@@ -1,5 +1,7 @@
 ---
-max_turns: 6
+description: "GPU quota nearly gone: TPU quota, queue time, torch_xla port, validate before queueing"
+tags: [portable, regression, gpu]
+max_turns: 10
 allowed_tools: [Read, Glob, Grep, Skill]
 ---
 
