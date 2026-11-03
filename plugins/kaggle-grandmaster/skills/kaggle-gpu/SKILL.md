@@ -1,6 +1,6 @@
 ---
 name: kaggle-gpu
-description: Training models on Kaggle's free GPUs and TPUs with limited weekly quotas — T4x2 vs P100 vs TPU v5e-8 choice, quota, session and concurrency limits, remote training kernels (kgkit gpu build/push/wait/collect/release), screening ideas on one fold with learning-curve pruning, packing two jobs per 2xT4 session, resuming past the 12h limit, porting to torch_xla and the TPU queue, CPU kernels for preprocessing or stacking many OOF libraries, where attached inputs are mounted, input-pipeline throughput, and budgeting accelerator hours until the deadline. Use when training on Kaggle notebooks/kernels, planning or rationing GPU/TPU quota, choosing an accelerator, or when a remote run was slow, idle, queued, timed out or wasted hours.
+description: Training on Kaggle's free GPUs and TPUs under their weekly quotas — choosing T4x2, P100, TPU v5e-8 or a CPU kernel, remote training runs with kgkit gpu (build/push/wait/collect), one-fold screens with pruning, resuming past the session limit, porting to torch_xla, and budgeting accelerator hours until the deadline. Use when training on Kaggle notebooks/kernels, planning or rationing GPU/TPU quota, choosing an accelerator, or when a remote run was slow, idle, queued, timed out or wasted hours.
 ---
 
 # Training on Kaggle GPUs
@@ -23,9 +23,8 @@ Unused quota expires at the weekly reset, so hours you don't spend are also lost
 - **`-t` is a hard kill, not only a quota reservation.** Kaggle ends the session at the cap wherever the script is
   (status `CANCEL_ACKNOWLEDGED`, i.e. `cancelled`) and keeps only the files already in `/kaggle/working`. A run
   that ends early is charged only the hours it ran, so a margin costs nothing: cap a kernel of your own at
-  ~1.3-1.5x its measured runtime. (Measured Oct 2026: a 2xT4 job capped at 4 h was killed 12 min before its test
-  scoring ended, with no model saved: the test predictions were lost.) `gpu build` kernels stop themselves a few
-  minutes before the cap with their checkpoints saved.
+  ~1.3-1.5x its measured runtime. `gpu build` kernels stop themselves a few minutes before the cap with their
+  checkpoints saved.
 - Batch sessions at once per account: **2 GPU, 1 TPU**, across all competitions. A push beyond that
   prints `Maximum batch GPU session count of 2 reached` and exits 0. `kgkit gpu push` checks your busy
   sessions first.

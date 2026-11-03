@@ -39,7 +39,8 @@ description: Competition-grade deep learning training practice in PyTorch — sc
 5. Loss/metric mismatch: e.g. sigmoid applied twice, softmax + CrossEntropyLoss, wrong
    `pos_weight`, logits vs probabilities in metric.
 6. Data leakage between train/val (too-good val) or distribution mismatch (val ≫ LB).
-7. NaNs under fp16: use bf16, scale loss, clamp logs, check for division by zero.
+7. NaNs under fp16: switch to bf16 only on GPUs that have it (Ampere+, not T4/P100); otherwise keep fp16 with
+   GradScaler, clamp logs, check for division by zero.
 
 ## Reproducibility & bookkeeping
 
