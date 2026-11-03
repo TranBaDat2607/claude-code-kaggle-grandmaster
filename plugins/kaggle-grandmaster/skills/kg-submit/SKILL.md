@@ -23,6 +23,7 @@ Arguments: `$ARGUMENTS`
 5. Submit: `kaggle competitions submit <slug> -f <file> -m "<exp_id> | CV <cv> | <short note>"`.
    (Code competitions: submit the notebook version — see `code-competitions`.)
 6. Poll `kaggle competitions submissions <slug> --format json` every ~60 s (max ~15 min) until the
-   score appears; then `python -m kgkit ledger lb <exp_id> <public_score>` and show the updated CV-LB
-   correlation from `python -m kgkit status`.
+   score appears (code competitions: Kaggle reruns the notebook first, which takes hours, so poll every
+   ~30 min in the background instead); then `python -m kgkit ledger lb <exp_id> <public_score>` and show
+   the updated CV-LB correlation from `python -m kgkit status`.
 7. Interpret: does LB move with CV as expected? If not, suggest `/kg-debug`.

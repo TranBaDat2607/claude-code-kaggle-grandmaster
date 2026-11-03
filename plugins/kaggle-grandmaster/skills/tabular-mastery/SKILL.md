@@ -48,7 +48,7 @@ ablations are one flag.
 | Original dataset | Playground data is synthesised from a real dataset — append the original (flag it) | check rules; usually allowed and helpful |
 
 **Feature search at scale.** Hand-designed families find the obvious features; brute force finds
-the rest. Recent Playground winners generated 10,000+ groupby features (COL1 × COL2 × STAT) and kept
+the rest. Playground winners have generated 10,000+ groupby features (COL1 × COL2 × STAT) and kept
 the best few hundred; pairwise categorical combinations (8 columns → 28 crosses) are another reliable
 source. `kgkit features search` does this on the frozen folds:
 

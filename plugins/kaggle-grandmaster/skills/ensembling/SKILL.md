@@ -57,8 +57,8 @@ score, you're overfitting the blend — use fewer models, simpler weights, or pl
   `kgkit.ensemble.stack(..., X_extra=...)`, so the meta-model can learn *where* each model is right).
 - Level-2: Ridge / logistic regression (robust), or shallow GBDT / small MLP; use the
   **same folds** to produce level-2 OOF; never fit level-2 on test-time predictions.
-- **Large libraries.** Playground winners now stack 100+ models in 3–4 levels (2026 churn: 150 of
-  850 experiments, 4 levels). Recipe:
+- **Large libraries.** Playground winners have stacked 100+ models in 3–4 levels (March 2026 churn:
+  150 of 850 experiments, 4 levels). Recipe:
   1. `kgkit blend --exp <all> --prune 40` drops near-duplicates (OOF corr > 0.995 with a better
      model). Duplicates only add weight-fitting noise.
   2. `--method stack --levels 1`: a layer of [linear, shallow GBDT] meta-models on the same folds, then

@@ -30,9 +30,11 @@ This repo is a Claude Code marketplace (`.claude-plugin/marketplace.json`) conta
 - Templates and `kgkit/kaggle_gpu_runner.py` print ASCII only (Windows consoles are often cp1252).
 - Skills: knowledge skills are model-invoked; `kg-*` skills are slash commands. Side-effectful commands
   (`kg-submit`, `kg-grind`, `kg-kernel`, `kg-gpu`) set `disable-model-invocation: true`.
-- When a new skill is added, add a route for it in `hooks/prompt_router.py`, add it to the `no-plugin-skill`
-  grader of every `negative` eval case (`tests/test_evals.py` enforces this) and, if it encodes non-obvious
-  judgement, an eval case under `evals/` (tagged `capability` until it passes reliably, then `regression`).
+- When a new skill is added, add it to the `no-plugin-skill` grader of every `negative` eval case
+  (`tests/test_evals.py` enforces this). If the model should load it from a plain-language prompt (a knowledge
+  skill, or a command like `kg-adopt`), add a route in `hooks/prompt_router.py`; the router ignores slash
+  commands. If it encodes non-obvious judgement, add an eval case under `evals/` (tagged `capability` until it
+  passes reliably, then `regression`).
 - Don't bump versions by hand. Every push to `main` runs `.github/workflows/release.yml`, which runs
   `scripts/bump_version.py` to bump `plugin.json`, `marketplace.json` and `kgkit/__init__.py` (patch by default;
   PR labels `release:minor` / `release:major` / `no-release`), tags and makes a GitHub release.
