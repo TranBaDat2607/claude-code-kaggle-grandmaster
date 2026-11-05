@@ -438,6 +438,7 @@ def cmd_final(a):
     ended = data is not None and (after or FN.revealed(data))
     if ended:
         text, picks = FN.outcome(st, recs, data)
+        FN.save_standing(root, st, recs, data)  # for the session brief after the deadline
     elif after:
         text, picks = [f"The deadline has passed, but Kaggle could not be asked for the outcome ({error})."], None
     else:

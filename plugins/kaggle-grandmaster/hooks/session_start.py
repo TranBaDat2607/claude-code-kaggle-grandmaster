@@ -1,6 +1,8 @@
 """SessionStart: expose kgkit to the session and, inside a competition workspace, inject a compact
 status brief (facts, deadline countdown, best CV/LB, accepted baseline, CV-LB agreement, recent
-experiments, top of the idea backlog, submissions today, lessons from past competitions). Outside a
+experiments, top of the idea backlog, submissions today, lessons from past competitions). After the deadline the
+brief is short: what is left to do (standing, finals, post-mortem, repo audit, lessons; ``finals.ended_lines``)
+instead of the CV, submission and GPU lines. Outside a
 workspace, a repo with signs of Kaggle work (kernel-metadata.json, competition URLs) is pointed at
 /kg-adopt rather than the full /kg-start bootstrap."""
 
@@ -80,6 +82,48 @@ def vendored_note(root: Path) -> str:
             "experiments then run the new code).")
 
 
+def ledger_line(st, recs: list[dict]) -> str:
+    """Experiments logged, the best score of their own, the best public LB and how CV tracked it."""
+    holdout = getattr(st, "holdout", False)
+    scored = [r for r in recs if _own_cv(r, holdout) and not r.get("recheck")]
+    best = sorted(scored, key=lambda r: r["cv"], reverse=st.greater_is_better)[:1]
+    with_lb = [r for r in recs if isinstance(r.get("lb_public"), (int, float))]
+    s = f"Ledger: {len(recs)} experiments"
+    if best:
+        s += f"; best {'holdout' if holdout else 'CV'} {best[0]['cv']:.5f} ({best[0]['id']})"
+    if with_lb:
+        bl = sorted(with_lb, key=lambda r: r["lb_public"], reverse=st.greater_is_better)[0]
+        s += f"; best public LB {bl['lb_public']:.5f} ({bl['id']})"
+        try:
+            fitted = C.FN.not_fitted_note(recs, st)
+        except Exception:  # the brief must survive a malformed record
+            fitted = ""
+        s += f" [{fitted}]" if fitted else ""
+        pairs = [r for r in with_lb if _own_cv(r, holdout) and not r.get("recheck")]
+        corr = _pearson([r["cv"] for r in pairs], [r["lb_public"] for r in pairs])
+        if corr is not None and len({round(r["cv"], 12) for r in pairs}) >= 4:
+            s += (f"; CV-LB pearson {corr:.2f} over {len(pairs)} subs"
+                  + (" (holdout CV: noisy)" if holdout else ""))
+    return s + "."
+
+
+def ended(st) -> bool:
+    days = C.S.deadline_days(st)
+    return days is not None and days < 0
+
+
+def ended_brief(root: Path, st, lines: list[str]) -> str:
+    """After the deadline: what is left to do (standing, finals, post-mortem, repo audit, lessons) instead of the
+    CV, submission, GPU and inference-budget lines, which no longer apply."""
+    lines.extend(C.FN.ended_lines(root, st))
+    if AU is not None:
+        lines.extend(AU.brief_lines(root))  # competition data in git matters most now, before anything goes public
+    recs = C.ledger_records(root)
+    if recs:
+        lines.append(ledger_line(st, recs))
+    return "\n".join(lines)
+
+
 def brief(root: Path) -> str:
     st = C.S.load(root)
     lines = []
@@ -88,6 +132,8 @@ def brief(root: Path) -> str:
     direction = "higher" if st.greater_is_better else "lower"
     lines.append(f"Competition workspace: **{st.slug}** — metric {st.metric or '?'} ({direction} is better), "
                  f"task {st.task or '?'}, target `{st.target or '?'}`; {C.S.deadline_line(st)}.")
+    if ended(st):
+        return ended_brief(root, st, lines)
     if st.code_competition:
         lines.append(f"CODE COMPETITION: runtime limit {st.runtime_limit_hours or '?'}h, internet "
                      f"{'allowed' if st.internet_allowed else 'OFF'} — budget inference early.")
@@ -105,25 +151,7 @@ def brief(root: Path) -> str:
     recs = C.ledger_records(root)
     if recs:
         scored = [r for r in recs if _own_cv(r, holdout) and not r.get("recheck")]
-        best = sorted(scored, key=lambda r: r["cv"], reverse=st.greater_is_better)[:1]
-        with_lb = [r for r in recs if isinstance(r.get("lb_public"), (int, float))]
-        s = f"Ledger: {len(recs)} experiments"
-        if best:
-            s += f"; best {'holdout' if holdout else 'CV'} {best[0]['cv']:.5f} ({best[0]['id']})"
-        if with_lb:
-            bl = sorted(with_lb, key=lambda r: r["lb_public"], reverse=st.greater_is_better)[0]
-            s += f"; best public LB {bl['lb_public']:.5f} ({bl['id']})"
-            try:
-                fitted = C.FN.not_fitted_note(recs, st)
-            except Exception:  # the brief must survive a malformed record
-                fitted = ""
-            s += f" [{fitted}]" if fitted else ""
-            pairs = [r for r in with_lb if _own_cv(r, holdout) and not r.get("recheck")]
-            corr = _pearson([r["cv"] for r in pairs], [r["lb_public"] for r in pairs])
-            if corr is not None and len({round(r["cv"], 12) for r in pairs}) >= 4:
-                s += (f"; CV-LB pearson {corr:.2f} over {len(pairs)} subs"
-                      + (" (holdout CV: noisy)" if holdout else ""))
-        lines.append(s + ".")
+        lines.append(ledger_line(st, recs))
         accepted = next((r for r in reversed(recs) if r.get("decision") in ("baseline", "keep")
                          and not r.get("recheck") and not C.EV.lb_fitted(r)), None)
         if accepted is not None:
@@ -201,8 +229,10 @@ def main() -> None:
         if b:
             parts.append(b)
             st = C.S.load(root)
-            frozen = "fixed holdout" if st is not None and st.holdout else "frozen folds"
-            parts.append(f"Follow the workspace CLAUDE.md rules ({frozen}, log every run, validate before submitting).")
+            if st is not None and not ended(st):
+                frozen = "fixed holdout" if st.holdout else "frozen folds"
+                parts.append(f"Follow the workspace CLAUDE.md rules ({frozen}, log every run, validate before "
+                             "submitting).")
         les = lessons()
         if les:
             parts.append(les)

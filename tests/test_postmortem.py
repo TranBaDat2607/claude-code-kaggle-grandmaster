@@ -4,9 +4,11 @@ the private leaderboard (`kgkit ledger predictiveness`)."""
 
 import datetime as dt
 import json
+import os
 import subprocess
 import sys
 import textwrap
+import uuid
 from types import SimpleNamespace as N
 
 import pytest
@@ -217,8 +219,9 @@ def test_final_after_the_deadline_reports_the_outcome_when_nothing_was_selected(
             "public leaderboard rank 150 (0.95800).") in out
     assert "Medal zone by Kaggle's progression table, computed here: bronze (gold to rank 13 (0.95800), " in out
     assert "silver to rank 75 (0.94900), bronze to rank 150 (0.93900))" in out
-    assert ("Nothing was selected, so Kaggle picked the finals itself among the 2 best public score(s); 3 tie at the "
-            "cut (public / private):") in out
+    assert ("Competition ended; no finals were selected, so Kaggle auto-selected from the 2 best public score(s): 3 "
+            "tie at the cut, and Kaggle's API can't tell which of the tied ones it took (public / private):") in out
+    assert "If it stays so" not in out
     rows = [l for l in out.splitlines() if l.startswith("  0.95800 / ")]
     assert [l.split()[3] for l in rows] == ["0004_a16", "0005_a17", "0006_a20"]
     assert ("The team's private score 0.94300 matches 0005_a17, 0006_a20: Kaggle's picks included at least one of "
@@ -251,6 +254,12 @@ def test_final_after_the_deadline_before_private_scores_and_without_the_leaderbo
     out = capsys.readouterr().out
     assert "No private scores yet: Kaggle shows them once the private leaderboard is final" in out
     assert "Medal zone" not in out and "Selecting finals" not in out
+    # #71: the pool Kaggle took the finals from, not "if it stays so" or steps to select before the deadline
+    assert ("Competition ended; no finals were selected, so Kaggle auto-selected from the 2 best public score(s): 3 "
+            "tie at the cut, and Kaggle's API can't tell which of the tied ones it took:") in out
+    assert [l.split()[1] for l in out.splitlines() if l.startswith("  0.95800  ")] == ["0004_a16", "0005_a17",
+                                                                                      "0006_a20"]
+    assert "If it stays so" not in out and "before " + _utc_in(-2) not in out
 
     fake_kaggle(lb_fail=True)
     cli.main(["final"])
@@ -344,3 +353,153 @@ def test_predictiveness_writes_the_figures(tmp_path, monkeypatch, capsys, fake_k
     assert "wrote " in capsys.readouterr().out
     assert {p.name for p in (tmp_path / "figs").iterdir()} == {"public_vs_private.png", "private_over_time.png",
                                                                "cv_vs_private.png"}
+
+
+# ----------------------------------------------------------------------------- #71: the brief and the router after the deadline
+def _hook_context(plugin_root, script, payload, home):
+    env = {**os.environ, "HOME": str(home), "USERPROFILE": str(home)}
+    r = subprocess.run([sys.executable, str(plugin_root / "hooks" / script)], capture_output=True, env=env,
+                       input=json.dumps(payload), text=True, timeout=60)
+    assert r.returncode == 0, r.stderr
+    return json.loads(r.stdout)["hookSpecificOutput"]["additionalContext"] if r.stdout.strip() else None
+
+
+def _brief(plugin_root, ws, home):
+    return _hook_context(plugin_root, "session_start.py", {"hook_event_name": "SessionStart", "cwd": str(ws)}, home)
+
+
+def _ask(plugin_root, ws, home, prompt, session=None):
+    return _hook_context(plugin_root, "prompt_router.py", {
+        "hook_event_name": "UserPromptSubmit", "prompt": prompt, "cwd": str(ws),
+        "session_id": session or uuid.uuid4().hex}, home)
+
+
+def test_deadline_line_after_the_deadline_says_how_long_ago():
+    st = S.CompetitionState(slug="demo", deadline=_utc_in(-11))
+    assert S.deadline_line(st).startswith(f"deadline {_utc_in(-11)} (ended 11 days ago; phase: ENDED")
+    st.deadline = _utc_in(-1)
+    assert "(ended 1 day ago; phase: ENDED" in S.deadline_line(st)
+    st.deadline = _utc_in(0)
+    assert "(0 days left; phase: FINAL DAYS" in S.deadline_line(st)
+
+
+def test_the_brief_after_the_deadline_is_a_short_ended_checklist(tmp_path, monkeypatch, capsys, plugin_root,
+                                                               fake_kaggle):
+    """The issue: eleven days after the deadline the brief still nagged about folds, today's submissions, the GPU
+    quota and inference budgets. After the deadline it says what is left to do instead."""
+    ws, home = tmp_path / "ws", tmp_path / "home"
+    ws.mkdir(), home.mkdir()
+    _ended_ws(ws, days=-11, code_competition=True, runtime_limit_hours=9, internet_allowed=False)
+    from kgkit.backlog import Backlog
+
+    Backlog(ws).add("try a bigger backbone")
+    (ws / ".kaggle-gm" / "gpu_quota.json").write_text(json.dumps(
+        {"used_h": 10, "remaining_h": 20, "total_h": 30, "refresh_at": "2099-01-03T00:00:00Z",
+         "fetched_at": "2026-01-01T00:00:00Z"}))
+    ctx = _brief(plugin_root, ws, home)
+    assert f"deadline {_utc_in(-11)} (ended 11 days ago; phase: ENDED" in ctx and "-11 days left" not in ctx
+    for nag in ("folds.csv", "Submissions logged today", "Kaggle GPU quota", "budget inference early",
+                "Backlog top", "No accepted baseline", "validate before submitting"):
+        assert nag not in ctx, nag
+    assert "Ledger: 7 experiments; best CV 0.94100 (0005_a17)" in ctx
+    lines = ctx.splitlines()
+    head = lines.index("After the competition (the CV, submission and GPU checks are off):")
+    assert lines[head + 1:head + 6] == [
+        "  - Final standing: not read yet: `python -m kgkit final` reads it once the private leaderboard is out.",
+        "  - Finals: not checked since the deadline: `python -m kgkit final` says what was selected, or what Kaggle "
+        "auto-selected.",
+        "  - Post-mortem: reports/postmortem.md not written yet: run /kg-postmortem.",
+        "  - Repo: not audited for competition data: `python -m kgkit audit-repo` before anything goes public "
+        "(/kg-showcase runs it).",
+        "  - Lessons: none for demo in ~/.kaggle-gm/lessons.md yet (/kg-postmortem appends them).",
+    ]
+
+    # `kgkit final` caches the standing and what Kaggle selected; the rest comes from files the steps write
+    fake_kaggle()
+    monkeypatch.chdir(ws)
+    cli.main(["final"])
+    capsys.readouterr()
+    (ws / "reports").mkdir()
+    (ws / "reports" / "postmortem.md").write_text("# Post-mortem\n")
+    (ws / ".kaggle-gm" / "audit.json").write_text(json.dumps(
+        {"at": "2026-11-01T10:00:00Z", "public": True, "leaks": [], "checks": [], "unignored": []}))
+    (home / ".kaggle-gm").mkdir()
+    (home / ".kaggle-gm" / "lessons.md").write_text("## demo (2026)\n- freeze folds on day one\n")
+    ctx = _brief(plugin_root, ws, home)
+    lines = ctx.splitlines()
+    head = lines.index("After the competition (the CV, submission and GPU checks are off):")
+    today = dt.datetime.now(dt.timezone.utc).date().isoformat()
+    assert lines[head + 1:head + 6] == [
+        f"  - Final standing: private rank 120 of 1,500 teams (top 8.0%), score 0.94300, bronze zone by Kaggle's "
+        f"table (computed) (`kgkit final` of {today}).",
+        "  - Finals: none were selected, so Kaggle auto-selected from 0004_a16, 0005_a17, 0006_a20 (tied at the cut: "
+        "the API can't tell which it took).",
+        "  - Post-mortem: reports/postmortem.md written.",
+        "  - Repo: the repo is PUBLIC; audit of 2026-11-01 found no competition data.",
+        "  - Lessons: appended to ~/.kaggle-gm/lessons.md.",
+    ]
+
+    fake_kaggle(selected=[4, 5])  # with finals selected: which ones
+    cli.main(["final"])
+    capsys.readouterr()
+    assert "  - Finals: 2 of 2 selected on Kaggle: 0004_a16, 0005_a17." in _brief(plugin_root, ws, home).splitlines()
+
+
+def test_the_standing_before_the_private_leaderboard_is_out(tmp_path, monkeypatch, capsys, plugin_root, fake_kaggle):
+    ws, home = tmp_path / "ws", tmp_path / "home"
+    ws.mkdir(), home.mkdir()
+    _ended_ws(ws, days=-1)
+    fake_kaggle(private=False)
+    monkeypatch.chdir(ws)
+    cli.main(["final"])
+    capsys.readouterr()
+    today = dt.datetime.now(dt.timezone.utc).date().isoformat()
+    assert (f"  - Final standing: the private leaderboard was not out at the last check ({today}): run "
+            "`python -m kgkit final` again.") in _brief(plugin_root, ws, home).splitlines()
+
+
+def test_the_router_after_the_deadline_falls_back_to_the_postmortem(tmp_path, plugin_root):
+    """The issue: a question about updating the README loaded grandmaster-playbook eleven days after the deadline."""
+    ws, home = tmp_path / "ws", tmp_path / "home"
+    ws.mkdir(), home.mkdir()
+    S.CompetitionState(slug="demo", metric="auc", deadline=_utc_in(-11)).save(ws)
+    ctx = _ask(plugin_root, ws, home, "what now?")
+    assert "kaggle-grandmaster:kg-postmortem" in ctx and "grandmaster-playbook" not in ctx
+    ctx = _ask(plugin_root, ws, home, "update README.md with what we did")
+    assert "suggest the user run `/kg-showcase`" in ctx and "grandmaster-playbook" not in ctx
+    ctx = _ask(plugin_root, ws, home, "is a +0.002 gain real or noise?")  # a playbook question is still one
+    assert "kaggle-grandmaster:grandmaster-playbook" in ctx
+
+    S.CompetitionState(slug="demo", metric="auc", deadline=_utc_in(30)).save(ws)  # mid-competition: unchanged
+    assert "kaggle-grandmaster:grandmaster-playbook" in _ask(plugin_root, ws, home, "what now?")
+
+
+def test_the_last_day_reminds_how_many_finals_are_selected(tmp_path, plugin_root):
+    """The issue: /kg-final wrote a recommendation the day before, and nothing reminded the user on the last day
+    that no final was ticked. On the deadline's day every session gets one reminder, whatever the prompt."""
+    ws, home = tmp_path / "ws", tmp_path / "home"
+    ws.mkdir(), home.mkdir()
+    st = S.CompetitionState(slug="demo", metric="auc", deadline=_utc_in(0), final_picks=["0003_a", "0004_b"])
+    st.save(ws)
+    sid = uuid.uuid4().hex
+    ctx = _ask(plugin_root, ws, home, "make the plots prettier", session=sid)
+    line = next(l for l in ctx.splitlines() if "Last day" in l)
+    assert line.startswith(f"[kaggle-grandmaster] Last day (deadline {_utc_in(0)} 23:59 UTC): 0 of 2 finals selected "
+                           "on Kaggle (`python -m kgkit final`).")
+    assert "Intended picks (NOT confirmed on Kaggle): 0003_a, 0004_b." in line
+    assert "https://www.kaggle.com/competitions/demo/submissions" in line
+    again = _ask(plugin_root, ws, home, "and the colours too", session=sid)  # once per session
+    assert again is None or "Last day" not in again
+    assert _ask(plugin_root, ws, home, "/kaggle-grandmaster:kg-status") is None  # slash commands stay untouched
+
+    st.final_picks, st.final_picks_confirmed = ["0003_a"], "2026-11-06 09:00 UTC"
+    st.save(ws)
+    assert "1 of 2 finals selected on Kaggle (checked 2026-11-06 09:00 UTC" in _ask(plugin_root, ws, home, "hi")
+    st.final_picks = ["0003_a", "0004_b"]
+    st.save(ws)  # all confirmed: no reminder
+    ctx = _ask(plugin_root, ws, home, "hi")
+    assert ctx is None or "Last day" not in ctx
+    st.final_picks, st.final_picks_confirmed, st.deadline = [], "", _utc_in(1)
+    st.save(ws)  # the day before: the SessionStart warning covers it, the prompt line is for the last day
+    ctx = _ask(plugin_root, ws, home, "hi")
+    assert ctx is None or "Last day" not in ctx

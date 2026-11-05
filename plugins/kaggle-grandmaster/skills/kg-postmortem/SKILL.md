@@ -58,8 +58,9 @@ workspace docs: the endgame often left them wrong.
 5. Write `reports/postmortem.md`: result (from step 2), what predicted private (the table from step 3, with n
    and intervals), what worked, what didn't, what winners did, validation lessons, process lessons (time
    allocation, mistakes), and 5 reusable takeaways.
-6. Append the reusable takeaways to `~/.kaggle-gm/lessons.md` (create if missing) so future
-   competitions start smarter. The SessionStart hook surfaces this file in every workspace.
+6. Append the reusable takeaways to `~/.kaggle-gm/lessons.md` (create if missing) under a heading that
+   names the competition slug, so future competitions start smarter. The SessionStart hook surfaces this file in
+   every workspace, and after the deadline its brief looks for the slug there to tell whether this step is done.
 7. Fix what the endgame left stale:
    - Append the outcome from step 2 to `reports/final-selection.md`: what was selected or auto-selected, and
      their private scores.

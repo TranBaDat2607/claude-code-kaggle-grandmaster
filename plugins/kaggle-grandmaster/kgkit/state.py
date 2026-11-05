@@ -196,4 +196,5 @@ def deadline_line(st: CompetitionState) -> str:
     phase = ("ENDED — run /kg-postmortem, then /kg-showcase to show the work" if days < 0
              else "FINAL DAYS — robustness + /kg-final" if days <= FINAL_DAYS
              else "endgame — freeze ensemble design" if days <= 14 else "exploration")
-    return f"deadline {d.isoformat()} ({days} days left; phase: {phase})"
+    when = f"ended {-days} day{'s' if days != -1 else ''} ago" if days < 0 else f"{days} days left"
+    return f"deadline {d.isoformat()} ({when}; phase: {phase})"
