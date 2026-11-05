@@ -101,6 +101,8 @@ picks. Side competitions are good for practising a new modality or trying a team
 ## 7. After every competition
 
 Run `/kg-postmortem`: lessons go to `~/.kaggle-gm/lessons.md`, which feeds the next competition's
-recon. Publishing a good write-up builds the reputation that brings strong teammates. Publish your work, never
-the competition's data. That includes subsets, report text, and labels keyed by ID in a repo or a notebook's
-outputs. Run `kgkit audit-repo` before a repo goes public.
+recon. Publishing a good write-up builds the reputation that brings strong teammates; `/kg-showcase` turns the
+work into one. It rebuilds the README around the result, separates your work from the public work it builds on,
+and adds a license, figures and a write-up draft. It audits the notebook and weights before they go public, and
+runs `kgkit audit-repo` before the repo does. Publish your work, never the competition's data. That includes
+subsets, report text, and labels keyed by ID in a repo or a notebook's outputs.

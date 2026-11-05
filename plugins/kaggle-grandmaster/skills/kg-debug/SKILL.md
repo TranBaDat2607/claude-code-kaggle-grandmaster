@@ -2,10 +2,33 @@
 name: kg-debug
 description: Diagnose a CV-LB disagreement, a suspicious score jump, or a failed/odd submission using the systematic CV-LB debugging procedure and the validation auditor.
 argument-hint: "[symptom description or experiment id]"
-allowed-tools: [Read, Glob, Grep, Agent]
+allowed-tools:
+  - Read
+  - Glob
+  - Grep
+  - Agent
+  - 'Bash(PYTHONPATH="${CLAUDE_PLUGIN_ROOT}" python -m kgkit adv *)'
+  - 'Bash(python -m kgkit adv *)'
+  - 'PowerShell(python -m kgkit adv *)'
+  - 'Bash(PYTHONPATH="${CLAUDE_PLUGIN_ROOT}" python -m kgkit validate *)'
+  - 'Bash(python -m kgkit validate *)'
+  - 'PowerShell(python -m kgkit validate *)'
+  - 'Bash(PYTHONPATH="${CLAUDE_PLUGIN_ROOT}" python -m kgkit score *)'
+  - 'Bash(python -m kgkit score *)'
+  - 'PowerShell(python -m kgkit score *)'
+  - 'Bash(PYTHONPATH="${CLAUDE_PLUGIN_ROOT}" python -m kgkit ledger *)'
+  - 'Bash(python -m kgkit ledger *)'
+  - 'PowerShell(python -m kgkit ledger *)'
+  - 'Bash(PYTHONPATH="${CLAUDE_PLUGIN_ROOT}" python -m kgkit status *)'
+  - 'Bash(python -m kgkit status *)'
+  - 'PowerShell(python -m kgkit status *)'
 ---
 
 # /kg-debug
+
+Run kgkit with the Bash tool, as `PYTHONPATH="${CLAUDE_PLUGIN_ROOT}" python -m kgkit <command>`: this command
+pre-approves that form for the kgkit calls it makes. Submitting, pushing or publishing still asks (so does a
+PowerShell `$env:` assignment).
 
 Symptom: `$ARGUMENTS`
 

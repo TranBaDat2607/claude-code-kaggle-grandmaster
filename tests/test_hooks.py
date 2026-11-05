@@ -318,6 +318,28 @@ def test_session_start_suggests_adopting_existing_repo(plugin_root, tmp_path):
     assert not (tmp_path / ".kaggle-gm").exists()
 
 
+def test_prompt_router_after_the_deadline(plugin_root, tmp_path_factory, ws):
+    """#70: "show my work" points to /kg-showcase, a slash command Claude cannot load; "the competition ended"
+    loads kg-postmortem."""
+    plain = tmp_path_factory.mktemp("plain5")
+    sid = uuid.uuid4().hex
+
+    def ask(prompt, cwd=ws, session=sid):
+        return hook(plugin_root, "prompt_router.py", {"hook_event_name": "UserPromptSubmit", "prompt": prompt,
+                                                      "cwd": str(cwd), "session_id": session})
+
+    ctx = ask("how can I update my project to show my work")["additionalContext"]  # the issue's prompt, verbatim
+    assert "suggest the user run `/kg-showcase`" in ctx and "Make nothing public from here" in ctx
+    assert "grandmaster-playbook" not in ctx and "Skill tool" not in ctx  # a suggestion, not a skill to load
+    assert ask("how can I update my project to show my work") is None  # once per session
+    ctx = ask("The competition ended yesterday: write the post-mortem", session=uuid.uuid4().hex)["additionalContext"]
+    assert "kaggle-grandmaster:kg-postmortem" in ctx and "kg-showcase" not in ctx
+    ctx = ask("The Kaggle competition is over, help me write my write-up", cwd=plain,
+              session=uuid.uuid4().hex)["additionalContext"]
+    assert "kaggle-grandmaster:kg-postmortem" in ctx and "`/kg-showcase`" in ctx
+    assert ask("update the README of my React project to show the results", cwd=plain) is None
+
+
 def test_prompt_router_adopt(plugin_root, tmp_path):
     out = hook(plugin_root, "prompt_router.py", {
         "hook_event_name": "UserPromptSubmit", "cwd": str(tmp_path), "session_id": uuid.uuid4().hex,
