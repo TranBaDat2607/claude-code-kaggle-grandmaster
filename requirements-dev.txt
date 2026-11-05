@@ -5,6 +5,7 @@ scikit-learn>=1.4
 scipy>=1.10
 # tests
 pytest>=7
+pytest-xdist>=3  # parallel runs: python -m pytest tests -q -n auto
 requests  # the Kaggle CLI's HTTP client: kgkit/kaggle_cli.py's tests run against it
 # optional: exercised by template tests when present
 # lightgbm xgboost catboost torch timm transformers tokenizers pillow

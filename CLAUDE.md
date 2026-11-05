@@ -4,7 +4,9 @@ This repo is a Claude Code marketplace (`.claude-plugin/marketplace.json`) conta
 `plugins/kaggle-grandmaster/`.
 
 ## Commands
-- Tests: `python -m pytest tests -q` (template tests need torch/timm/transformers; LightGBM test is skipped if absent)
+- Tests: `python -m pytest tests -q -n auto` (in parallel with pytest-xdist, from `requirements-dev.txt`: about 3 min
+  instead of 7 on 12 cores; drop `-n auto` for one process; template tests need torch/timm/transformers; LightGBM
+  test is skipped if absent)
 - Validate manifests/skills/agents: `claude plugin validate plugins/kaggle-grandmaster`
 - Inventory + token cost: `claude --plugin-dir plugins/kaggle-grandmaster plugin details kaggle-grandmaster`
 - Evals (see `plugins/kaggle-grandmaster/evals/README.md`), from `plugins/kaggle-grandmaster`:
