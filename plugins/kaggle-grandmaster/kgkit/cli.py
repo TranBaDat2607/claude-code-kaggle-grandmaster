@@ -1496,7 +1496,8 @@ def cmd_discussions(a):
     if not slug:
         raise SystemExit("--competition required (no competition state found)")
     root = S.find_root()
-    idx_path = (root / "reports" if root else Path("reports")) / (
+    # other users' posts stay out of reports/, which is committed (#73)
+    idx_path = S.cache_dir(root or Path.home()) / (
         "discussions.csv" if not a.competition or (st and a.competition == st.slug) else f"discussions_{slug}.csv")
     def build_index():
         """(topics, Meta Kaggle competition row or None, where they came from)"""
@@ -1519,7 +1520,12 @@ def cmd_discussions(a):
             D.ensure(["ForumMessages.csv"], max_age_days=a.max_age, force=a.force)
         idx_path.parent.mkdir(parents=True, exist_ok=True)
         t.to_csv(idx_path, index=False)
-        print(f"{slug}: {len(t)} topics -> {idx_path} ({where})")
+        print(f"{slug}: {len(t)} topics -> {idx_path} ({where}); local only, git ignores it")
+        old = [p for p in ((root / "reports").glob("discussions*.csv") if root else []) if p.is_file()]
+        if old:
+            rel = " ".join(p.relative_to(root).as_posix() for p in old)
+            print(f"note: {rel} is an index of other users' posts from an older kgkit: delete it "
+                  f"(and `git rm --cached {rel}` if it was committed)")
         if t.attrs.get("truncated"):
             print(f"stopped at --max-pages {a.max_pages} (the {len(t)} most voted topics); raise it for the rest")
         if comp is None and (D.meta_dir() / "Competitions.csv").is_file():
