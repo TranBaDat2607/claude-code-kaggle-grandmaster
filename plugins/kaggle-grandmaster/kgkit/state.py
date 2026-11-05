@@ -19,6 +19,7 @@ from pathlib import Path
 STATE_DIR = ".kaggle-gm"
 STATE_FILE = "competition.json"
 VALIDATION_MODES = ("kfold", "holdout+lb")
+FINAL_DAYS = 3  # the endgame's last days: robustness checks and final picks (`deadline_line`, `kgkit.finals`)
 
 
 @dataclass
@@ -88,6 +89,12 @@ def load(start: str | Path = ".") -> CompetitionState | None:
 # ---------------------------------------------------------------------------- submissions and deadline
 def submissions_log(root: Path) -> Path:
     return Path(root) / STATE_DIR / "submissions.jsonl"
+
+
+def kaggle_list(root: Path) -> Path:
+    """Kaggle's list of the team's submissions with their public and private scores, as ``kgkit ledger sync-lb`` last
+    read it (``kgkit ledger predictiveness`` reads it, linked to a ledger record or not)."""
+    return Path(root) / STATE_DIR / "kaggle_submissions.json"
 
 
 def today_utc() -> str:
@@ -186,6 +193,7 @@ def deadline_line(st: CompetitionState) -> str:
     d, days = deadline_date(st), deadline_days(st)
     if d is None:
         return f"deadline: {st.deadline}"
-    phase = ("ENDED — run /kg-postmortem" if days < 0 else "FINAL DAYS — robustness + /kg-final" if days <= 3
+    phase = ("ENDED — run /kg-postmortem" if days < 0
+             else "FINAL DAYS — robustness + /kg-final" if days <= FINAL_DAYS
              else "endgame — freeze ensemble design" if days <= 14 else "exploration")
     return f"deadline {d.isoformat()} ({days} days left; phase: {phase})"

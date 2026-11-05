@@ -58,8 +58,8 @@ measured about 3x too small on a binary AUC task.
 - Check prediction distributions vs OOF, no NaNs, correct id coverage.
 - Make sure the selection is actually set on the website (the user must tick the submissions;
   otherwise Kaggle auto-selects the best public scores, which are often the fitted files). Kaggle has no API
-  to select, but `python -m kgkit final` reads the selection back and `kgkit status` warns until finals are
-  selected and recorded.
+  to select, but `python -m kgkit final` reads the selection back. In the last 3 days `kgkit status` and the
+  session brief warn until it has confirmed the selection; earlier, only when a fitted file would be auto-selected.
 
 ## 5. Endgame timeline (back-planned from the deadline)
 
@@ -77,6 +77,9 @@ OOF exchange via `kgkit ledger import`): see `competition-strategy`.
 
 ## 6. Post-competition
 
-When the private LB is revealed: record private scores in the ledger (`ledger lb <id> <public>
-<private>`), compute which signals predicted private best (CV? LB?), read the top solution write-ups,
-and write `reports/postmortem.md` — this compounds into the next competition (`/kg-postmortem`).
+When the private LB is revealed: `kgkit final` says how the finals did (or, with none selected, which pool
+Kaggle picked from) and where the team ranks; `kgkit ledger sync-lb` records every private score in the
+ledger; `kgkit ledger predictiveness` says which signal predicted private, over all submissions and among
+the strongest (a CV-LB correlation over the whole competition is inflated by early, large gains). Read the
+top solution write-ups and write `reports/postmortem.md`: this compounds into the next competition
+(`/kg-postmortem`).
