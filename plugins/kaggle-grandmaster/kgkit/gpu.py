@@ -85,6 +85,9 @@ MACHINE_SHAPES = {"NvidiaTeslaT4": "2x T4", "NvidiaTeslaP100": "1x P100", "TpuV5
                   "TpuV6E8": "TPU v6e-8", "Tpu1VmV38": "TPU v3-8"}
 WEIGHT_RE = r"\.(pt|pth|bin|ckpt|safetensors)$"
 BUNDLE_EXCLUDE_DIRS = {"__pycache__", ".git", ".ipynb_checkpoints", "wandb", ".venv", "venv"}
+# kgkit modules a remote run never imports: they look at the local git repository and GitHub. Left out of the bundle,
+# which counts toward Kaggle's source limit (SOURCE_MAX_BYTES); `kgkit vendor` copies still have them.
+BUNDLE_KGKIT_LOCAL_ONLY = {"audit.py"}
 BUNDLE_EXCLUDE_SUFFIXES = {".pyc", ".pt", ".pth", ".bin", ".ckpt", ".safetensors", ".npy", ".npz", ".pkl",
                            ".parquet", ".feather", ".zip", ".png", ".jpg", ".jpeg", ".dcm"}
 # Kaggle refuses a kernel source of 1 MB or more with a bare 400 Bad Request from SaveKernel (its editor says it "must
@@ -809,10 +812,10 @@ def _git(root: Path) -> tuple[str | None, bool | None]:
         return None, None
 
 
-def _add_tree(z: zipfile.ZipFile, src: Path, arc: str, base: Path | None = None) -> int:
-    """Add ``src`` under ``arc``. Credential-like files, and anything whose real path leaves ``base`` (through
-    a link at any level, ``src`` included), never go in: the bundle is embedded in the kernel's code, which
-    is uploaded to Kaggle."""
+def _add_tree(z: zipfile.ZipFile, src: Path, arc: str, base: Path | None = None, skip=frozenset()) -> int:
+    """Add ``src`` under ``arc``, except the paths in ``skip`` (relative to ``src``). Credential-like files, and
+    anything whose real path leaves ``base`` (through a link at any level, ``src`` included), never go in: the bundle
+    is embedded in the kernel's code, which is uploaded to Kaggle."""
     base = (base or (src if src.is_dir() else src.parent)).resolve()
     if not safety.inside(src, base) or (src.is_file() and safety.looks_secret(src.name)):
         raise SystemExit(f"--include {src}: looks like a credential file or links outside the project; "
@@ -823,7 +826,7 @@ def _add_tree(z: zipfile.ZipFile, src: Path, arc: str, base: Path | None = None)
     n, skipped = 0, []
     for p in sorted(src.rglob("*")):
         rel = p.relative_to(src)
-        if any(part in BUNDLE_EXCLUDE_DIRS for part in rel.parts) or not p.is_file():
+        if any(part in BUNDLE_EXCLUDE_DIRS for part in rel.parts) or not p.is_file() or rel.as_posix() in skip:
             continue
         if p.suffix.lower() in BUNDLE_EXCLUDE_SUFFIXES:
             continue
@@ -1003,7 +1006,7 @@ def build_bundle(root: Path, include: list[str], baseline_dir: Path | None = Non
     here: attach it as a dataset/competition."""
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED, compresslevel=9) as z:
-        _add_tree(z, KGKIT_DIR, "kgkit")
+        _add_tree(z, KGKIT_DIR, "kgkit", skip=BUNDLE_KGKIT_LOCAL_ONLY)
         z.write(root / S.STATE_DIR / S.STATE_FILE, f"{S.STATE_DIR}/{S.STATE_FILE}")
         for arc, blob in (extra or {}).items():
             z.writestr(arc, blob)
