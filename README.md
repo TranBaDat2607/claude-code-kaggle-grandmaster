@@ -282,7 +282,7 @@ What it does for you:
 
 ```bash
 pip install -r requirements-dev.txt
-python -m pytest tests -q
+python -m pytest tests -q -n auto   # in parallel (pytest-xdist); without -n auto in one process
 claude plugin validate plugins/kaggle-grandmaster
 cd plugins/kaggle-grandmaster && claude plugin eval . --runs 3 --model haiku
 ```
