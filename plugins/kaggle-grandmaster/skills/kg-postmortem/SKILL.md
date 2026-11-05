@@ -21,3 +21,8 @@ Competition: `$ARGUMENTS` (default: from `.kaggle-gm/competition.json`).
    lessons, process lessons (time allocation, mistakes), and 5 reusable takeaways.
 5. Append the reusable takeaways to `~/.kaggle-gm/lessons.md` (create if missing) so future
    competitions start smarter — the SessionStart hook surfaces this file in every workspace.
+6. Run `python -m kgkit audit-repo` before the repo, a notebook or a write-up goes public. This is the moment
+   people tidy a repo up to show it. Competition data stays unpublishable after the deadline: copies, subsets,
+   text and labels keyed by ID. The audit checks every branch and the history, since a deleted file is still in
+   history, and whether the GitHub remote is already public. On a LEAK, show the user the steps it prints. Never
+   rewrite history, force-push or change the repo's visibility without their explicit go-ahead.

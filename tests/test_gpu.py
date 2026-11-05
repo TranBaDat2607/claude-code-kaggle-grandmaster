@@ -182,6 +182,7 @@ def test_build_kernel(gws):
                               {"ref": "tester/demo-512", "kind": "dataset", "dest": "data"}]
     names = zipfile.ZipFile(io.BytesIO(_decode(script, "PAYLOAD_B64"))).namelist()
     assert "src/fake_train.py" in names and "kgkit/gpu.py" in names and "_kg/split/1" in names
+    assert "kgkit/audit.py" not in names  # local-only (git, GitHub): it would only count toward Kaggle's 1 MB limit
     assert cfg["split"]["rows"] == 40 and cfg["split"]["columns"] == [  # the split, packed: ids a range, folds a byte
         {"range": [0, 1]}, {"codes": "_kg/split/1", "values": ["0", "1", "2", "3"]}]
     assert "data/folds.csv" not in names and ".kaggle-gm/competition.json" in names and "src/big.npy" not in names
@@ -366,7 +367,7 @@ def test_image_template_timeout_resume_and_assemble(tmp_path, plugin_root):
 
 
 @pytest.mark.parametrize("rel", ["kgkit/gpu.py", "kgkit/budget.py", "kgkit/state.py", "kgkit/backlog.py", "kgkit/adopt.py",
-                                 "kgkit/evalset.py", "kgkit/finals.py",
+                                 "kgkit/evalset.py", "kgkit/finals.py", "kgkit/audit.py",
                                  "kgkit/kaggle_gpu_runner.py"])
 def test_stdlib_only(plugin_root, rel):
     """Hooks import gpu/budget/state, and the runner executes inside Kaggle: standard library only."""

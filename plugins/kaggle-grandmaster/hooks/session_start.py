@@ -17,6 +17,10 @@ try:
     from kgkit import __version__ as KGKIT_VERSION
 except Exception:  # pragma: no cover - fail open
     sys.exit(0)
+try:
+    from kgkit import audit as AU  # imported here only: the tool hooks never need it
+except Exception:  # pragma: no cover - the brief works without its audit lines
+    AU = None
 
 KGKIT_HOME = C.PLUGIN_ROOT.as_posix()
 VERSION_RE = re.compile(r"""^__version__\s*=\s*["']([^"']+)["']""", re.MULTILINE)
@@ -87,6 +91,8 @@ def brief(root: Path) -> str:
     if st.code_competition:
         lines.append(f"CODE COMPETITION: runtime limit {st.runtime_limit_hours or '?'}h, internet "
                      f"{'allowed' if st.internet_allowed else 'OFF'} — budget inference early.")
+    if AU is not None:
+        lines.extend(AU.brief_lines(root))  # competition data in git, from the cached `kgkit audit-repo`
     holdout = getattr(st, "holdout", False)
     if holdout:
         noise = C.EV.recent_noise(root, C.EV.current_key(root, st))

@@ -12,7 +12,7 @@ Workspace managed by the **kaggle-grandmaster** plugin. Read this before every s
 ## Layout
 
 ```
-data/        raw competition files (never edited, never committed)
+data/        competition files and anything made from them (never edited, never committed)
 src/         training / inference code (committed)
 notebooks/   exploration only — anything that matters gets moved into src/
 artifacts/   per-experiment OOF + test predictions + models (artifacts/<exp_id>/)
@@ -31,6 +31,12 @@ kernels/     Kaggle notebooks / datasets for code-competition inference
 5. **No target leakage**: target-derived statistics are computed out-of-fold; scalers/encoders/feature selection are fit inside the fold; no future information in time-series features.
 6. **Validate every submission** with `python -m kgkit validate subs/<file>.csv data/sample_submission.csv` before submitting. A wrapper script may do this and submit, but let `kaggle competitions submit` print Kaggle's reply (no `-q`, no redirect): the hook reads the script and logs the submit from that reply; any submit it misses, `python -m kgkit status` adds from Kaggle's list.
 7. **Commit code before long runs** so the ledger's git hash points at the exact code.
+8. **Competition Data never goes into git.** Kaggle's rules forbid publishing it, and that covers copies and subsets
+   too: rows of `train.csv`, its text, its labels keyed by ID, notebook outputs that print them. Keep such files in
+   `data/` (ignored). Derived labels or predictions keyed by the competition's IDs are a judgment call: decide on
+   purpose. A file deleted in a later commit is still in history. `python -m kgkit audit-repo` checks every
+   branch, the history and what `git add -A` would commit, and whether the GitHub remote is public. Run it before
+   making the repo public.
 
 ## Commands
 
