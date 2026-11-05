@@ -2,10 +2,26 @@
 name: kg-cv
 description: Design, build, verify and freeze the cross-validation scheme (data/folds.csv) so it mirrors how the test set was split.
 argument-hint: "[strategy] [group-column]"
-allowed-tools: [Read, Glob, Grep]
+allowed-tools:
+  - Read
+  - Glob
+  - Grep
+  - 'Bash(PYTHONPATH="${CLAUDE_PLUGIN_ROOT}" python -m kgkit config *)'
+  - 'Bash(python -m kgkit config *)'
+  - 'PowerShell(python -m kgkit config *)'
+  - 'Bash(PYTHONPATH="${CLAUDE_PLUGIN_ROOT}" python -m kgkit folds *)'
+  - 'Bash(python -m kgkit folds *)'
+  - 'PowerShell(python -m kgkit folds *)'
+  - 'Bash(PYTHONPATH="${CLAUDE_PLUGIN_ROOT}" python -m kgkit ledger *)'
+  - 'Bash(python -m kgkit ledger *)'
+  - 'PowerShell(python -m kgkit ledger *)'
 ---
 
 # /kg-cv
+
+Run kgkit with the Bash tool, as `PYTHONPATH="${CLAUDE_PLUGIN_ROOT}" python -m kgkit <command>`: this command
+pre-approves that form for the kgkit calls it makes. Submitting, pushing or publishing still asks (so does a
+PowerShell `$env:` assignment).
 
 Arguments: `$ARGUMENTS` (optional strategy override and group column).
 

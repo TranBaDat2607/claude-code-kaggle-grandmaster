@@ -1,10 +1,29 @@
 ---
 name: kg-final
 description: Choose the final Kaggle submissions to maximise expected private leaderboard score — evidence table, LB noise estimate, CV-vs-LB weighting, hedge selection and robustness checks.
-allowed-tools: [Read, Glob, Grep, Agent]
+allowed-tools:
+  - Read
+  - Glob
+  - Grep
+  - Agent
+  - 'Bash(PYTHONPATH="${CLAUDE_PLUGIN_ROOT}" python -m kgkit final *)'
+  - 'Bash(python -m kgkit final *)'
+  - 'PowerShell(python -m kgkit final *)'
+  - 'Bash(PYTHONPATH="${CLAUDE_PLUGIN_ROOT}" python -m kgkit ledger *)'
+  - 'Bash(python -m kgkit ledger *)'
+  - 'PowerShell(python -m kgkit ledger *)'
+  - 'Bash(PYTHONPATH="${CLAUDE_PLUGIN_ROOT}" python -m kgkit status *)'
+  - 'Bash(python -m kgkit status *)'
+  - 'PowerShell(python -m kgkit status *)'
+  - 'Bash(kaggle competitions submissions *)'
+  - 'PowerShell(kaggle competitions submissions *)'
 ---
 
 # /kg-final
+
+Run kgkit with the Bash tool, as `PYTHONPATH="${CLAUDE_PLUGIN_ROOT}" python -m kgkit <command>`: this command
+pre-approves that form for the kgkit calls it makes. Submitting, pushing or publishing still asks (so does a
+PowerShell `$env:` assignment).
 
 Follow the `final-submission-selection` skill.
 

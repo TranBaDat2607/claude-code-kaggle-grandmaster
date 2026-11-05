@@ -2,10 +2,24 @@
 name: kg-ensemble
 description: Build the best honest ensemble from ledger experiments (diversity analysis, hill climbing / weights / rank / stacking with nested CV, post-processing re-tune) and write a validated blended submission.
 argument-hint: "[experiment ids...] [--method hill|weights|rank|stack|residual] [--prune N]"
-allowed-tools: [Read, Glob, Grep, Agent]
+allowed-tools:
+  - Read
+  - Glob
+  - Grep
+  - Agent
+  - 'Bash(PYTHONPATH="${CLAUDE_PLUGIN_ROOT}" python -m kgkit blend *)'
+  - 'Bash(python -m kgkit blend *)'
+  - 'PowerShell(python -m kgkit blend *)'
+  - 'Bash(PYTHONPATH="${CLAUDE_PLUGIN_ROOT}" python -m kgkit ledger *)'
+  - 'Bash(python -m kgkit ledger *)'
+  - 'PowerShell(python -m kgkit ledger *)'
 ---
 
 # /kg-ensemble
+
+Run kgkit with the Bash tool, as `PYTHONPATH="${CLAUDE_PLUGIN_ROOT}" python -m kgkit <command>`: this command
+pre-approves that form for the kgkit calls it makes. Submitting, pushing or publishing still asks (so does a
+PowerShell `$env:` assignment).
 
 Arguments: `$ARGUMENTS` (optional explicit experiment ids; otherwise choose from the ledger).
 

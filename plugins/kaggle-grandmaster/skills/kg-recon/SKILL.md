@@ -2,10 +2,34 @@
 name: kg-recon
 description: Research a Kaggle competition (metric, data, rules, timeline, top notebooks, discussions, similar past competitions, leak and shake-up risk) and write reports/recon.md.
 argument-hint: <competition-slug>
-allowed-tools: [Read, Glob, Grep, Agent]
+allowed-tools:
+  - Read
+  - Glob
+  - Grep
+  - Agent
+  - 'Bash(PYTHONPATH="${CLAUDE_PLUGIN_ROOT}" python -m kgkit pages *)'
+  - 'Bash(python -m kgkit pages *)'
+  - 'PowerShell(python -m kgkit pages *)'
+  - 'Bash(PYTHONPATH="${CLAUDE_PLUGIN_ROOT}" python -m kgkit discussions *)'
+  - 'Bash(python -m kgkit discussions *)'
+  - 'PowerShell(python -m kgkit discussions *)'
+  - 'Bash(PYTHONPATH="${CLAUDE_PLUGIN_ROOT}" python -m kgkit kernels top *)'
+  - 'Bash(python -m kgkit kernels top *)'
+  - 'PowerShell(python -m kgkit kernels top *)'
+  - 'Bash(PYTHONPATH="${CLAUDE_PLUGIN_ROOT}" python -m kgkit config *)'
+  - 'Bash(python -m kgkit config *)'
+  - 'PowerShell(python -m kgkit config *)'
+  - 'Bash(kaggle competitions list *)'
+  - 'PowerShell(kaggle competitions list *)'
+  - 'Bash(kaggle competitions files *)'
+  - 'PowerShell(kaggle competitions files *)'
 ---
 
 # /kg-recon
+
+Run kgkit with the Bash tool, as `PYTHONPATH="${CLAUDE_PLUGIN_ROOT}" python -m kgkit <command>`: this command
+pre-approves that form for the kgkit calls it makes. Submitting, pushing or publishing still asks (so does a
+PowerShell `$env:` assignment).
 
 Competition: `$ARGUMENTS`
 
