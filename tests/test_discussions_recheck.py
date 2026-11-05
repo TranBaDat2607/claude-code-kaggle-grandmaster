@@ -85,9 +85,18 @@ def test_discussions_cli(meta, tmp_path, plugin_root):
     ws.mkdir()
     run(["init", "comp-a", "--metric", "auc"], ws, plugin_root)
     env = {"KGKIT_META_DIR": str(meta)}  # files are fresh, so no download is attempted
+    (ws / "reports" / "discussions.csv").write_text("Id\n1\n", encoding="utf-8")  # left by an older kgkit
     r = run(["discussions", "sync", "--source", "meta"], ws, plugin_root, env)
     assert "comp-a: 3 topics" in r.stdout and "merger deadline: 12/25/2025" in r.stdout
-    assert (ws / "reports" / "discussions.csv").is_file()
+    assert "reports/discussions.csv is an index of other users' posts" in r.stdout and "git rm --cached" in r.stdout
+    # other users' posts never land in the committed reports/ or .kaggle-gm/: a self-ignoring cache (#73)
+    idx = ws / ".kaggle-gm" / "cache" / "discussions.csv"
+    assert idx.is_file() and (ws / ".kaggle-gm" / "cache" / ".gitignore").read_text(encoding="utf-8").endswith("*\n")
+    if shutil.which("git"):
+        subprocess.run(["git", "init", "-q"], cwd=ws, check=True)
+        assert subprocess.run(["git", "check-ignore", "-q", str(idx)], cwd=ws).returncode == 0
+        assert subprocess.run(["git", "check-ignore", "-q", str(ws / ".kaggle-gm" / "competition.json")],
+                              cwd=ws).returncode == 1  # the rest of the workspace state is still committed
     r = run(["discussions", "search", "leak", "--source", "meta"], ws, plugin_root, env)
     assert "Possible leak in row order?" in r.stdout and "1st place" not in r.stdout
     r = run(["discussions", "solutions", "--source", "meta"], ws, plugin_root, env)
@@ -173,7 +182,8 @@ def test_discussions_cli_live_and_fallback(meta, tmp_path, monkeypatch, capsys):
     out = capsys.readouterr().out
     assert "live-comp: 25 topics" in out and "(live, Kaggle CLI)" in out and 'source="kaggle-cli"' in out
     assert "merger deadline: 12/25/2025" in out  # facts from the already cached export, nothing downloaded
-    assert pd.read_csv(ws / "reports" / "discussions.csv")["Source"].eq("live").all()
+    assert pd.read_csv(ws / ".kaggle-gm" / "cache" / "discussions.csv")["Source"].eq("live").all()
+    assert not (ws / "reports" / "discussions.csv").exists()
     cli.main(["discussions", "search", "leak"])
     out = capsys.readouterr().out
     assert "topic 3 leak" in out and 'source="kaggle-cli"' in out

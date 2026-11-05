@@ -1819,7 +1819,10 @@ def test_the_issues_split_goes_in_a_kernel_script_kaggle_takes(tmp_path):
     root = _split_ws(tmp_path, np.arange(n), np.random.default_rng(0).permutation(np.arange(n) % 5))
     kdir = _build_split(root)
     tm = json.loads((kdir / "kg-train.json").read_text())
-    assert tm["split"] == "700000 rows; id: a range, fold: 5 values" and tm["script_kb"] < 600
+    assert tm["split"] == "700000 rows; id: a range, fold: 5 values"
+    # the packed split itself takes a few hundred KB; the script around it grows with kgkit, so it is held to the
+    # limit Kaggle enforces rather than to a margin under it
+    assert 0 < tm["split_kb"] < 400 and tm["script_kb"] * 1024 < G.SOURCE_MAX_BYTES
     assert G.source_problem(kdir) is None
     r, seen = _session(kdir, tmp_path / "k", {})
     assert r.returncode == 0, r.stdout[-3000:] + r.stderr[-3000:]

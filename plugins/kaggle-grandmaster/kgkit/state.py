@@ -68,6 +68,15 @@ class CompetitionState:
         return p
 
 
+def cache_dir(root: str | Path) -> Path:
+    """``<root>/.kaggle-gm/cache/``: other users' text (the forum index); ignores itself, as .kaggle-gm/ is committed."""
+    d = Path(root) / STATE_DIR / "cache"
+    d.mkdir(parents=True, exist_ok=True)
+    if not (d / ".gitignore").exists():
+        (d / ".gitignore").write_text("*\n", encoding="utf-8")
+    return d
+
+
 def find_root(start: str | Path = ".") -> Path | None:
     """Walk up from ``start`` to the directory that contains ``.kaggle-gm``."""
     p = Path(start).resolve()

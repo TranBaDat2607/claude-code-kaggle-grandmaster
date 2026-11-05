@@ -11,7 +11,7 @@ are cached once per machine in ``~/.kaggle-gm/meta-kaggle`` (override with ``KGK
 refreshed when older than ``--max-age`` days. The export leaves ``ForumId`` empty for every competition
 that has not ended, so this path only serves finished competitions (post-mortems, prior art).
 
-    python -m kgkit discussions sync                    # index this competition's topics -> reports/discussions.csv
+    python -m kgkit discussions sync                    # index this competition's topics -> .kaggle-gm/cache/ (git-ignored)
     python -m kgkit discussions top -n 20 --sort votes  # votes | recent | replies | views (views: Meta Kaggle only)
     python -m kgkit discussions search "leak|shake|cv.*lb"
     python -m kgkit discussions solutions --competition <finished-slug>   # "1st place solution" write-ups

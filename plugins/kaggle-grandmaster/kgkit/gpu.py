@@ -1279,6 +1279,7 @@ def build_kernel(root: str | Path | None, name: str, cmd: str, hours: float, fol
                   "accelerator": accelerator, "resource": res, "folds": folds, "cmd": cmd, "build_id": config["build_id"], "prune": prune,
                   "resume_from": resume_src, "bundle_kb": round(len(payload) / 1024, 1),
                   "script_kb": round(size / 1024, 1),
+                  "split_kb": round(dict(bundle_parts(payload)).get("the fold split", 0) / 1024, 1),
                   "split": split_summary(split) if split else None if split_data is None else "in the bundle as it is",
                   "input_layout": input_layout, "inputs": config["sources"]}
     (kdir / "kg-train.json").write_text(json.dumps(train_meta, indent=2), encoding="utf-8")
