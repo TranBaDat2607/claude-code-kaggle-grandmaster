@@ -34,9 +34,13 @@ unzip -q -o data/<slug>.zip -d data/                  # (PowerShell: Expand-Arch
 kaggle competitions submit <slug> -f subs/x.csv -m "0007_lgbm_te | CV 0.81234"
 kaggle competitions submissions <slug> --format json  # history with public scores (poll after submitting)
 kaggle competitions submission-limits <slug> --json   # the team's count today and what is left (numAllowedNow)
-kaggle competitions leaderboard <slug> --show         # top of public LB; --download for full csv
-python -m kgkit pages [--page evaluation|rules|data-description]   # the competition's pages as text
+kaggle competitions leaderboard <slug> --show         # top 200 of the LB Kaggle shows (private after the end)
+python -m kgkit standing                              # our rank, team count, medal cut-offs, ties (whole LB)
+python -m kgkit pages [evaluation|rules|data-description]   # the competition's pages as text
 ```
+`leaderboard --download` returns the *public* leaderboard even after the close. For the final standing use
+`kgkit standing` (or `kgkit final`, which also reports the finals): it reads the whole listing through the SDK
+instead of paging `--show` 200 teams at a time.
 `submission-limits` (CLI 2.2.4+) counts the whole team, website submissions included, which a local log
 cannot see. The rules page and this count can disagree: plan on the smaller number. `kgkit pages` wraps
 `kaggle competitions pages`, whose parser needs the slug twice (`pages <slug> list <slug> --content`).
