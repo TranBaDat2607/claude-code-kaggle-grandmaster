@@ -26,7 +26,10 @@ Follow the `grandmaster-playbook` and `competition-recon` skills. Steps:
 4. **Data**: `kaggle competitions download <slug> -p data/` and extract. List files and sizes.
 5. **Init**: `python -m kgkit init <slug> --metric <m> --task <t> --target <col> --id-col <id>
    [--code-competition --runtime-hours H --no-internet] --deadline <date>` using facts from recon
-   (ask the user only for facts you cannot determine).
+   (ask the user only for facts you cannot determine). It makes `.gitignore` cover `data/`, and adds it to a
+   `.gitignore` that exists. Then run `python -m kgkit audit-repo`. It says whether the GitHub remote is public
+   and checks that nothing from the competition's files is in git. Kaggle's rules forbid publishing them, and
+   that covers copies and subsets too.
 6. **Metric**: write `src/metric.py` implementing the exact competition metric (reuse
    `kgkit.metrics` if identical) with a unit test against a hand-computed example.
 7. **EDA & shift**: `python -m kgkit eda data/train.csv --test data/test.csv --target <y> --id-col
@@ -41,7 +44,8 @@ Follow the `grandmaster-playbook` and `competition-recon` skills. Steps:
    (diverse baselines, see `/kg-baseline`). Mark the main one `python -m kgkit ledger decide <id> baseline`.
 10. **Backlog**: add the recon's initial ideas with `python -m kgkit backlog add ...` (gain, prob,
    cost, evidence, source) and `python -m kgkit backlog render`.
-11. **Commit** code, folds definition (or seed), CLAUDE.md, `.kaggle-gm/`.
+11. **Commit** code, folds definition (or seed), CLAUDE.md, `.kaggle-gm/`. Never commit `data/`, or anything
+   made from the competition's files outside it.
 
 Finish with: recon TL;DR, CV scheme, baseline CV, the submission file ready (ask before
 submitting, or run `/kg-submit`), and the top 5 backlog experiments.

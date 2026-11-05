@@ -31,7 +31,7 @@ submissions and experiments, leaving your layout alone.
 - `skills/`: 21 knowledge playbooks (including `competition-strategy`: choosing competitions, the solo
   gold, teaming and merging) + 17 `kg-*` slash commands
 - `agents/`: 9 specialist subagents
-- `hooks/`: session brief (accepted baseline, backlog top, GPU quota), prompt→skill router, submission +
+- `hooks/`: session brief (accepted baseline, backlog top, GPU quota, competition data in git), prompt→skill router, submission +
   GPU-quota + upload guard (credentials never printed or uploaded, repeated files caught), submission /
   GPU-run logger
 - `kgkit/`: Python toolkit (`python -m kgkit --help`):
@@ -51,15 +51,23 @@ submissions and experiments, leaving your layout alone.
     `kgkit/kaggle_gpu_runner.py`, so a vendored copy builds kernels too); `datasets pull`
     (per-file fallback when a dataset archive 404s); `whoami`; `config` (e.g. `validation=holdout+lb
     eval_truth=data/holdout.csv:a,b,c`)
+  - `audit-repo`: is competition data in git (every branch, the history, what `git add -A` would commit),
+    compared by content with the competition's files on your machine, and is the GitHub remote public? Run
+    by `adopt`; `init` adds `data/` to an existing `.gitignore`
 - `templates/`: tabular (GBDTs + linear / kNN / SVM / MLP), image and transformer training, offline inference
   kernel, workspace CLAUDE.md
 - `evals/`: `claude plugin eval` suite (16 cases)
 
 ## Data and network access
 
-The plugin has no server of its own and collects nothing. All network traffic goes to Kaggle under
-your own account, through the official `kaggle` CLI and the API token you set up yourself. The hooks
-make no network calls.
+The plugin has no server of its own and collects nothing. Its network traffic goes to Kaggle under
+your own account, through the official `kaggle` CLI and the API token you set up yourself, apart from
+one read-only question to GitHub (below). The hooks make no network calls.
+
+**Asked of GitHub (github.com).** `kgkit audit-repo` (also run by `kgkit adopt`) asks whether your
+repository's GitHub remote is public: `gh repo view <owner>/<repo> --json visibility,forkCount` with your own
+`gh` login, or, without `gh`, an anonymous `GET https://api.github.com/repos/<owner>/<repo>`. Only the
+repository's name is sent; `--offline` (or `KGKIT_OFFLINE=1`) skips it.
 
 **Exchanged with Kaggle (kaggle.com)**
 - Competition data: `kaggle competitions files / download / leaderboard / submissions /
@@ -99,8 +107,9 @@ print them inside `<untrusted-content-…>` blocks, and `kgkit kernels pull` lis
 network, credential-path and `exec`/`eval` lines before you run it locally.
 
 **Stored on your machine only**
-- `.kaggle-gm/` in the workspace: experiment ledger, idea backlog, submission log, GPU-run log and
-  the last quota snapshot.
+- `.kaggle-gm/` in the workspace: experiment ledger, idea backlog, submission log, GPU-run log,
+  the last quota snapshot, and the last competition-data audit (`audit.json`: paths and counts, no
+  contents).
 - `artifacts/` in the workspace: out-of-fold and test predictions.
 - `~/.kaggle-gm/meta-kaggle/`: the cached forum export (only with `discussions --source meta`).
 - `~/.kaggle-gm/lessons.md`: optional lessons from past competitions, read by the session brief.

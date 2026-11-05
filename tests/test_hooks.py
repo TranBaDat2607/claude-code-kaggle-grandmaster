@@ -63,6 +63,19 @@ def test_session_start_inside_workspace(plugin_root, ws):
     assert "Accepted baseline" in ctx and "0001_lgbm" in ctx and "Backlog top: #1 pseudo-label" in ctx
 
 
+def test_session_start_warns_about_competition_data_in_git(plugin_root, ws):
+    """The brief reads the cached `kgkit audit-repo` result (UAT #69): no scan, no network call at session start."""
+    (ws / ".kaggle-gm" / "audit.json").write_text(json.dumps(
+        {"at": "2026-11-02T07:00:00Z", "public": True, "leaks": ["data/gold_annotated.csv"], "checks": [],
+         "unignored": ["data/new.csv"]}))
+    ctx = hook(plugin_root, "session_start.py", {"hook_event_name": "SessionStart", "cwd": str(ws)})["additionalContext"]
+    assert "WARNING: competition data in git (the repo is PUBLIC; audit of 2026-11-02): data/gold_annotated.csv" in ctx
+    assert "`git add -A` would commit (audit of 2026-11-02): data/new.csv" in ctx
+    (ws / ".kaggle-gm" / "audit.json").write_text("{broken")
+    ctx = hook(plugin_root, "session_start.py", {"hook_event_name": "SessionStart", "cwd": str(ws)})["additionalContext"]
+    assert "demo" in ctx and "WARNING: competition data" not in ctx  # a bad cache never breaks the brief
+
+
 def test_session_start_flags_a_vendored_kgkit_of_another_version(plugin_root, ws):
     import kgkit
 

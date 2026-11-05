@@ -3,6 +3,7 @@
 Commands
   init        create a competition workspace (.kaggle-gm/, folders, CLAUDE.md)
   adopt       adopt an existing project mid-competition: .kaggle-gm/ only, past submissions imported
+  audit-repo  competition data in git (files, history, uncommitted) and whether the GitHub remote is public
   config      show or set competition.json fields (validation=holdout+lb, holdout_n, deadline, ...)
   status      one-screen summary: competition, best CV, CV-LB correlation, recent experiments
   folds       write folds.csv with a leak-free strategy and print the fold report
@@ -214,6 +215,12 @@ def cmd_init(a):
     if not gi.exists():
         gi.write_text("data/\nartifacts/\nsubs/*.csv\n*.npy\n*.pkl\n*.pt\n*.pth\n*.ckpt\n*.safetensors\nkaggle.json\n"
                       "__pycache__/\n.ipynb_checkpoints/\nwandb/\n", encoding="utf-8")
+    else:  # a repo's own .gitignore often names the downloaded files only; a file made from them would be committed
+        from . import audit as AU
+
+        added = AU.ensure_ignored(root, ["data"])
+        if added:
+            print(f"added {', '.join(added)} to .gitignore: competition data (copies and subsets too) stays out of git")
     tmpl = _plugin_file("templates/CLAUDE.competition.md")
     cm = root / "CLAUDE.md"
     if not cm.exists() and tmpl is None:
@@ -288,9 +295,26 @@ def cmd_adopt(a):
         scored = [r for r in recs if r["public_score"] is not None]
         print(f"submission history: {len(recs)} on Kaggle, {added} imported, {skipped} already logged; "
               f"{n_today} today (UTC), {len(scored)} with a public score")
+    if not a.no_audit:  # an adopted repo has been in git, and maybe on GitHub, for weeks
+        from . import audit as AU
+
+        print()
+        print("\n".join(AU.report(AU.run(root, max_seconds=120))))
+        print()
     print("next: record past experiments in the ledger (`kgkit ledger import <name> <oof> --truth ... --folds ...` "
           "or `kgkit ledger add <name> <cv> <notes>`), mark the accepted one with `kgkit ledger decide <id> baseline`, "
           "then `kgkit status`")
+
+
+def cmd_audit_repo(a):
+    """Is competition data in git (files, history, what `git add -A` would commit), and is the repository public?
+    Exit status 1 when a leak is found."""
+    from . import audit as AU
+
+    res = AU.run(a.dir, a.data, max_seconds=a.max_seconds, max_blob_mb=a.max_blob_mb, online=not a.offline,
+                 fix_gitignore=a.fix_gitignore)
+    print("\n".join(AU.report(res)))
+    sys.exit(1 if res["leaks"] else 0)
 
 
 def cmd_config(a):
@@ -1785,7 +1809,27 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--force", action="store_true", help="rewrite an existing competition.json")
     s.add_argument("--submissions-file", help="saved `kaggle competitions submissions <slug> --format json` output")
     s.add_argument("--no-submissions", action="store_true", help="do not import the submission history")
+    s.add_argument("--no-audit", action="store_true", help="skip the check for competition data in git (audit-repo)")
     s.set_defaults(fn=cmd_adopt)
+
+    s = sub.add_parser("audit-repo", help="competition data in git (files, history, uncommitted) and whether the "
+                                          "GitHub remote is public",
+                       description="Compare what git holds (every branch and tag, deleted files included, and what "
+                                   "`git add -A` would commit) with the competition's files on this machine: exact "
+                                   "copies, rows, passages of text, label columns keyed by the competition's IDs. "
+                                   "Asks GitHub whether the remote is public (gh, else the anonymous API). Exit "
+                                   "status 1 when competition data is found. Nothing is changed but .gitignore "
+                                   "(--fix-gitignore) and .kaggle-gm/audit.json.")
+    s.add_argument("--dir", default=".")
+    s.add_argument("--data", nargs="+", action="extend", default=[], metavar="PATH",
+                   help="competition files or folders to compare with (default: the untracked files in data/ and "
+                        "input/), e.g. train.csv kept outside the repo")
+    s.add_argument("--fix-gitignore", action="store_true",
+                   help="add the data folders to .gitignore when git does not ignore them yet")
+    s.add_argument("--offline", action="store_true", help="do not ask GitHub whether the remote is public")
+    s.add_argument("--max-seconds", type=float, default=300, help="time budget for reading git's history")
+    s.add_argument("--max-blob-mb", type=float, default=50, help="larger blobs are only checked for exact copies")
+    s.set_defaults(fn=cmd_audit_repo)
 
     s = sub.add_parser("config", help="show or set competition.json fields, e.g. validation=holdout+lb holdout_n=58")
     s.add_argument("set", nargs="*", metavar="KEY=VALUE")

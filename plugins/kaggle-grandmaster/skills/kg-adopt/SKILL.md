@@ -34,12 +34,24 @@ does around the existing work: submission logging and the daily budget, the sess
    `--metric` takes a name or alias from `python -m kgkit metrics` (e.g. `macro_auc` is recorded as
    `mean_col_auc`); an unknown name is kept as given, with the closest registered metrics suggested.
    Fields can be changed later with `python -m kgkit config key=value`.
-   It writes only `.kaggle-gm/competition.json` (no folders, `.gitignore` or `CLAUDE.md`) and imports
+   It writes only `.kaggle-gm/` (no folders, `.gitignore` or `CLAUDE.md`) and imports
    the history from `kaggle competitions submissions <slug>` into `.kaggle-gm/submissions.jsonl`, so
    today's used submissions count against the budget. If the CLI is not authenticated, say so and
    continue; the import can be re-run later with `--submissions-file`. Re-running is safe: existing
    state is kept and already-logged submissions are skipped.
-3. **Ledger.** Find the repo's own experiment record (a CSV/markdown/JSON log, a results folder,
+   It then runs `kgkit audit-repo` (step 3).
+3. **Competition data in git.** The repo has been in git, maybe on a public GitHub, for weeks. The adopt output
+   ends with the audit: whether the GitHub remote is public, and what git holds that comes from the competition's
+   files. It compares contents, so a file made from `train.csv` under another name counts, and it checks every
+   branch and the history. Run it again with `python -m kgkit audit-repo` (add `--data <path>` when the
+   competition's tables are not in the repo's `data/`).
+   - **LEAK**: tell the user at once, before anything else, and show the steps the audit prints. Rewriting
+     history, force-pushing and changing the repo's visibility are the user's decisions: never do them without an
+     explicit go-ahead.
+   - **CHECK**: ask whether each file is the user's own work, for example labels or predictions they made, keyed
+     by the competition's IDs.
+   - **NOT IGNORED**: offer `python -m kgkit audit-repo --fix-gitignore`.
+4. **Ledger.** Find the repo's own experiment record (a CSV/markdown/JSON log, a results folder,
    commit messages). For each experiment that matters (the current best, the ones behind
    submissions, the main alternatives, not every run):
    - with OOF predictions on file: `python -m kgkit ledger import <name> <oof.npy|FILE:COL>
@@ -51,13 +63,13 @@ does around the existing work: submission logging and the daily budget, the sess
    Attach public scores you can match to a submission with `python -m kgkit ledger lb <id> <score>`.
    Mark the model the user currently builds on with `python -m kgkit ledger decide <id> baseline`.
    Do not invent numbers: skip an experiment whose CV you cannot find, and say so.
-4. **Folds.** If the repo has a fixed validation split, point to it (or export it as `data/folds.csv`
+5. **Folds.** If the repo has a fixed validation split, point to it (or export it as `data/folds.csv`
    with `id,fold` columns when the training code can read it). Do not redraw folds mid-competition.
-5. **Rules.** If the repo has a `CLAUDE.md`, leave it alone except, with the user's agreement, a short
+6. **Rules.** If the repo has a `CLAUDE.md`, leave it alone except, with the user's agreement, a short
    kaggle-grandmaster section (log every run, compare against the accepted baseline, validate before
    submitting, the `/kg-*` commands). If it has none, offer to create one from
    `${CLAUDE_PLUGIN_ROOT}/templates/CLAUDE.competition.md`, adapted to the repo's real paths.
-6. **Commit** `.kaggle-gm/` (it is the experiment memory) once the user agrees.
+7. **Commit** `.kaggle-gm/` (it is the experiment memory) once the user agrees.
 
 Finish with `python -m kgkit status`: facts, days left and phase, submissions today vs the daily limit,
 the accepted baseline and best public LB, what could not be imported, and the next step (usually `/kg-ideas` or

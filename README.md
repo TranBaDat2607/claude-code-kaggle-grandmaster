@@ -71,7 +71,8 @@ Already weeks into a competition with your own repo? Adopt it in place instead:
 ```
 
 `kg-adopt` writes only `.kaggle-gm/` (the competition facts), imports your past Kaggle submissions
-and the experiments your repo already tracks into the ledger, and marks the accepted baseline. Your
+and the experiments your repo already tracks into the ledger, and marks the accepted baseline. It also
+checks whether competition data has reached git or a public GitHub repo (`kgkit audit-repo`). Your
 layout, folds and scripts stay as they are. The session brief suggests it when a repo has
 `kernel-metadata.json` files or a competition URL but no workspace.
 
@@ -148,7 +149,7 @@ artifacts/<exp_id>/           oof.npy + test.npy, the inputs for ensembling
 
 | Event | Behaviour |
 |---|---|
-| SessionStart | Exports `KGKIT_HOME`; inside a workspace it injects a brief: competition facts, deadline countdown and phase, best CV/LB, accepted baseline, backlog top, CV↔LB correlation, recent experiments, submissions today, lessons from past competitions (`~/.kaggle-gm/lessons.md`), and a vendored kgkit (`src/kgkit`) whose version is not the plugin's, with the command that refreshes it. Outside a workspace it recognises existing Kaggle work (`kernel-metadata.json`, competition URLs) and suggests `/kg-adopt <slug>` |
+| SessionStart | Exports `KGKIT_HOME`; inside a workspace it injects a brief: competition facts, deadline countdown and phase, best CV/LB, accepted baseline, backlog top, CV↔LB correlation, recent experiments, submissions today, lessons from past competitions (`~/.kaggle-gm/lessons.md`), and a vendored kgkit (`src/kgkit`) whose version is not the plugin's, with the command that refreshes it. It also shows a warning while the last `kgkit audit-repo` found competition data in git or data files `git add -A` would commit, and a nudge to run the audit in a repo with a GitHub remote that was never audited (read from the cached result: no scan and no network call at session start). Outside a workspace it recognises existing Kaggle work (`kernel-metadata.json`, competition URLs) and suggests `/kg-adopt <slug>` |
 | UserPromptSubmit | Detects competition work and tells Claude which 1–3 plugin skills to load before it answers. In evals this took skill use on Kaggle questions from 0 % to 100 % |
 | PreToolUse (Bash/PowerShell) | **Denies** commands that would print Kaggle credentials: a file reader on `kaggle.json`, `~/.kaggle/access_token` or `credentials.json`, Python that prints more than their `username` field, `KAGGLE_KEY` / `KAGGLE_API_TOKEN`, `kaggle auth print-access-token`, and Kaggle CLI calls with `VERBOSE` on (the CLI then prints the bearer token); text that only mentions those files passes, and `kgkit whoami` gives the username. **Denies** a `kaggle datasets create / version` or `kaggle models instances ... create` whose folder holds credential-like files (`.env`, `kaggle.json`, `access_token`, keys) or links outside it. **Denies** each `kaggle competitions submit` in a command whose file fails validation against `sample_submission` (header, rows, ids, NaNs, index column written by mistake). **Asks** when the same file (SHA-256) was already submitted, when the command's submits would go over today's budget, or when Kaggle reported fewer submissions left today for the team than the command makes. A submit quoted in a heredoc that is only text (an issue body `cat` saves, a commit message for `git` or `gh`) is not read as one |
 | PreToolUse (GPU/TPU push) | **Asks** before each GPU or TPU `kaggle kernels push` in a command when the cached weekly quota of that accelerator, minus kernels still running, is exhausted or smaller than the push's `-t` cap |
@@ -171,6 +172,7 @@ command also runs from that copy, at the copy's version. Vendor again (with the 
 |---|---|
 | `init <slug> --metric auc --target y --id-col id [--code-competition --runtime-hours 9 --no-internet] --deadline YYYY-MM-DD` | create a workspace |
 | `adopt [slug] [--metric ... --code-competition --no-internet] [--submissions-file subs.json]` | adopt an existing repo mid-competition: writes only `.kaggle-gm/competition.json` and imports your Kaggle submission history so today's submissions count against the budget; slug and internet setting detected from `kernel-metadata.json` / competition URLs; safe to re-run |
+| `audit-repo [--data DIR] [--fix-gitignore]` | is competition data in git, and is the GitHub remote public? Kaggle's rules forbid publishing Competition Data, and a `.gitignore` that names only the downloaded files lets in a file made from them. So this compares contents with the competition's files on your machine (the untracked files in `data/`, or `--data`): exact copies, rows (re-saved CSVs and CRLF included), passages of text (template sentences and IDs don't count), and label columns equal to the competition's for the same IDs. It checks every branch and tag (deleted files stay in history) and what `git add -A` would commit. A table keyed by the competition's IDs whose values are your own (predictions, model-made labels) is listed as a judgment call. It prints the cleanup steps (it never rewrites history), exits 1 on a leak, and `--fix-gitignore` adds `data/` to `.gitignore`. `init` and `adopt` run the same checks |
 | `status` | dashboard: accepted baseline, best CV/LB, CV↔LB correlation, recent experiments, backlog top, CV-overfitting warning, and a warning when Kaggle would auto-select a `public-lb-fitted` file as a final |
 | `final` | asks Kaggle which submissions are selected as finals (the website selects them; there is no API for that), shows what auto-selection would take when none is, flags `public-lb-fitted` files, records the selection (`final_picks`) and when Kaggle confirmed it (only that read silences the status warning; `config final_picks=` is just an intended list), prints the website steps and the deadline in UTC and local time |
 | `folds train.csv --target y [--group g] [--strategy ...]` | leak-free folds + fold report (group leakage check) |
@@ -310,9 +312,14 @@ tests/                                 pytest suite
 
 ## Data and network access
 
-The plugin has no server of its own and collects nothing. All network traffic goes to Kaggle under
-your own account, through the official `kaggle` CLI and the API token you set up yourself. The hooks
-make no network calls.
+The plugin has no server of its own and collects nothing. Its network traffic goes to Kaggle under
+your own account, through the official `kaggle` CLI and the API token you set up yourself, apart from
+one read-only question to GitHub (below). The hooks make no network calls.
+
+**Asked of GitHub (github.com).** `kgkit audit-repo` (also run by `kgkit adopt`) asks whether your
+repository's GitHub remote is public: `gh repo view <owner>/<repo> --json visibility,forkCount` with your own
+`gh` login, or, without `gh`, an anonymous `GET https://api.github.com/repos/<owner>/<repo>`. Only the
+repository's name is sent; `--offline` (or `KGKIT_OFFLINE=1`) skips it.
 
 **Exchanged with Kaggle (kaggle.com)**
 - Competition data: `kaggle competitions files / download / leaderboard / submissions /
@@ -346,8 +353,9 @@ print them inside `<untrusted-content-…>` blocks, and `kgkit kernels pull` lis
 network, credential-path and `exec`/`eval` lines before you run it locally.
 
 **Stored on your machine only**
-- `.kaggle-gm/` in the workspace: experiment ledger, idea backlog, submission log, GPU-run log and
-  the last quota snapshot.
+- `.kaggle-gm/` in the workspace: experiment ledger, idea backlog, submission log, GPU-run log,
+  the last quota snapshot, and the last competition-data audit (`audit.json`: paths and counts, no
+  contents).
 - `artifacts/` in the workspace: out-of-fold and test predictions.
 - `~/.kaggle-gm/meta-kaggle/`: the cached forum export (only with `discussions --source meta`).
 - `~/.kaggle-gm/lessons.md`: optional lessons from past competitions, read by the session brief.
