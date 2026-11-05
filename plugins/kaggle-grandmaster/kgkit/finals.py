@@ -499,6 +499,55 @@ def _rank(listing: dict) -> tuple[int | None, list[float | None]]:
     return (ranks[0] if ranks else None), scores
 
 
+def tie_block(scores: list[float | None], rank: int) -> tuple[int, int]:
+    """The first and last rank of the run of equal scores around ``rank`` (1-based): the teams that share the score
+    Kaggle shows. An unscored row ties with nothing."""
+    first = last = rank
+    s = scores[rank - 1]
+    if s is None:
+        return rank, rank
+    while first > 1 and scores[first - 2] == s:
+        first -= 1
+    while last < len(scores) and scores[last] == s:
+        last += 1
+    return first, last
+
+
+def _places(n: int) -> str:
+    return f"{n} place" if n == 1 else f"{n} places"
+
+
+def _cuts_inside(tie: tuple[int, int], cut: dict[str, int]) -> list[str]:
+    """The medals whose last rank falls inside the tie, so that the tie straddles the line."""
+    return [m for m in ("gold", "silver", "bronze") if tie[0] <= cut[m] < tie[1]]
+
+
+def _tie_line(scores: list[float | None], rank: int, complete: bool, cut: dict[str, int] | None) -> str | None:
+    """How many teams share the team's shown score, and where a medal cut-off falls inside that tie."""
+    first, last = tie_block(scores, rank)
+    if last == first:
+        return None
+    n = f"{last - first + 1:,}" + (" or more" if not complete and last == len(scores) else "")
+    line = f"  Tie: {n} teams share the team's shown score {_fmt(scores[rank - 1])} (ranks {first:,}-{last:,})"
+    if cut is None:
+        return line + "."
+    inside = _cuts_inside((first, last), cut)
+    if not inside:
+        return line + "; no medal cut-off falls inside it."
+    where = []
+    for m in inside:
+        c = cut[m]
+        if rank > c:
+            where.append(f"the {m} cut-off (rank {c:,}) falls inside it: the team, at rank {rank:,}, is "
+                         f"{_places(rank - c)} short of it")
+        else:
+            spare = "no place" if c == rank else _places(c - rank)
+            where.append(f"the {m} cut-off (rank {c:,}) falls inside it: the team, at rank {rank:,}, is inside it "
+                         f"with {spare} to spare")
+    return (line + ", and " + "; ".join(where) + ". Kaggle's order within the tie decides; the API shows scores "
+            "rounded, so that order cannot be checked here.")
+
+
 def team_score(data: dict | None) -> float | None:
     """The team's score on the leaderboard the website shows (the private one once revealed)."""
     rank, scores = _rank(_board(data)[0])
@@ -531,14 +580,17 @@ def standing_lines(data: dict | None) -> list[str]:
     pub = f"; public leaderboard rank {pub_rank:,} ({_fmt(pub_scores[pub_rank - 1])})" if pub_rank else ""
     out = [f"{which}: rank {rank:,} of {count} teams (top {100 * rank / teams:.1f}%), team score "
            f"{_fmt(scores[rank - 1])}, winning score {_fmt(scores[0])}{pub}{same}."]
-    if private and complete:
-        cut = medal_cutoffs(teams)
+    cut = medal_cutoffs(teams) if private and complete else None
+    if cut:
         medal = next((m for m in ("gold", "silver", "bronze") if rank <= cut[m]), "no medal")
         zones = ", ".join(f"{m} to rank {cut[m]:,}" + (f" ({_fmt(scores[cut[m] - 1])})" if cut[m] >= 1 else "")
                           for m in ("gold", "silver", "bronze"))
         out.append(f"  Medal zone by Kaggle's progression table, computed here: {medal} ({zones}). The API has no "
                    "medal field; this holds in competitions that award medals, and ranks can still move while Kaggle "
                    "removes teams.")
+    tie = _tie_line(scores, rank, complete, cut)
+    if tie:
+        out.append(tie)
     return out
 
 
@@ -646,7 +698,8 @@ def standing_path(root) -> Path:
 
 def standing(st: S.CompetitionState, recs: list[dict], data: dict) -> dict:
     """The facts of ``outcome`` the session brief repeats, without asking Kaggle again: what was selected (or the
-    pool Kaggle auto-selected from), and the team's rank, score and medal zone once the private leaderboard is out."""
+    pool Kaggle auto-selected from), the team's rank and score, the ranks that share its shown score (``tie``), and,
+    once the private leaderboard is out, the medal zone and each cut-off's last rank and score (``cutoffs``)."""
     index = _index([r for r in recs if isinstance(r, dict)])
     n, greater = _picks(st), st.greater_is_better
     views = [_view(index, r) for r in data.get("scored") or ()]
@@ -656,24 +709,28 @@ def standing(st: S.CompetitionState, recs: list[dict], data: dict) -> dict:
     shown = _board(data)[0]
     rank, scores = _rank(shown)
     private, complete = revealed(data), bool(shown.get("complete"))
-    medal = None
-    if private and complete and rank:
+    medal = cutoffs = None
+    if private and complete and scores:
         cut = medal_cutoffs(len(scores))
-        medal = next((m for m in ("gold", "silver", "bronze") if rank <= cut[m]), "no medal")
+        cutoffs = {m: [cut[m], scores[cut[m] - 1] if cut[m] >= 1 else None] for m in ("gold", "silver", "bronze")}
+        if rank:
+            medal = next((m for m in ("gold", "silver", "bronze") if rank <= cut[m]), "no medal")
+    tie = list(tie_block(scores, rank)) if rank else None
     return {"slug": st.slug, "at": dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"), "n": n,
             "selected": selected, "auto": auto, "tied": len(auto) > n, "private": private, "board_read": bool(shown),
             "rank": rank, "teams": len(scores), "complete": complete, "score": scores[rank - 1] if rank else None,
-            "medal": medal}
+            "medal": medal, "cutoffs": cutoffs, "tie": tie if tie and tie[1] > tie[0] else None}
 
 
-def save_standing(root, st: S.CompetitionState, recs: list[dict], data: dict) -> None:
-    """Cache ``standing`` in ``.kaggle-gm/standing.json``. Never raises."""
+def save_standing(root, st: S.CompetitionState, recs: list[dict], data: dict, by: str = "final") -> bool:
+    """Cache ``standing`` in ``.kaggle-gm/standing.json``, with the command that read it (``by``). Never raises."""
     try:
         p = standing_path(root)
         p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text(json.dumps(standing(st, recs, data), indent=1), encoding="utf-8")
+        p.write_text(json.dumps({**standing(st, recs, data), "by": by}, indent=1), encoding="utf-8")
+        return True
     except Exception:
-        pass
+        return False
 
 
 def load_standing(root, slug: str) -> dict | None:
@@ -701,8 +758,25 @@ def _standing_line(c: dict | None) -> str:
     zone = ("" if not medal else ", outside the medal zones by Kaggle's table (computed)" if medal == "no medal"
             else f", {medal} zone by Kaggle's table (computed)")
     count = f"{teams:,}" if c.get("complete") else f"at least {teams:,}"
+    by = c.get("by") if c.get("by") in ("final", "standing") else "final"
     return (f"Final standing: private rank {rank:,} of {count} teams (top {100 * rank / teams:.1f}%), score "
-            f"{_fmt(_num(c.get('score')))}{zone} (`kgkit final` of {when}).")
+            f"{_fmt(_num(c.get('score')))}{zone}{_cached_tie(c)} (`kgkit {by}` of {when}).")
+
+
+def _cached_tie(c: dict) -> str:
+    """The tie ``standing.json`` records, and the medal cut-offs that fall inside it."""
+    tie, cutoffs = c.get("tie"), c.get("cutoffs")
+    if not (isinstance(tie, list) and len(tie) == 2 and all(isinstance(r, int) for r in tie) and tie[1] > tie[0]):
+        return ""
+    out = f", {tie[1] - tie[0] + 1:,} teams tied on that score at ranks {tie[0]:,}-{tie[1]:,}"
+    cut = {m: v[0] for m, v in (cutoffs.items() if isinstance(cutoffs, dict) else ())
+           if isinstance(v, list) and v and isinstance(v[0], int)}
+    inside = _cuts_inside((tie[0], tie[1]), cut) if len(cut) == 3 else []
+    if inside:
+        many = len(inside) > 1
+        out += (f", across the {' and '.join(inside)} cut-off{'s' if many else ''} at rank{'s' if many else ''} "
+                + ", ".join(f"{cut[m]:,}" for m in inside))
+    return out
 
 
 def _finals_line(st: S.CompetitionState, c: dict | None) -> str:

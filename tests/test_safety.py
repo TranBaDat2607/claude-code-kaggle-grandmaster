@@ -136,6 +136,20 @@ def test_pages_fetch_pick_save(tmp_path, monkeypatch):
     assert "<untrusted-content-" in files[0].read_text() and "5 per day" in files[0].read_text()
 
 
+def test_pages_takes_the_page_name_as_a_positional_too(monkeypatch, capsys):
+    """#72: `kgkit pages rules` failed with "unrecognized arguments: rules"; it needed `--page rules`."""
+    from kgkit import cli
+
+    pages = [{"name": "rules", "text": "5 per day"}, {"name": "evaluation", "text": "AUC"}]
+    monkeypatch.setattr(P, "fetch", lambda slug: pages)
+    cli.main(["pages", "rules", "--competition", "demo"])
+    assert "5 per day" in capsys.readouterr().out
+    cli.main(["pages", "--page", "eval", "--competition", "demo"])
+    assert "AUC" in capsys.readouterr().out
+    with pytest.raises(SystemExit, match="two page names"):
+        cli.main(["pages", "rules", "--page", "evaluation", "--competition", "demo"])
+
+
 def test_pages_old_cli_message(monkeypatch):
     monkeypatch.setattr(P.shutil, "which", lambda _: "kaggle")
     monkeypatch.setattr(P.subprocess, "run", lambda args, **kw: subprocess.CompletedProcess(

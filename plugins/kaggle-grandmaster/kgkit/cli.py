@@ -13,6 +13,7 @@ Commands
   metrics     list registered metrics
   ledger      list | best | show | lb | add | tag | compare | noise | decide | baseline | lineage | import
   final       which submissions Kaggle has selected as finals, and whether auto-selection would pick a fitted file
+  standing    rank, team count, medal cut-offs and ties on the leaderboard Kaggle shows (private after the end)
   backlog     add | list | set | render | fidelity  — the ranked idea backlog (human vs GPU hours)
   features    search  — generate and screen thousands of candidate features on the frozen folds
   kernels     top | pull | review  — study and reproduce public notebooks
@@ -462,6 +463,30 @@ def cmd_final(a):
               "`python -m kgkit ledger predictiveness` measures which signal predicted the private leaderboard")
         return
     print("\n".join(FN.steps(st)))
+
+
+def cmd_standing(a):
+    """Where the team stands on the leaderboard Kaggle shows (the private one once revealed), read whole through the
+    SDK: ``kaggle competitions leaderboard --download`` returns the public one even after the end, and ``--show``
+    pages 200 teams at a time. Rank, team count, score, the medal cut-offs with the score at each, and how many teams
+    share the team's shown score (and whether a cut-off falls inside that tie). In the competition's own workspace,
+    cached in ``.kaggle-gm/standing.json`` for the session brief."""
+    from . import finals as FN
+    from . import state as S
+    from .experiment import Ledger
+
+    root, st = S.find_root(), S.load()
+    slug = a.competition or (st.slug if st else None)
+    if not slug:
+        raise SystemExit("--competition required (no competition state found)")
+    print(f"Reading the whole leaderboard of {slug} (up to a few minutes)...")
+    data, error = FN.live(slug, leaderboard=True)
+    if data is None:
+        raise SystemExit(f"could not read the leaderboard of {slug}: {error}")
+    print("\n".join(FN.standing_lines(data)))
+    if root is not None and st is not None and st.slug == slug and FN.save_standing(
+            root, st, Ledger(root).records(), data, by="standing"):
+        print("cached in .kaggle-gm/standing.json (the session brief repeats it after the deadline)")
 
 
 def cmd_status(a):
@@ -1602,6 +1627,9 @@ def cmd_pages(a):
     slug = a.competition or (st.slug if st else None)
     if not slug:
         raise SystemExit("--competition required (no competition state found)")
+    if a.name and a.page and a.name != a.page:
+        raise SystemExit(f"two page names ({a.name!r} and --page {a.page!r}): give one")
+    a.page = a.page or a.name
     pages = P.fetch(slug)
     if a.save:
         for f in P.save(pages, a.save):
@@ -1611,7 +1639,7 @@ def cmd_pages(a):
         print(SF.UNTRUSTED_NOTE)
         print(SF.wrap(", ".join(f"{p['name']} ({len(p['text'])} chars)" for p in pages), "kaggle-cli",
                       competition=slug, view="page names"))
-        print("\nread one: python -m kgkit pages --page <name>   (all: --save reports/pages)")
+        print("\nread one: python -m kgkit pages <name>   (all: --save reports/pages)")
         return
     page = P.pick(pages, a.page)
     if page is None:
@@ -1989,6 +2017,15 @@ def build_parser() -> argparse.ArgumentParser:
                                    "best private score of any submission.")
     s.set_defaults(fn=cmd_final)
 
+    s = sub.add_parser("standing", help="rank, team count, medal cut-offs and ties on the leaderboard Kaggle shows",
+                       description="Read the whole leaderboard Kaggle shows (the private one after the end; "
+                                   "`kaggle competitions leaderboard --download` returns the public one) and print "
+                                   "the team's rank and score, the number of teams, the medal cut-offs with the "
+                                   "score at each, and how many teams share the team's shown score. Cached in "
+                                   ".kaggle-gm/standing.json for the session brief.")
+    s.add_argument("--competition", help="default: competition.json slug (cached only for that one)")
+    s.set_defaults(fn=cmd_standing)
+
     s = sub.add_parser("folds", help="assign CV folds")
     s.add_argument("train")
     s.add_argument("--strategy", default="auto")
@@ -2080,6 +2117,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     s = sub.add_parser("pages", help="competition pages (evaluation, rules, data description) as text")
     s.add_argument("--competition", help="default: competition.json slug")
+    s.add_argument("name", nargs="?", help="page name, e.g. evaluation, rules, data-description (a unique prefix "
+                                           "works); the same as --page")
     s.add_argument("--page", help="page name, e.g. evaluation, rules, data-description (a unique prefix works)")
     s.add_argument("--save", metavar="DIR", help="write every page to DIR/<name>.md")
     s.add_argument("--max-chars", type=int, default=20000)

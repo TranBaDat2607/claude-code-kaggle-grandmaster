@@ -182,9 +182,9 @@ def fake_kaggle(tmp_path_factory, monkeypatch):
     monkeypatch.setenv("PYTHONPATH", str(root))
     monkeypatch.setattr(G, "kaggle_python", lambda: sys.executable)
 
-    def configure(selected=(), private=True, team_score="0.943", lb_fail=False):
+    def configure(selected=(), private=True, team_score="0.943", lb_fail=False, rank=120):
         data = {"team": "my team", "subs": SUBS, "selected": list(selected), "private": private, "lb_fail": lb_fail,
-                "board": _board(1500, 120, team_score), "public_board": _board(1500, 150, "0.958", "0.970")}
+                "board": _board(1500, rank, team_score), "public_board": _board(1500, 150, "0.958", "0.970")}
         (root / "data.json").write_text(json.dumps(data))
         monkeypatch.setenv("FAKE_KAGGLE", str(root / "data.json"))
     return configure
@@ -219,6 +219,7 @@ def test_final_after_the_deadline_reports_the_outcome_when_nothing_was_selected(
             "public leaderboard rank 150 (0.95800).") in out
     assert "Medal zone by Kaggle's progression table, computed here: bronze (gold to rank 13 (0.95800), " in out
     assert "silver to rank 75 (0.94900), bronze to rank 150 (0.93900))" in out
+    assert "  Tie: 7 teams share the team's shown score 0.94300 (ranks 117-123); no medal cut-off falls inside it." in out
     assert ("Competition ended; no finals were selected, so Kaggle auto-selected from the 2 best public score(s): 3 "
             "tie at the cut, and Kaggle's API can't tell which of the tied ones it took (public / private):") in out
     assert "If it stays so" not in out
@@ -431,7 +432,7 @@ def test_the_brief_after_the_deadline_is_a_short_ended_checklist(tmp_path, monke
     today = dt.datetime.now(dt.timezone.utc).date().isoformat()
     assert lines[head + 1:head + 6] == [
         f"  - Final standing: private rank 120 of 1,500 teams (top 8.0%), score 0.94300, bronze zone by Kaggle's "
-        f"table (computed) (`kgkit final` of {today}).",
+        f"table (computed), 7 teams tied on that score at ranks 117-123 (`kgkit final` of {today}).",
         "  - Finals: none were selected, so Kaggle auto-selected from 0004_a16, 0005_a17, 0006_a20 (tied at the cut: "
         "the API can't tell which it took).",
         "  - Post-mortem: reports/postmortem.md written.",
@@ -443,6 +444,80 @@ def test_the_brief_after_the_deadline_is_a_short_ended_checklist(tmp_path, monke
     cli.main(["final"])
     capsys.readouterr()
     assert "  - Finals: 2 of 2 selected on Kaggle: 0004_a16, 0005_a17." in _brief(plugin_root, ws, home).splitlines()
+
+
+def test_a_tie_across_a_medal_cut_off_is_named(tmp_path, monkeypatch, capsys, plugin_root, fake_kaggle):
+    """#72: 287 teams tied at 0.943, and the 5% line fell inside the tie: silver or bronze took 32 paged calls of
+    `kaggle competitions leaderboard --show` to find out. `kgkit standing` reads the private leaderboard in one go and
+    says how many teams share the team's score and which medal cut-off falls inside the tie; `kgkit final` says the
+    same, and the brief repeats it."""
+    ws, home = tmp_path / "ws", tmp_path / "home"
+    ws.mkdir(), home.mkdir()
+    _ended_ws(ws)
+    fake_kaggle(rank=78, team_score="0.949")  # ranks 75-81 show 0.949; silver ends at rank 75 of 1,500
+    monkeypatch.chdir(ws)
+    cli.main(["standing"])
+    out = capsys.readouterr().out
+    assert ("Private leaderboard: rank 78 of 1,500 teams (top 5.2%), team score 0.94900, winning score 0.96000; "
+            "public leaderboard rank 150 (0.95800).") in out
+    assert ("Medal zone by Kaggle's progression table, computed here: bronze (gold to rank 13 (0.95800), silver to "
+            "rank 75 (0.94900), bronze to rank 150 (0.93900))") in out
+    assert ("  Tie: 7 teams share the team's shown score 0.94900 (ranks 75-81), and the silver cut-off (rank 75) falls "
+            "inside it: the team, at rank 78, is 3 places short of it. Kaggle's order within the tie decides; the API "
+            "shows scores rounded, so that order cannot be checked here.") in out
+    assert "cached in .kaggle-gm/standing.json" in out
+    cached = json.loads((ws / ".kaggle-gm" / "standing.json").read_text())
+    assert cached["tie"] == [75, 81] and cached["medal"] == "bronze"
+    assert cached["cutoffs"] == {"gold": [13, 0.958], "silver": [75, 0.949], "bronze": [150, 0.939]}
+    today = dt.datetime.now(dt.timezone.utc).date().isoformat()
+    assert (f"  - Final standing: private rank 78 of 1,500 teams (top 5.2%), score 0.94900, bronze zone by Kaggle's "
+            f"table (computed), 7 teams tied on that score at ranks 75-81, across the silver cut-off at rank 75 "
+            f"(`kgkit standing` of {today}).") in _brief(plugin_root, ws, home).splitlines()
+
+    fake_kaggle(rank=147, team_score="0.939")  # ranks 145-151 show 0.939; bronze ends at 150, inside by Kaggle's order
+    cli.main(["final"])
+    out = capsys.readouterr().out
+    assert ("  Tie: 7 teams share the team's shown score 0.93900 (ranks 145-151), and the bronze cut-off (rank 150) "
+            "falls inside it: the team, at rank 147, is inside it with 3 places to spare.") in out
+    fake_kaggle(rank=75, team_score="0.949")
+    cli.main(["standing"])
+    assert "the team, at rank 75, is inside it with no place to spare." in capsys.readouterr().out
+
+
+def test_standing_before_the_deadline_and_outside_a_workspace(tmp_path, monkeypatch, capsys, fake_kaggle):
+    """Before the private leaderboard: the shown (public) rank and the tie, no medal zone. With --competition and no
+    workspace: printed, nothing written."""
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    _ended_ws(ws, days=5)
+    fake_kaggle(private=False)
+    monkeypatch.chdir(ws)
+    cli.main(["standing"])
+    out = capsys.readouterr().out
+    assert "Leaderboard (public until the private one is out): rank 120 of 1,500 teams (top 8.0%)" in out
+    assert "  Tie: 7 teams share the team's shown score 0.94300 (ranks 117-123)." in out
+    assert "Medal zone" not in out and "cut-off" not in out
+
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+    fake_kaggle()
+    cli.main(["standing", "--competition", "demo"])
+    out = capsys.readouterr().out
+    assert "Private leaderboard: rank 120 of 1,500 teams" in out and "cached" not in out
+    assert list(elsewhere.iterdir()) == []
+
+    monkeypatch.setattr(FN, "live", lambda slug, **kw: (None, "not authenticated"))
+    with pytest.raises(SystemExit, match="could not read the leaderboard of demo: not authenticated"):
+        cli.main(["standing", "--competition", "demo"])
+
+
+def test_tie_block_is_the_run_of_equal_scores_around_a_rank():
+    scores = [0.96, 0.95, 0.95, 0.95, 0.94, None, None]
+    assert FN.tie_block(scores, 1) == (1, 1)
+    assert FN.tie_block(scores, 3) == (2, 4)
+    assert FN.tie_block(scores, 4) == (2, 4)
+    assert FN.tie_block(scores, 6) == (6, 6)  # unscored rows tie with nothing
 
 
 def test_the_standing_before_the_private_leaderboard_is_out(tmp_path, monkeypatch, capsys, plugin_root, fake_kaggle):

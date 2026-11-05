@@ -42,8 +42,9 @@ workspace docs: the endgame often left them wrong.
    not.
 2. `python -m kgkit final`: the outcome. It shows the finals, or the pool Kaggle picked from when nothing was
    selected, with their private scores and which of them the team score matches. It also shows the team's
-   private and public rank, the medal zone (computed from Kaggle's table, not read from the site: say so) and the
-   best private score of any submission. Was our final pick our best private? If not, by how much?
+   private and public rank, the medal zone (computed from Kaggle's table, not read from the site: say so), how
+   many teams share our shown score and whether a medal cut-off falls inside that tie, and the best private score
+   of any submission. Was our final pick our best private? If not, by how much?
 3. `python -m kgkit ledger predictiveness --plot reports/figures`: which signal predicted private, over every
    submission and among the strongest, each with n and a 95% interval. Also the private score each way of picking
    the finals would have given, and the public-to-private drop. Read a correlation together with its interval: a
