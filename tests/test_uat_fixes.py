@@ -2339,12 +2339,17 @@ def test_hand_recorded_picks_do_not_silence_the_warning_until_kaggle_confirms(tm
     # no fitted file among the auto-selected ones: intended picks are a reminder, never "recorded"
     plain = tmp_path / "plain"
     plain.mkdir()
-    S.CompetitionState(slug="demo", metric="auc", deadline=_utc_in(3), final_picks=["0001_stack"]).save(plain)
+    S.CompetitionState(slug="demo", metric="auc", deadline=_utc_in(10), final_picks=["0001_stack"]).save(plain)
     pled = Ledger(plain)
     pled.attach_lb(pled.log("stack", 0.9622)["id"], 0.96185)
     text = " ".join(FN.lines(plain, S.load(plain), pled.records()))
     assert text.startswith("final picks (intended, NOT confirmed on Kaggle): 0001_stack; select them on the website")
     assert "then run `python -m kgkit final`" in text
+    st = S.load(plain)  # in the last days the reminder becomes a warning (#70)
+    st.deadline = _utc_in(3)
+    text = " ".join(FN.lines(plain, st, pled.records()))
+    assert text.startswith("WARNING: no finals confirmed on Kaggle (3 days left).")
+    assert text.endswith("Intended picks (NOT confirmed on Kaggle): 0001_stack.")
 
     with pytest.raises(SystemExit, match="set by `python -m kgkit final`"):
         cli.main(["config", "final_picks_confirmed=2026-10-30"])
@@ -2390,7 +2395,7 @@ def test_a_confirmation_belongs_to_the_exact_list_kaggle_returned(tmp_path, monk
     assert "Intended picks (NOT confirmed on Kaggle): 0001_stack." in capsys.readouterr().out
 
 
-def test_nothing_is_printed_after_the_deadline_or_without_a_fitted_file(tmp_path, monkeypatch, capsys):
+def test_nothing_is_printed_after_the_deadline_or_early_without_a_fitted_file(tmp_path, monkeypatch, capsys):
     from kgkit import cli
 
     monkeypatch.chdir(tmp_path)
@@ -2401,7 +2406,7 @@ def test_nothing_is_printed_after_the_deadline_or_without_a_fitted_file(tmp_path
 
     plain = tmp_path / "plain"
     plain.mkdir()
-    S.CompetitionState(slug="demo", metric="auc", deadline=_utc_in(3)).save(plain)
+    S.CompetitionState(slug="demo", metric="auc", deadline=_utc_in(S.FINAL_DAYS + 1)).save(plain)
     led = Ledger(plain)
     led.attach_lb(led.log("stack", 0.9622)["id"], 0.96185)
     led.attach_lb(led.log("blend", None, tags=["lb-blend"])["id"], 0.96214)

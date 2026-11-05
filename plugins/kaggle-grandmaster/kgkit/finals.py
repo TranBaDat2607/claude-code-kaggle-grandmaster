@@ -1,14 +1,21 @@
-"""Which submissions Kaggle would take as the finals, and whether that is safe.
+"""Which submissions Kaggle would take as the finals, whether that is safe, and how they did once the private
+leaderboard is out.
 
 When a team selects no final submissions, Kaggle auto-selects the best public scores. Late in a competition those are
 often *public-LB-fitted* files (a ranking tilted toward an estimate of the public labels): fine as display entries,
 never as finals, since their public score says nothing about the private one. A ledger record tagged
 ``public-lb-fitted`` (``kgkit.evalset.lb_fitted``) is such a file. ``kgkit status`` and the session brief print
-``lines(...)``: a warning when a fitted record is among the submissions Kaggle would auto-select, a one-line note once
-Kaggle's selection has been confirmed. Picks typed by hand (``kgkit config final_picks=<id>,<id>``) are only
-*intended*: the warning stays, and lists them as not confirmed, because nothing has asked Kaggle. ``kgkit final`` asks
-Kaggle what is selected (``live``, through ``kgkit.kaggle_submissions`` in a child process), records the answer and
-stamps ``final_picks_confirmed``: that alone silences the warning.
+``lines(...)``: a warning when a fitted record is among the submissions Kaggle would auto-select, and in the last
+``S.FINAL_DAYS`` days a warning whenever no selection is confirmed (an unticked selection leaves the pick to Kaggle,
+among files that often tie at the cut); a one-line note once Kaggle's selection has been confirmed. Picks typed by
+hand (``kgkit config final_picks=<id>,<id>``) are only *intended*: the warning stays, and lists them as not
+confirmed, because nothing has asked Kaggle. ``kgkit final`` asks Kaggle what is selected (``live``, through
+``kgkit.kaggle_submissions`` in a child process), records the answer and stamps ``final_picks_confirmed``: that alone
+silences the warning.
+
+After the deadline ``kgkit final`` reports the outcome instead (``outcome``): the finals or the pool Kaggle picked
+from, with their private scores, the best private score of any submission and the team's rank. ``link_scores``
+matches Kaggle's scored submissions to ledger records for ``kgkit ledger sync-lb``.
 
 Kaggle has an API to list the selected submissions, none to select them: only the website does.
 
@@ -32,6 +39,7 @@ URL = "https://www.kaggle.com/competitions/{slug}/submissions"
 FITTED_WORDS = re.compile(r"public[\s_-]*lb[\s_-]*fitted", re.IGNORECASE)  # a submission description that says so
 LEADING_NUMBER = re.compile(r"^\W*(\d{4})\b")  # "0054 [public-LB fitted] tilt ..." names a ledger record by its number
 LIVE_TIMEOUT = 90
+LEADERBOARD_TIMEOUT = 300  # the whole private leaderboard: ~0.6 s per 200 teams
 
 
 # ---------------------------------------------------------------------------- records and submissions
@@ -224,6 +232,21 @@ def _candidates(sel: dict, recs: dict) -> str:
     return "; ".join(out) or "none logged yet"
 
 
+def _unconfirmed(sel: dict, st: S.CompetitionState, recs: dict, left: str, url: str, intended: str) -> str:
+    """The last days, no selection confirmed on Kaggle and no fitted file in the way: nobody has picked the finals,
+    so Kaggle will, among the best public scores, which this late often tie."""
+    auto, n = sel["auto"], sel["n"]
+    if auto:
+        ties = f"; {len(auto)} tie at the cut and Kaggle picks among them" if len(auto) > n else ""
+        takes = (f"With nothing selected, Kaggle takes the {n} best public score{'s' if n > 1 else ''}: "
+                 f"{', '.join(_show(e) for e in auto)}{ties}.")
+    else:
+        takes = "With nothing selected, Kaggle takes the best public scores."
+    return (f"WARNING: no finals confirmed on Kaggle{left}. {takes} Select finals on the website by "
+            f"{utc_deadline(st)}: {url}, then run `python -m kgkit final`: it reads Kaggle's selection back, and this "
+            f"warning stays until it confirms the picks. Honest candidates: {_candidates(sel, recs)}.{intended}")
+
+
 def _warning(sel: dict, st: S.CompetitionState, recs: dict) -> list[str]:
     if sel["days"] is not None and sel["days"] < 0:  # the competition has ended
         return []
@@ -254,6 +277,8 @@ def _warning(sel: dict, st: S.CompetitionState, recs: dict) -> list[str]:
                 f"`python -m kgkit final`.{intended}"]
     fitted = sel["fitted_auto"]
     if not fitted:
+        if sel["days"] is not None and sel["days"] <= S.FINAL_DAYS:
+            return [_unconfirmed(sel, st, recs, left, url, intended)]
         if picks:
             return [f"final picks (intended, NOT confirmed on Kaggle): {names}; select them on the website by "
                     f"{utc_deadline(st)}{left}: {url}, then run `python -m kgkit final`"]
@@ -294,11 +319,13 @@ def not_fitted_note(recs: list[dict], st: S.CompetitionState) -> str:
 
 
 # ---------------------------------------------------------------------------- what Kaggle says
-def live(slug: str, timeout: float = LIVE_TIMEOUT) -> tuple[dict | None, str | None]:
+def live(slug: str, timeout: float | None = None, leaderboard: bool = False) -> tuple[dict | None, str | None]:
     """The team's scored submissions and the ones selected as finals, from Kaggle, in a child process
-    (``kgkit.kaggle_submissions``). Returns ``({"selected": [...], "scored": [...]}, None)`` or ``(None, why)``.
-    Never raises."""
-    req = {"competition": slug, "max_pages": 5}
+    (``kgkit.kaggle_submissions``). Returns ``({"selected": [...], "scored": [...], "leaderboard": ...,
+    "leaderboard_error": ...}, None)`` or ``(None, why)``. ``leaderboard``: also where the team stands
+    (``kaggle_submissions.standing``); the whole listing is read, so it takes longer. Never raises."""
+    req = {"competition": slug, "max_pages": 5, "leaderboard": bool(leaderboard)}
+    timeout = timeout or (LEADERBOARD_TIMEOUT if leaderboard else LIVE_TIMEOUT)
     try:
         r = subprocess.run([gpu.kaggle_python() or sys.executable, "-m", "kgkit.kaggle_submissions"],
                            input=json.dumps(req), capture_output=True, encoding="utf-8", errors="replace",
@@ -311,6 +338,10 @@ def live(slug: str, timeout: float = LIVE_TIMEOUT) -> tuple[dict | None, str | N
         res = json.loads((r.stdout or "").strip().splitlines()[-1])
         error = res.get("error")
         data = {k: [x for x in res.get(k) or [] if isinstance(x, dict)] for k in ("selected", "scored")}
+        board = res.get("leaderboard")
+        data["leaderboard"] = board if isinstance(board, dict) else None
+        data["leaderboard_error"] = safety.clean(str(res["leaderboard_error"]))[:300] if res.get(
+            "leaderboard_error") else None
     except (ValueError, IndexError, TypeError, AttributeError):
         tail = (r.stderr or r.stdout or "").strip().splitlines()
         return None, "the request to Kaggle failed" + (f": {safety.clean(tail[-1])[:300]}" if tail
@@ -324,7 +355,8 @@ def _view(index: tuple[dict, dict], row: dict) -> dict:
     text = f"{row.get('description') or ''} {row.get('file') or ''}"
     rec = _link(index, row.get("description"), row.get("file"))
     return {"ref": row.get("ref"), "date": str(row.get("date") or "")[:16].replace("T", " "),
-            "score": _num(row.get("public_score")), "id": rec["id"] if rec else None,
+            "score": _num(row.get("public_score")), "private": _num(row.get("private_score")),
+            "id": rec["id"] if rec else None,
             "label": _label(row.get("description") or row.get("file")),
             "fitted": (rec is not None and E.lb_fitted(rec)) or bool(FITTED_WORDS.search(text))}
 
@@ -365,3 +397,228 @@ def report(st: S.CompetitionState, recs: list[dict], data: dict | None, error: s
         out.append(f"Only {len(selected)} of {n} are selected: select the other {n - len(selected)} as well; what "
                    "Kaggle does with an empty slot is not something to rely on.")
     return out, [v["id"] or f"sub:{v['ref']}" for v in selected]
+
+
+# ---------------------------------------------------------------------------- after the deadline
+def past_deadline(st: S.CompetitionState) -> bool:
+    days = S.deadline_days(st)
+    return days is not None and days < 0
+
+
+def revealed(data: dict | None) -> bool:
+    """Whether Kaggle shows private scores for the team's submissions: the private leaderboard is out."""
+    return bool(data) and any(isinstance(r, dict) and _num(r.get("private_score")) is not None
+                              for r in data.get("scored") or ())
+
+
+def same_score(old, new, digits: int | None = None) -> bool:
+    """Whether ``old`` (perhaps typed by hand with more digits) agrees with ``new`` as Kaggle shows it, rounded to the
+    ``digits`` decimals Kaggle gave (``kaggle_submissions.row``; else read off ``new``, which misses trailing
+    zeros)."""
+    o, n = _num(old), _num(new)
+    if o is None or n is None:
+        return False
+    if not isinstance(digits, int) or isinstance(digits, bool) or digits < 0:
+        text = repr(n)
+        digits = len(text.split(".")[1]) if "." in text and "e" not in text.lower() else 12
+    return abs(o - n) <= 0.5 * 10 ** -digits + 1e-12
+
+
+def link_scores(recs: list[dict], rows: list[dict]) -> dict:
+    """Kaggle's scored submissions (``kaggle_submissions.row``) matched to ledger records by ``_link``: the ledger id
+    in the description or file name, or the number the description starts with. Returns ``{"records": {id: [rows,
+    newest first]}, "unlinked": [rows]}``; rows with neither score are left out."""
+    index = _index([r for r in recs if isinstance(r, dict)])
+    linked: dict[str, list[dict]] = {}
+    unlinked = []
+    for row in rows:
+        if not isinstance(row, dict) or (_num(row.get("public_score")) is None
+                                         and _num(row.get("private_score")) is None):
+            continue
+        rec = _link(index, row.get("description"), row.get("file"))
+        if rec is None:
+            unlinked.append(row)
+        else:
+            linked.setdefault(rec["id"], []).append(row)
+    for subs in linked.values():
+        subs.sort(key=lambda r: str(r.get("date") or ""), reverse=True)
+    return {"records": linked, "unlinked": unlinked}
+
+
+def best_of_n(entries, n: int, greater: bool) -> tuple[float, float] | None:
+    """Kaggle scores a team by the best private score among its finals. ``entries``: ``(selection score, private
+    score)`` of the candidates; the ``n`` best by selection score are taken, any of those tied at the cut. Returns the
+    lowest and highest team score over the ways the tie can be broken, None without private scores."""
+    rows = [(s, p) for s, p in entries if _num(s) is not None and _num(p) is not None]
+    if not rows or n < 1:
+        return None
+    rows.sort(key=lambda t: t[0], reverse=greater)
+    cut = rows[min(n, len(rows)) - 1][0]
+    above = [p for s, p in rows if (s > cut if greater else s < cut)]
+    tied = sorted((p for s, p in rows if s == cut), reverse=not greater)  # the worst private first
+    best = max if greater else min
+    return best(above + tied[:max(1, n - len(above))]), best(above + tied)
+
+
+def medal_cutoffs(teams: int) -> dict[str, int]:
+    """The last rank of each medal by Kaggle's progression table for competitions, computed here: the API has no
+    medal field, and Kaggle does not say how it rounds. Gold: top 10% under 100 teams, top 10 under 250, then top 10
+    + 0.2% (one more per 500 teams). Silver: top 20% under 250 teams, top 50 under 1,000, then top 5%. Bronze: top
+    40% under 250 teams, top 100 under 1,000, then top 10%."""
+    n = max(0, int(teams))
+    if n < 100:
+        cut = (0.10 * n, 0.20 * n, 0.40 * n)
+    elif n < 250:
+        cut = (10, 0.20 * n, 0.40 * n)
+    elif n < 1000:
+        cut = (10 + 0.002 * n, 50, 100)
+    else:
+        cut = (10 + 0.002 * n, 0.05 * n, 0.10 * n)
+    return {m: int(c + 1e-9) for m, c in zip(("gold", "silver", "bronze"), cut)}
+
+
+def _fmt(v) -> str:
+    return f"{v:.5f}" if isinstance(v, float) else "-"
+
+
+def _board(data: dict | None) -> tuple[dict, dict | None]:
+    """The leaderboard listing the website shows, and the public one when it was read separately."""
+    board = (data or {}).get("leaderboard")
+    if not isinstance(board, dict):
+        return {}, None
+    shown = board.get("shown") if isinstance(board.get("shown"), dict) else {}
+    public = board.get("public") if isinstance(board.get("public"), dict) else None
+    return shown, public
+
+
+def _rank(listing: dict) -> tuple[int | None, list[float | None]]:
+    scores = [_num(s) for s in listing.get("scores") or []]
+    ranks = [r for r in listing.get("ranks") or [] if isinstance(r, int) and 1 <= r <= len(scores)]
+    return (ranks[0] if ranks else None), scores
+
+
+def team_score(data: dict | None) -> float | None:
+    """The team's score on the leaderboard the website shows (the private one once revealed)."""
+    rank, scores = _rank(_board(data)[0])
+    return scores[rank - 1] if rank else None
+
+
+def standing_lines(data: dict | None) -> list[str]:
+    """The team's rank, the number of teams, the winning score and, on the private leaderboard, the medal zone by
+    Kaggle's table (computed) with the scores at its cut-offs."""
+    shown, public = _board(data)
+    if not shown:
+        return [f"Leaderboard not read ({(data or {}).get('leaderboard_error') or 'no answer'})."]
+    rank, scores = _rank(shown)
+    teams = len(scores)
+    if not teams:
+        return ["The leaderboard lists no teams yet."]
+    complete = bool(shown.get("complete"))
+    count = f"{teams:,}" if complete else f"at least {teams:,} (the listing was cut short)"
+    board = data["leaderboard"]
+    team = safety.clean(str(board.get("team") or ""))
+    private = revealed(data)
+    which = "Private leaderboard" if private else "Leaderboard (public until the private one is out)"
+    if rank is None:
+        who = f"team {team!r}" if team else "the team (its submissions carry no team name)"
+        return [f"{which}: {count} teams, winning score {_fmt(scores[0])}; {who} is not on it."]
+    named = [r for r in shown.get("ranks") or [] if isinstance(r, int)]
+    same = f"; {len(named)} teams are named {team!r} (ranks {', '.join(map(str, named))}), the first is shown" if len(
+        named) > 1 else ""
+    pub_rank, pub_scores = _rank(public or {})
+    pub = f"; public leaderboard rank {pub_rank:,} ({_fmt(pub_scores[pub_rank - 1])})" if pub_rank else ""
+    out = [f"{which}: rank {rank:,} of {count} teams (top {100 * rank / teams:.1f}%), team score "
+           f"{_fmt(scores[rank - 1])}, winning score {_fmt(scores[0])}{pub}{same}."]
+    if private and complete:
+        cut = medal_cutoffs(teams)
+        medal = next((m for m in ("gold", "silver", "bronze") if rank <= cut[m]), "no medal")
+        zones = ", ".join(f"{m} to rank {cut[m]:,}" + (f" ({_fmt(scores[cut[m] - 1])})" if cut[m] >= 1 else "")
+                          for m in ("gold", "silver", "bronze"))
+        out.append(f"  Medal zone by Kaggle's progression table, computed here: {medal} ({zones}). The API has no "
+                   "medal field; this holds in competitions that award medals, and ranks can still move while Kaggle "
+                   "removes teams.")
+    return out
+
+
+def _out_row(v: dict) -> str:
+    return (f"  {_fmt(v['score'])} / {_fmt(v['private'])}  {v['id'] or '(no ledger record)':<34} {v['date']:<16}  "
+            f"{v['label']}" + ("  [public-LB fitted]" if v["fitted"] else ""))
+
+
+def _short(v: dict) -> str:
+    """A submission's name in a sentence: its ledger id, else the id its description gives, else the description's
+    start and Kaggle's ref."""
+    if v["id"]:
+        return v["id"]
+    m = adopt.EXP_ID_RE.search(v["label"] or "")
+    if m:
+        return m.group(1)
+    return f"{v['label'][:30] or '?'} (ref {v['ref']})"
+
+
+def _names(views: list[dict], most: int = 6) -> str:
+    names = [_short(v) for v in views]
+    return ", ".join(names[:most]) + (f" and {len(names) - most} more" if len(names) > most else "")
+
+
+def outcome(st: S.CompetitionState, recs: list[dict], data: dict) -> tuple[list[str], list[str] | None]:
+    """The text of ``kgkit final`` once the competition has ended, and the ids to record as ``final_picks`` (None
+    when nothing was selected): the finals, or the pool Kaggle picked from when nobody selected, with their private
+    scores; the team's standing; the best private score of any submission and how far the finals were from it."""
+    index = _index([r for r in recs if isinstance(r, dict)])
+    n, greater = _picks(st), st.greater_is_better
+    better = max if greater else min
+    views = [_view(index, r) for r in data["scored"]]
+    scored = sorted((v for v in views if v["score"] is not None), key=lambda v: v["score"], reverse=greater)
+    selected = [_view(index, r) for r in data["selected"]]
+    picks = [v["id"] or f"sub:{v['ref']}" for v in selected] or None
+    end = S.deadline_date(st)
+    out = [f"The competition has ended{f' ({end.isoformat()})' if end else ''}. Kaggle lists {len(scored)} scored "
+           f"submission(s) for {st.slug}; {len(selected)} selected as finals."]
+    privates = [v for v in views if v["private"] is not None]
+    if not privates:
+        out.append("No private scores yet: Kaggle shows them once the private leaderboard is final (a code "
+                   "competition first re-runs the selected notebooks on the private test). Run `python -m kgkit final` "
+                   "again then.")
+        if selected:
+            out += [f"Selected as finals ({len(selected)} of {n}):", *(_row_text(v) for v in selected)]
+        return out, picks
+    out += standing_lines(data)
+    on_board = team_score(data)
+    if selected:
+        out += [f"Selected as finals ({len(selected)} of {n}), public / private:", *(_out_row(v) for v in selected)]
+        got = [v["private"] for v in selected if v["private"] is not None]
+        final = better(got) if got else None
+        out.append(f"Kaggle scores a team by the best private score among its finals: {_fmt(final)}.")
+    else:
+        auto = _top(scored, n, greater)
+        ties = f"; {len(auto)} tie at the cut" if len(auto) > n else ""
+        out += [f"Nothing was selected, so Kaggle picked the finals itself among the {n} best public score(s){ties} "
+                "(public / private):", *(_out_row(v) for v in auto)]
+        final = on_board
+        if on_board is not None:
+            hit = [v for v in auto if v["private"] is not None and abs(v["private"] - on_board) < 1e-9]
+            over = [v for v in auto if v["private"] is not None and better(v["private"], on_board) != on_board]
+            if hit:
+                out.append(f"The team's private score {_fmt(on_board)} matches {_names(hit)}: Kaggle's picks included "
+                           + ("it" if len(hit) == 1 else "at least one of them")
+                           + (f", and not {_names(over)}, which scored higher" if over else "") + ".")
+            else:
+                out.append(f"The team's private score {_fmt(on_board)} matches none of them: Kaggle's automatic choice "
+                           "differed from the best public scores listed here.")
+        else:
+            span = best_of_n([(v["score"], v["private"]) for v in scored], n, greater)
+            if span:
+                final = span[0] if span[0] == span[1] else None
+                out.append("Depending on how Kaggle broke the tie, the team scored "
+                           + (_fmt(span[0]) if span[0] == span[1] else f"between {_fmt(span[0])} and {_fmt(span[1])}")
+                           + " privately (the leaderboard would say which).")
+    top = better(v["private"] for v in privates)
+    tops = [v for v in privates if abs(v["private"] - top) < 1e-9]
+    line = f"Best private score of any submission: {_fmt(top)} ({_names(tops)})."
+    if final is not None:
+        gap = (top - final) if greater else (final - top)
+        line += (" The finals reached it." if gap <= 1e-9 else
+                 f" The finals scored {_fmt(final)}, {gap:.5f} short of it.")
+    out.append(line)
+    return out, picks

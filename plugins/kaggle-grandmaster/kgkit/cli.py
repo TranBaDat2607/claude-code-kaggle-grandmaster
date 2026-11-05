@@ -404,7 +404,8 @@ def _import_scored(root, slug: str, rows: list[dict]) -> int:
 
     recs = A.parse_submissions(json.dumps([{"date": r.get("date"), "description": r.get("description"),
                                             "fileName": r.get("file"), "status": "complete",
-                                            "publicScore": r.get("public_score")} for r in rows]), slug)
+                                            "publicScore": r.get("public_score"),
+                                            "privateScore": r.get("private_score")} for r in rows]), slug)
     added = A.import_submissions(root, recs)[0]
     if added:
         print(f"added {added} scored submission(s) from Kaggle's list that the local log was missing")
@@ -414,7 +415,9 @@ def _import_scored(root, slug: str, rows: list[dict]) -> int:
 def cmd_final(a):
     """Ask Kaggle which submissions are selected as finals; with none selected, which ones its auto-selection would
     take, and whether any is a public-lb-fitted file. Records the selection in ``final_picks`` and stamps
-    ``final_picks_confirmed``: only this read of Kaggle silences the auto-selection warning."""
+    ``final_picks_confirmed``: only this read of Kaggle silences the auto-selection warning. After the deadline, the
+    outcome instead (``finals.outcome``): private scores of the finals or of the pool Kaggle picked from, the team's
+    rank and the best private score of any submission."""
     import datetime as dt
 
     from . import finals as FN
@@ -426,10 +429,19 @@ def cmd_final(a):
     if st is None or root is None:
         raise SystemExit("not inside a kaggle-grandmaster workspace (no .kaggle-gm/competition.json)")
     recs = Ledger(root).records()
-    data, error = FN.live(st.slug)
+    after = FN.past_deadline(st)
+    if after:
+        print("The deadline has passed: reading the submissions and the whole leaderboard (up to a few minutes)...")
+    data, error = FN.live(st.slug, leaderboard=after)
     if data is not None:
         _import_scored(root, st.slug, data["scored"])
-    text, picks = FN.report(st, recs, data, error, local=FN.lines(root, st, recs))
+    ended = data is not None and (after or FN.revealed(data))
+    if ended:
+        text, picks = FN.outcome(st, recs, data)
+    elif after:
+        text, picks = [f"The deadline has passed, but Kaggle could not be asked for the outcome ({error})."], None
+    else:
+        text, picks = FN.report(st, recs, data, error, local=FN.lines(root, st, recs))
     print("\n".join(text))
     if picks:
         if st.final_picks and st.final_picks != picks and not st.final_picks_confirmed:
@@ -441,8 +453,13 @@ def cmd_final(a):
     elif data is not None and st.final_picks:  # Kaggle answered: nothing is selected, so nothing is confirmed
         st.final_picks_confirmed = ""
         st.save(root)
-        print(f"intended picks {', '.join(st.final_picks)} are not selected on Kaggle yet")
+        print(f"intended picks {', '.join(st.final_picks)} were not selected on Kaggle" if ended else
+              f"intended picks {', '.join(st.final_picks)} are not selected on Kaggle yet")
     print()
+    if ended or after:
+        print("next: `python -m kgkit ledger sync-lb` attaches the public and private scores to the ledger, then "
+              "`python -m kgkit ledger predictiveness` measures which signal predicted the private leaderboard")
+        return
     print("\n".join(FN.steps(st)))
 
 
@@ -639,10 +656,17 @@ def cmd_ledger(a):
     elif a.action == "lb":
         priv = float(a.args[2]) if len(a.args) > 2 else None
         r = led.attach_lb(a.args[0], float(a.args[1]), priv, submission=a.sub)
-        print(f"{r['id']}: CV {fmt_cv(r)} -> public LB {r['lb_public']}" + _fitted_note(r))
+        print(f"{r['id']}: CV {fmt_cv(r)} -> public LB {r['lb_public']}"
+              + (f", private {r['lb_private']}" if r.get("lb_private") is not None else "") + _fitted_note(r))
         agreement = led.cv_lb_summary()
         if agreement:
             print(agreement)
+    elif a.action == "sync-lb":
+        _ledger_sync_lb(led, a)
+    elif a.action == "predictiveness":
+        from . import predictiveness as P
+
+        P.main(led, a)
     elif a.action == "add":
         extra = {"variant": a.variant} if a.variant else {}
         if a.sub:
@@ -708,6 +732,102 @@ def cmd_ledger(a):
                              cv=a.cv, notes=a.notes or "", source=a.source)
         print(f"logged {r['id']}: CV {r['cv']:.5f}" + (f" +/- {E.fmt_se(r['cv_std'])}" if r.get("cv_std") else "")
               + f" [{a.source}]")
+
+
+def _shown(v: float, row: dict) -> str:
+    """A score with the decimals Kaggle shows it with (``kaggle_submissions.row``)."""
+    digits = row.get("digits")
+    ok = isinstance(digits, int) and not isinstance(digits, bool) and 0 <= digits <= 12
+    return f"{v:.{digits}f}" if ok else str(v)
+
+
+def _pair(row: dict) -> str:
+    """'public / private' of a submission row, '-' where Kaggle has none."""
+    return " / ".join(_shown(v, row) if isinstance(v, float) else "-" for v in (row.get("public_score"),
+                                                                                row.get("private_score")))
+
+
+def _ledger_sync_lb(led, a) -> None:
+    """`ledger sync-lb`: one read of Kaggle's submission list. Every scored submission whose description or file name
+    names a ledger record (``finals.link_scores``) gives that record its public and private score, the newest one
+    when several name it. A score typed by hand that agrees with Kaggle's to the digits Kaggle shows is kept (it may
+    have more). The list is saved as Kaggle gave it (``S.kaggle_list``) for `ledger predictiveness`, which also counts
+    the submissions no record names."""
+    import datetime as dt
+
+    from . import finals as FN
+    from . import safety as SF
+    from . import state as S
+    from .experiment import fmt_cv
+
+    st = S.load(led.root)
+    if st is None:
+        raise SystemExit("not inside a kaggle-grandmaster workspace (no .kaggle-gm/competition.json)")
+    data, error = FN.live(st.slug)
+    if data is None:
+        raise SystemExit(f"could not ask Kaggle for the submission list ({error})")
+    rows = data["scored"]
+    recs = led.records()
+    by_id = {r["id"]: r for r in recs}
+    links = FN.link_scores(recs, rows)
+    private = sum(1 for r in rows if r.get("private_score") is not None)
+    print(f"Kaggle lists {len(rows)} scored submission(s) for {st.slug}, {private} with a private score"
+          + ("" if private else " (private scores appear once the private leaderboard is out)") + ".")
+    changes, kept, several = [], [], []
+    for rid, subs in links["records"].items():
+        rec, sub = by_id[rid], subs[0]
+        if len(subs) > 1:
+            several.append((rid, subs))
+        fields = {}
+        for key, col in (("lb_public", "public_score"), ("lb_private", "private_score")):
+            new = sub.get(col)
+            if new is None:
+                continue
+            if FN.same_score(rec.get(key), new, sub.get("digits")):
+                if rec.get(key) != new:
+                    kept.append((rid, key, rec.get(key), _shown(new, sub)))
+                continue
+            fields[key] = new
+        if fields:
+            changes.append((rid, rec, fields, sub))
+    named = sum(len(s) for s in links["records"].values())
+    print(f"{named} of them name {len(links['records'])} ledger record(s); "
+          f"{'would update' if a.dry_run else 'updated'} {len(changes)}" + (":" if changes else "."))
+    for rid, rec, fields, sub in changes:
+        parts = [f"{label} {_shown(fields[key], sub)}" + (f" (was {rec[key]})" if rec.get(key) is not None else "")
+                 for key, label in (("lb_public", "public"), ("lb_private", "private")) if key in fields]
+        print(f"  {rid:40s} CV {fmt_cv(rec)}  " + ", ".join(parts))
+    for rid, key, old, new in kept:
+        print(f"  {rid}: kept {key} {old}; Kaggle shows {new}, the same score to the digits it gives")
+    for rid, subs in several:
+        print(f"  {rid}: {len(subs)} scored submissions name it; its scores come from the newest "
+              f"({str(subs[0].get('date') or '')[:16].replace('T', ' ')}): " + "; ".join(_pair(s) for s in subs))
+    loose = links["unlinked"]
+    if loose:
+        print(f"{len(loose)} scored submission(s) name no ledger record:")
+        for r in loose[:15]:
+            text = " ".join(SF.clean(str(r.get("description") or r.get("file") or "")).split())[:70]
+            print(f"  {str(r.get('date') or '')[:16].replace('T', ' '):16s}  {_pair(r)}  {text}")
+        if len(loose) > 15:
+            print(f"  ... and {len(loose) - 15} more")
+        print("  attach one by hand: `python -m kgkit ledger lb <id> <public> [<private>]`. A description that starts "
+              "with the ledger id links a submission by itself.")
+    if a.dry_run:
+        print("dry run: nothing written")
+        return
+    for rid, _, fields, _ in changes:
+        led.attach_lb(rid, fields.get("lb_public"), fields.get("lb_private"))
+    path = S.kaggle_list(led.root)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"competition": st.slug,
+                                "read_at": dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                                "selected": data["selected"], "scored": rows}, indent=1), encoding="utf-8")
+    print(f"saved Kaggle's list to {path.relative_to(led.root).as_posix()} (for `kgkit ledger predictiveness`)")
+    agreement = led.cv_lb_summary()
+    if agreement:
+        print(agreement)
+    if private:
+        print("next: python -m kgkit ledger predictiveness   (which signal predicted the private leaderboard)")
 
 
 def _ledger_add_preds(led, a, extra: dict) -> dict:
@@ -1707,6 +1827,11 @@ _LEDGER_OPTIONS = [
                         "`ledger compare` estimates the public-LB noise between two records from these files")),
     ("--ref", dict(help="compare: a record with predictions on the evaluation set, used to calibrate the labels "
                         "simulated for records that have none (default: the pair's, else the baseline)")),
+    ("--dry-run", dict(action="store_true", help="sync-lb: show what would change and write nothing")),
+    ("--top", dict(type=int, default=10, help="predictiveness: k for the k strongest records by public score and "
+                                              "by CV (default 10)")),
+    ("--plot", dict(metavar="DIR", help="predictiveness: also write public_vs_private.png, private_over_time.png and "
+                                        "cv_vs_private.png to DIR (needs matplotlib)")),
 ]
 _EXP = ("exp_id", None, "ledger id (e.g. 0012) or name")
 _PAIRED = "--truth --folds --fold --groups --boot --method --rope --public-n --metric"
@@ -1716,6 +1841,10 @@ _LEDGER_ACTIONS = {
     "show": ("one record as JSON", [_EXP], ""),
     "lb": ("attach a submission's leaderboard score", [_EXP, ("public_score", None, "public LB score"),
                                                       ("private_score", "?", "private LB score, once known")], "--sub"),
+    "sync-lb": ("attach the public and private scores Kaggle lists to every record a submission names (the ledger "
+                "id in its description or file name, or the number its description starts with)", [], "--dry-run"),
+    "predictiveness": ("after the deadline: which signal predicted the private leaderboard, over every submission "
+                       "and the strongest ones, and what each way of picking the finals scored", [], "--top --plot"),
     "add": ("log an experiment", [("name", None, "experiment name (the id gets a number prefix)"),
                                   ("cv|auto|lb-only", None, "its CV (holdout+lb: holdout) score; 'auto': recomputed from --pred; "
                                                "'lb-only': no validation score (fork of public notebooks, blend "
@@ -1842,11 +1971,15 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("-n", type=int, default=10)
     s.set_defaults(fn=cmd_status)
 
-    s = sub.add_parser("final", help="which submissions Kaggle has selected as finals, and which it would auto-select",
+    s = sub.add_parser("final", help="which submissions Kaggle has selected as finals, and which it would auto-select; "
+                                     "after the deadline, how they did",
                        description="Ask Kaggle which submissions are selected as finals (the website selects them; "
                                    "there is no API for that). With none selected, show the best public scores "
                                    "Kaggle would auto-select and warn when one is a public-lb-fitted file. Records "
-                                   "the selection in competition.json (final_picks).")
+                                   "the selection in competition.json (final_picks). After the deadline: the private "
+                                   "scores of the finals (or of the pool Kaggle picked from when none was selected), "
+                                   "the team's rank, the medal zone computed from Kaggle's progression table, and the "
+                                   "best private score of any submission.")
     s.set_defaults(fn=cmd_final)
 
     s = sub.add_parser("folds", help="assign CV folds")

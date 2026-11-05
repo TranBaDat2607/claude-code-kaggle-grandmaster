@@ -33,6 +33,8 @@ Follow the `final-submission-selection` skill.
    selected, run `kgkit final` again: it reads Kaggle's selection back, records it (`final_picks`) and stamps
    when it did, and only then does the warning in `kgkit status` and the session brief give way to a one-line
    note, or to a louder warning if a selected file is fitted or fewer than the allowed finals are selected.
+   That warning shows in the last 3 days whenever no selection is confirmed (earlier, only when a fitted file
+   would be auto-selected): an unticked selection leaves the pick to Kaggle, among files that often tie.
    `kgkit config final_picks=...` records *intended* picks only: the warning stays, listing them as not
    confirmed on Kaggle, so never use it as a substitute for `kgkit final`.
 Write the decision and reasoning to `reports/final-selection.md`: the picks (with the file name, description
