@@ -41,8 +41,9 @@ python -m kgkit pages [--page evaluation|rules|data-description]   # the competi
 cannot see. The rules page and this count can disagree: plan on the smaller number. `kgkit pages` wraps
 `kaggle competitions pages`, whose parser needs the slug twice (`pages <slug> list <slug> --content`).
 Competition pages on the website are rendered by JavaScript, so WebFetch often returns nothing there.
-Submission messages should always contain the ledger experiment id and CV so the LB score can be
-attached back (`python -m kgkit ledger lb <id> <score>`). Code competitions: submit via the
+Submission messages should always start with the ledger experiment id, and give the CV, so the LB score can be
+attached back: `python -m kgkit ledger sync-lb` attaches every score Kaggle lists (private ones too, after the
+deadline), `ledger lb <id> <score>` attaches one. Code competitions: submit via the
 notebook: `kaggle competitions submit <slug> -k <user>/<kernel> -v <version> -f submission.csv -m "..."`
 (verified against Kaggle CLI 2.2), or through the website. Success prints only `N submissions remaining
 today.`; the score appears after Kaggle reruns the notebook on the hidden test (hours, not minutes).

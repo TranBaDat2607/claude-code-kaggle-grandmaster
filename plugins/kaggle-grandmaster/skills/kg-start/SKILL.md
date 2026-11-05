@@ -2,10 +2,49 @@
 name: kg-start
 description: Bootstrap a Kaggle competition workspace end to end — recon, data download, workspace init, EDA, adversarial validation, frozen folds, metric implementation, baseline model and a first validated submission file.
 argument-hint: <competition-slug> [workspace-dir]
-allowed-tools: [Read, Glob, Grep, Agent]
+allowed-tools:
+  - Read
+  - Glob
+  - Grep
+  - Agent
+  - 'Bash(PYTHONPATH="${CLAUDE_PLUGIN_ROOT}" python -m kgkit init *)'
+  - 'Bash(python -m kgkit init *)'
+  - 'PowerShell(python -m kgkit init *)'
+  - 'Bash(PYTHONPATH="${CLAUDE_PLUGIN_ROOT}" python -m kgkit eda *)'
+  - 'Bash(python -m kgkit eda *)'
+  - 'PowerShell(python -m kgkit eda *)'
+  - 'Bash(PYTHONPATH="${CLAUDE_PLUGIN_ROOT}" python -m kgkit adv *)'
+  - 'Bash(python -m kgkit adv *)'
+  - 'PowerShell(python -m kgkit adv *)'
+  - 'Bash(PYTHONPATH="${CLAUDE_PLUGIN_ROOT}" python -m kgkit folds *)'
+  - 'Bash(python -m kgkit folds *)'
+  - 'PowerShell(python -m kgkit folds *)'
+  - 'Bash(PYTHONPATH="${CLAUDE_PLUGIN_ROOT}" python -m kgkit audit-repo *)'
+  - 'Bash(python -m kgkit audit-repo *)'
+  - 'PowerShell(python -m kgkit audit-repo *)'
+  - 'Bash(PYTHONPATH="${CLAUDE_PLUGIN_ROOT}" python -m kgkit backlog *)'
+  - 'Bash(python -m kgkit backlog *)'
+  - 'PowerShell(python -m kgkit backlog *)'
+  - 'Bash(PYTHONPATH="${CLAUDE_PLUGIN_ROOT}" python -m kgkit ledger *)'
+  - 'Bash(python -m kgkit ledger *)'
+  - 'PowerShell(python -m kgkit ledger *)'
+  - 'Bash(PYTHONPATH="${CLAUDE_PLUGIN_ROOT}" python -m kgkit validate *)'
+  - 'Bash(python -m kgkit validate *)'
+  - 'PowerShell(python -m kgkit validate *)'
+  - 'Bash(PYTHONPATH="${CLAUDE_PLUGIN_ROOT}" python -m kgkit status *)'
+  - 'Bash(python -m kgkit status *)'
+  - 'PowerShell(python -m kgkit status *)'
+  - 'Bash(kaggle competitions files *)'
+  - 'PowerShell(kaggle competitions files *)'
+  - 'Bash(kaggle competitions download *)'
+  - 'PowerShell(kaggle competitions download *)'
 ---
 
 # /kg-start — bootstrap a competition
+
+Run kgkit with the Bash tool, as `PYTHONPATH="${CLAUDE_PLUGIN_ROOT}" python -m kgkit <command>`: this command
+pre-approves that form for the kgkit calls it makes. Submitting, pushing or publishing still asks (so does a
+PowerShell `$env:` assignment).
 
 Arguments: `$ARGUMENTS` (competition slug, optional workspace directory; default: current directory).
 

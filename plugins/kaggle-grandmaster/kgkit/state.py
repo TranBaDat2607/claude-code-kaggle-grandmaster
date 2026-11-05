@@ -193,7 +193,7 @@ def deadline_line(st: CompetitionState) -> str:
     d, days = deadline_date(st), deadline_days(st)
     if d is None:
         return f"deadline: {st.deadline}"
-    phase = ("ENDED — run /kg-postmortem" if days < 0
+    phase = ("ENDED — run /kg-postmortem, then /kg-showcase to show the work" if days < 0
              else "FINAL DAYS — robustness + /kg-final" if days <= FINAL_DAYS
              else "endgame — freeze ensemble design" if days <= 14 else "exploration")
     return f"deadline {d.isoformat()} ({days} days left; phase: {phase})"

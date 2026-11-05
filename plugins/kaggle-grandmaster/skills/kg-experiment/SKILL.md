@@ -2,10 +2,27 @@
 name: kg-experiment
 description: Run one disciplined experiment for a hypothesis — single change, frozen folds, same seeds, ledger logging with its parent baseline, paired comparison (per-fold deltas + OOF bootstrap) against the accepted baseline, recorded keep/discard decision.
 argument-hint: <hypothesis or change to test>
-allowed-tools: [Read, Glob, Grep, Agent]
+allowed-tools:
+  - Read
+  - Glob
+  - Grep
+  - Agent
+  - 'Bash(PYTHONPATH="${CLAUDE_PLUGIN_ROOT}" python -m kgkit backlog *)'
+  - 'Bash(python -m kgkit backlog *)'
+  - 'PowerShell(python -m kgkit backlog *)'
+  - 'Bash(PYTHONPATH="${CLAUDE_PLUGIN_ROOT}" python -m kgkit ledger *)'
+  - 'Bash(python -m kgkit ledger *)'
+  - 'PowerShell(python -m kgkit ledger *)'
+  - 'Bash(PYTHONPATH="${CLAUDE_PLUGIN_ROOT}" python -m kgkit status *)'
+  - 'Bash(python -m kgkit status *)'
+  - 'PowerShell(python -m kgkit status *)'
 ---
 
 # /kg-experiment
+
+Run kgkit with the Bash tool, as `PYTHONPATH="${CLAUDE_PLUGIN_ROOT}" python -m kgkit <command>`: this command
+pre-approves that form for the kgkit calls it makes. Submitting, pushing or publishing still asks (so does a
+PowerShell `$env:` assignment).
 
 Hypothesis: `$ARGUMENTS`
 

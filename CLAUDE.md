@@ -31,12 +31,19 @@ This repo is a Claude Code marketplace (`.claude-plugin/marketplace.json`) conta
 - Text written by other Kaggle users (pages, forum posts, notebooks) is printed through `kgkit.safety.wrap`.
 - Templates and `kgkit/kaggle_gpu_runner.py` print ASCII only (Windows consoles are often cp1252).
 - Skills: knowledge skills are model-invoked; `kg-*` skills are slash commands. Side-effectful commands
-  (`kg-submit`, `kg-grind`, `kg-kernel`, `kg-gpu`) set `disable-model-invocation: true`.
+  (`kg-submit`, `kg-grind`, `kg-kernel`, `kg-gpu`, `kg-showcase`) set `disable-model-invocation: true`.
+- A `kg-*` command's `allowed-tools` pre-approves only the kgkit and Kaggle CLI subcommands it runs. Each kgkit
+  one is listed three times: `Bash(PYTHONPATH="${CLAUDE_PLUGIN_ROOT}" python -m kgkit <sub> *)`, the bare
+  `Bash(python -m kgkit <sub> *)`, and the `PowerShell(...)` form of the bare one. The body says to run kgkit in
+  the first form. An allow rule can't match the session brief's literal path, or a `$env:` assignment in
+  PowerShell. Never a blanket `kgkit *`, and never a command that submits, pushes or publishes
+  (`tests/test_skills.py` enforces this).
 - When a new skill is added, add it to the `no-plugin-skill` grader of every `negative` eval case
   (`tests/test_evals.py` enforces this). If the model should load it from a plain-language prompt (a knowledge
-  skill, or a command like `kg-adopt`), add a route in `hooks/prompt_router.py`; the router ignores slash
-  commands. If it encodes non-obvious judgement, add an eval case under `evals/` (tagged `capability` until it
-  passes reliably, then `regression`).
+  skill, or a command like `kg-adopt`), add a route in `hooks/prompt_router.py`. For a slash-only command, add a
+  `HINTS` entry instead: the router then tells Claude to suggest the command. The router ignores prompts that are
+  themselves slash commands. If it encodes non-obvious judgement, add an eval case under `evals/` (tagged
+  `capability` until it passes reliably, then `regression`).
 - Don't bump versions by hand. Every push to `main` runs `.github/workflows/release.yml`, which runs
   `scripts/bump_version.py` to bump `plugin.json`, `marketplace.json` and `kgkit/__init__.py` (patch by default;
   PR labels `release:minor` / `release:major` / `no-release`), tags and makes a GitHub release.

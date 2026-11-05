@@ -26,10 +26,13 @@ this marketplace (`/plugin` → **Marketplaces**) or run `claude plugin update k
 
 Start a competition: `/kaggle-grandmaster:kg-start <competition-slug>`. Already mid-competition in your own
 repo: `/kaggle-grandmaster:kg-adopt <competition-slug>` writes only `.kaggle-gm/` and imports past
-submissions and experiments, leaving your layout alone.
+submissions and experiments, leaving your layout alone. After the deadline: `/kaggle-grandmaster:kg-postmortem`
+(scores, how the finals did, what predicted private, lessons), then `/kaggle-grandmaster:kg-showcase` to show the
+work (README around the result, license, figures, write-up draft; it audits first and asks before anything goes
+public).
 
 - `skills/`: 21 knowledge playbooks (including `competition-strategy`: choosing competitions, the solo
-  gold, teaming and merging) + 17 `kg-*` slash commands
+  gold, teaming and merging) + 18 `kg-*` slash commands
 - `agents/`: 9 specialist subagents
 - `hooks/`: session brief (accepted baseline, backlog top, GPU quota, competition data in git), prompt→skill router, submission +
   GPU-quota + upload guard (credentials never printed or uploaded, repeated files caught), submission /
@@ -51,6 +54,9 @@ submissions and experiments, leaving your layout alone.
     `kgkit/kaggle_gpu_runner.py`, so a vendored copy builds kernels too); `datasets pull`
     (per-file fallback when a dataset archive 404s); `whoami`; `config` (e.g. `validation=holdout+lb
     eval_truth=data/holdout.csv:a,b,c`)
+  - after the deadline: `final` (what the finals scored, or the pool Kaggle auto-picked from; rank and medal
+    zone), `ledger sync-lb` (every public and private score into the ledger in one call), `ledger
+    predictiveness` (which signal predicted private, over all submissions and the strongest, with intervals)
   - `audit-repo`: is competition data in git (every branch, the history, what `git add -A` would commit),
     compared by content with the competition's files on your machine, and is the GitHub remote public? Run
     by `adopt`; `init` adds `data/` to an existing `.gitignore`
@@ -80,7 +86,8 @@ repository's name is sent; `--offline` (or `KGKIT_OFFLINE=1`) skips it.
   kernels list -m` + `status` count your busy sessions before a push.
 - Datasets: `kaggle datasets files / download` (`kgkit datasets pull`).
 - Code-competition notebooks and model weights (`/kg-kernel`): `kaggle kernels push` and
-  `kaggle datasets create / version`, private unless you make them public.
+  `kaggle datasets create / version`, private unless you make them public. After the deadline
+  `/kg-showcase` audits them and asks before making any of them public.
 - Public notebooks: `kaggle kernels list / pull` (`kgkit kernels top / pull`).
 - Forums: `kaggle competitions topics` / `topic-messages` (CLI 2.2.4+), and for finished competitions
   `kaggle datasets download kaggle/meta-kaggle`, Kaggle's public forum export (`kgkit discussions --source meta`).

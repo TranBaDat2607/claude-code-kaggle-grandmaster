@@ -2,11 +2,31 @@
 name: kg-grind
 description: Autonomous improvement loop — repeatedly pick the highest-value idea from the backlog, run it as a disciplined experiment against the accepted baseline, decide with a paired comparison, update the backlog, and re-check the CV for overfitting, within a time or experiment budget.
 argument-hint: "[budget, e.g. 4h or 10 experiments] [focus area]"
-allowed-tools: [Read, Glob, Grep, Agent]
+allowed-tools:
+  - Read
+  - Glob
+  - Grep
+  - Agent
+  - 'Bash(PYTHONPATH="${CLAUDE_PLUGIN_ROOT}" python -m kgkit backlog *)'
+  - 'Bash(python -m kgkit backlog *)'
+  - 'PowerShell(python -m kgkit backlog *)'
+  - 'Bash(PYTHONPATH="${CLAUDE_PLUGIN_ROOT}" python -m kgkit kernels pull *)'
+  - 'Bash(python -m kgkit kernels pull *)'
+  - 'PowerShell(python -m kgkit kernels pull *)'
+  - 'Bash(PYTHONPATH="${CLAUDE_PLUGIN_ROOT}" python -m kgkit ledger *)'
+  - 'Bash(python -m kgkit ledger *)'
+  - 'PowerShell(python -m kgkit ledger *)'
+  - 'Bash(PYTHONPATH="${CLAUDE_PLUGIN_ROOT}" python -m kgkit status *)'
+  - 'Bash(python -m kgkit status *)'
+  - 'PowerShell(python -m kgkit status *)'
 disable-model-invocation: true
 ---
 
 # /kg-grind — autonomous grandmaster loop
+
+Run kgkit with the Bash tool, as `PYTHONPATH="${CLAUDE_PLUGIN_ROOT}" python -m kgkit <command>`: this command
+pre-approves that form for the kgkit calls it makes. Submitting, pushing or publishing still asks (so does a
+PowerShell `$env:` assignment).
 
 Budget / focus: `$ARGUMENTS` (default: 6 experiments, no specific focus).
 

@@ -8,6 +8,9 @@ skills by keyword and tells Claude to load them first. Unrelated prompts produce
 Only user-typed prompts are routed: harness-injected text (goal check-ins, task notifications) is
 ignored. Each skill is suggested at most once per session (state kept in the temp dir, keyed by
 session_id), and inside a workspace whose task is known, other domains' skills are not suggested.
+
+A slash-only command (``disable-model-invocation``) cannot be loaded by Claude, so its route (HINTS) adds a line
+telling Claude to suggest the command to the user instead.
 """
 
 from __future__ import annotations
@@ -51,6 +54,9 @@ ROUTES: list[tuple[str, str]] = [
                             r"ndcg|\bdice\b|\biou\b|rounding|calibrat|\bmetric\b"),
     ("final-submission-selection", r"final (submission|pick|selection)|which (two|2) (submission|should)|"
                                    r"\bselect(ion)?\b.{0,40}submission|shake[- ]?up|private (lb|leaderboard)"),
+    ("kg-postmortem", r"post-?mortem|lessons? (learned|from (this|the) competition)|"
+                      r"(competition|deadline) (is over|has (ended|passed)|ended|passed)|after the (competition|deadline)|"
+                      r"final (rank|standing|result)s?\b"),
     ("code-competitions", r"code competition|internet (off|disabled)|offline|\bkernel\b|notebook submission|"
                           r"runtime limit|hidden test|\bwheels?\b"),
     ("tabular-mastery", r"lightgbm|\blgbm\b|xgboost|catboost|\bgbdt\b|tabular|feature engineering|playground|"
@@ -80,11 +86,33 @@ ROUTES: list[tuple[str, str]] = [
 ]
 COMPILED = [(name, re.compile(rx, re.IGNORECASE)) for name, rx in ROUTES]
 
+# slash-only commands: (name, pattern, what to tell Claude)
+HINTS: list[tuple[str, str, str]] = [
+    ("kg-showcase",
+     r"show ?(off|case)? (my|our|the) (work|solution|results?)|showcase|portfolio|"
+     r"make (it|my|our|the|this) (repo|repository|notebook|code|work|solution|weights)? ?public|"
+     r"publish (my|our|the) (solution|work|code|notebook|weights|repo)|(my|our) (kaggle )?write-?up|"
+     r"write (a|my|our|the) (kaggle )?(solution )?write-?up|"
+     r"(update|polish|tidy|clean up|rebuild) (my|our|the) (repo|repository|readme|project)\b",
+     "To show the work after the competition (README rebuilt around the result, own work separated from public "
+     "work, license, figures, a public notebook and weights, a Kaggle write-up draft), suggest the user run "
+     "`/kg-showcase`, a slash command: it audits the repo first and asks before each public step. Make nothing "
+     "public from here."),
+]
+COMPILED_HINTS = [(name, re.compile(rx, re.IGNORECASE), text) for name, rx, text in HINTS]
+
 # competition.json `task` -> its domain skill; inside a workspace the other domains are not suggested
 TASK_DOMAIN = {"tabular": "tabular-mastery", "cv": "computer-vision", "nlp": "nlp-and-llm", "llm": "nlp-and-llm",
                "timeseries": "time-series", "audio": "audio-and-signal", "rl": "simulation-and-optimization",
                "optimization": "simulation-and-optimization"}
 DOMAIN_SKILLS = set(TASK_DOMAIN.values()) | {"recsys-and-ranking"}
+
+
+def hints(prompt: str, in_workspace: bool) -> list[str]:
+    """Slash-only commands to suggest for this prompt (HINTS)."""
+    if not (GATE.search(prompt) or in_workspace):
+        return []
+    return [name for name, rx, _ in COMPILED_HINTS if rx.search(prompt)]
 
 
 def route(prompt: str, in_workspace: bool, task: str = "") -> list[str]:
@@ -102,7 +130,9 @@ def route(prompt: str, in_workspace: bool, task: str = "") -> list[str]:
     order = {name: i for i, (name, _) in enumerate(ROUTES)}
     top = sorted(hits, key=lambda t: (-t[0], order[t[1]]))[:3]
     chosen = sorted((name for _, name in top), key=lambda n: order[n])
-    return chosen or ["grandmaster-playbook"]
+    if chosen or hints(prompt, in_workspace):  # a slash command to suggest is answer enough without the fallback
+        return chosen
+    return ["grandmaster-playbook"]
 
 
 def _seen_file(payload: dict) -> Path | None:
@@ -150,14 +180,19 @@ def main() -> None:
     seen_file = _seen_file(payload)
     seen = _seen(seen_file)
     skills = [s for s in route(prompt, root is not None, _task(root)) if s not in seen]
-    if not skills:
+    suggest = [h for h in hints(prompt, root is not None) if f"hint:{h}" not in seen]
+    if not (skills or suggest):
         return
-    _remember(seen_file, seen | set(skills))
-    names = ", ".join(f"kaggle-grandmaster:{s}" for s in skills)
-    C.emit("UserPromptSubmit", additionalContext=(
-        f"[kaggle-grandmaster] This is competition work. Before answering, load these skills with the Skill tool "
-        f"and follow their checklists: {names}. Ground recommendations in them (validation first, leakage "
-        f"mechanisms, honest OOF-based estimates), not just general ML advice."))
+    _remember(seen_file, seen | set(skills) | {f"hint:{h}" for h in suggest})
+    lines = []
+    if skills:
+        names = ", ".join(f"kaggle-grandmaster:{s}" for s in skills)
+        lines.append(f"[kaggle-grandmaster] This is competition work. Before answering, load these skills with the "
+                     f"Skill tool and follow their checklists: {names}. Ground recommendations in them (validation "
+                     f"first, leakage mechanisms, honest OOF-based estimates), not just general ML advice.")
+    text = {name: t for name, _, t in COMPILED_HINTS}
+    lines += [f"[kaggle-grandmaster] {text[h]}" for h in suggest]
+    C.emit("UserPromptSubmit", additionalContext="\n".join(lines))
 
 
 if __name__ == "__main__":

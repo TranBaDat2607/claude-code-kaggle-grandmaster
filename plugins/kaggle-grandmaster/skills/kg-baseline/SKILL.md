@@ -2,10 +2,26 @@
 name: kg-baseline
 description: Build fast, strong, correctly-validated baselines for the current competition from the plugin's templates — the main model plus diverse families on the same folds — log them to the ledger, decide the accepted baseline and produce a validated submission file.
 argument-hint: "[model: lgbm|xgb|cat|hgb|linear|knn|svm|mlp|image|transformer]"
-allowed-tools: [Read, Glob, Grep]
+allowed-tools:
+  - Read
+  - Glob
+  - Grep
+  - 'Bash(PYTHONPATH="${CLAUDE_PLUGIN_ROOT}" python -m kgkit ledger *)'
+  - 'Bash(python -m kgkit ledger *)'
+  - 'PowerShell(python -m kgkit ledger *)'
+  - 'Bash(PYTHONPATH="${CLAUDE_PLUGIN_ROOT}" python -m kgkit validate *)'
+  - 'Bash(python -m kgkit validate *)'
+  - 'PowerShell(python -m kgkit validate *)'
+  - 'Bash(PYTHONPATH="${CLAUDE_PLUGIN_ROOT}" python -m kgkit status *)'
+  - 'Bash(python -m kgkit status *)'
+  - 'PowerShell(python -m kgkit status *)'
 ---
 
 # /kg-baseline
+
+Run kgkit with the Bash tool, as `PYTHONPATH="${CLAUDE_PLUGIN_ROOT}" python -m kgkit <command>`: this command
+pre-approves that form for the kgkit calls it makes. Submitting, pushing or publishing still asks (so does a
+PowerShell `$env:` assignment).
 
 Arguments: `$ARGUMENTS`
 

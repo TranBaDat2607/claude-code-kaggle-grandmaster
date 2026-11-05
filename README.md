@@ -102,7 +102,7 @@ when no other plugin uses the same name.
 | Layer | Count | What it does |
 |---|---|---|
 | **Knowledge skills** | 21 | Playbooks Claude loads when relevant: master playbook, recon, validation, tabular, CV, NLP/LLM, time series, audio, simulation/optimisation, recsys, ensembling, metrics, tuning, DL training, boosters, code competitions, Kaggle CLI, Kaggle GPUs, CV-LB debugging, final selection, and competition strategy (choosing competitions, solo gold, teaming and merging) |
-| **Slash commands** | 17 | `kg-start`, `kg-adopt`, `kg-recon`, `kg-eda`, `kg-cv`, `kg-baseline`, `kg-experiment`, `kg-grind`, `kg-gpu`, `kg-ensemble`, `kg-submit`, `kg-status`, `kg-kernel`, `kg-final`, `kg-debug`, `kg-ideas`, `kg-postmortem` |
+| **Slash commands** | 18 | `kg-start`, `kg-adopt`, `kg-recon`, `kg-eda`, `kg-cv`, `kg-baseline`, `kg-experiment`, `kg-grind`, `kg-gpu`, `kg-ensemble`, `kg-submit`, `kg-status`, `kg-kernel`, `kg-final`, `kg-debug`, `kg-ideas`, `kg-postmortem`, `kg-showcase` |
 | **Specialist agents** | 9 | competition-analyst, solution-researcher, data-detective, validation-auditor, feature-engineer, experiment-runner, error-analyst, ensemble-architect, kernel-packager |
 | **Hooks** | 4 | session brief (incl. GPU quota), Kaggle-prompt → skill router, submission + GPU-push + upload guard (validation, repeated files, daily budget, weekly GPU quota, credential protection), submission / GPU-run logger |
 | **`kgkit` toolkit** | 23 modules | Tested Python: leak-free folds, 35+ metrics, threshold/rounding optimisers, hill climbing / multi-level and residual stacking / library pruning, adversarial validation, leak-safe features, brute-force feature search, EDA red flags, experiment ledger with decisions + lineage, paired experiment comparison, fresh-split recheck, idea backlog, public-notebook review, competition pages and discussions, submission validation, Kaggle GPU/TPU pipeline, dataset download with per-file fallback, upload and third-party-text safety |
@@ -128,6 +128,9 @@ kg-start ─► recon (competition-analyst ∥ solution-researcher) ─► data 
    kg-ensemble (same-fold OOFs, prune, hill climbing / multi-level / residual stack, honest score) ─► kg-kernel
              ▼
    kg-final (best honest CV + hedge, LB-noise aware) ─► kg-postmortem (lessons for next time)
+             ▼
+   kg-showcase (README around the result, own vs public work, license, figures, write-up draft;
+                audited before anything goes public, asks before each public step)
 ```
 
 Each workspace gets a `CLAUDE.md` with non-negotiable rules (frozen folds, log every run, one
@@ -151,7 +154,7 @@ artifacts/<exp_id>/           oof.npy + test.npy, the inputs for ensembling
 | Event | Behaviour |
 |---|---|
 | SessionStart | Exports `KGKIT_HOME`; inside a workspace it injects a brief: competition facts, deadline countdown and phase, best CV/LB, accepted baseline, backlog top, CV↔LB correlation, recent experiments, submissions today, lessons from past competitions (`~/.kaggle-gm/lessons.md`), and a vendored kgkit (`src/kgkit`) whose version is not the plugin's, with the command that refreshes it. It also shows a warning while the last `kgkit audit-repo` found competition data in git or data files `git add -A` would commit, and a nudge to run the audit in a repo with a GitHub remote that was never audited (read from the cached result: no scan and no network call at session start). Outside a workspace it recognises existing Kaggle work (`kernel-metadata.json`, competition URLs) and suggests `/kg-adopt <slug>` |
-| UserPromptSubmit | Detects competition work and tells Claude which 1–3 plugin skills to load before it answers. In evals this took skill use on Kaggle questions from 0 % to 100 % |
+| UserPromptSubmit | Detects competition work and tells Claude which 1–3 plugin skills to load before it answers. In evals this took skill use on Kaggle questions from 0 % to 100 %. For a slash-only command it cannot load ("show my work" after the deadline → `/kg-showcase`), it tells Claude to suggest the command |
 | PreToolUse (Bash/PowerShell) | **Denies** commands that would print Kaggle credentials: a file reader on `kaggle.json`, `~/.kaggle/access_token` or `credentials.json`, Python that prints more than their `username` field, `KAGGLE_KEY` / `KAGGLE_API_TOKEN`, `kaggle auth print-access-token`, and Kaggle CLI calls with `VERBOSE` on (the CLI then prints the bearer token); text that only mentions those files passes, and `kgkit whoami` gives the username. **Denies** a `kaggle datasets create / version` or `kaggle models instances ... create` whose folder holds credential-like files (`.env`, `kaggle.json`, `access_token`, keys) or links outside it. **Denies** each `kaggle competitions submit` in a command whose file fails validation against `sample_submission` (header, rows, ids, NaNs, index column written by mistake). **Asks** when the same file (SHA-256) was already submitted, when the command's submits would go over today's budget, or when Kaggle reported fewer submissions left today for the team than the command makes. A submit quoted in a heredoc that is only text (an issue body `cat` saves, a commit message for `git` or `gh`) is not read as one |
 | PreToolUse (GPU/TPU push) | **Asks** before each GPU or TPU `kaggle kernels push` in a command when the cached weekly quota of that accelerator, minus kernels still running, is exhausted or smaller than the push's `-t` cap |
 | PostToolUse | Logs each submit in a command that Kaggle replied to, its replies matched in output order (a submit in a loop once per reply; one with no reply, quoted in text or after a step that failed, is not logged unless the command runs in the background), with the file's SHA-256 and the team's remaining count Kaggle printed after it, and reminds Claude to fetch the public score and attach it to the ledger (for code competitions: grading reruns the notebook and takes hours, estimated from its measured runtime). Explains a refused submit (`400 Bad Request`, usually `FAILED_PRECONDITION` from a non-versioned dataset). Points out the Kaggle CLI's failures that exit 0 (`Dataset version creation error`, `Kernel push error`, `Could not submit to competition`). Explains a refused kernel push (a `400` from `SaveKernel`, which the CLI prints without Kaggle's reason), naming a machine shape Kaggle does not take or a source of 1 MB or more, and names the inputs Kaggle left out of a push it accepted (the run starts without them). Logs every GPU/TPU kernel push in a command so quota accounting includes them (a re-push replaces the kernel's older reservation; a push whose folder it cannot tell, after a `cd` with a variable or in a loop, is reported instead of logged; a push in a command running in the background is logged as pending, its whole cap reserved, until `kgkit gpu status` or `gpu wait` sees Kaggle run it) |
@@ -303,7 +306,7 @@ Repository layout:
 .claude-plugin/marketplace.json        marketplace manifest (this repo is installable)
 plugins/kaggle-grandmaster/
   .claude-plugin/plugin.json
-  skills/<name>/SKILL.md               21 knowledge skills + 17 kg-* commands
+  skills/<name>/SKILL.md               21 knowledge skills + 18 kg-* commands
   agents/*.md                          9 subagents
   hooks/                               hooks.json, run.sh launcher, stdlib-only Python hooks
   kgkit/                               the toolkit (python -m kgkit) and the remote GPU kernel runner
@@ -333,7 +336,8 @@ repository's name is sent; `--offline` (or `KGKIT_OFFLINE=1`) skips it.
   your workspace's `src/`, `kgkit`, `competition.json` and `data/folds.csv`. `kaggle kernels status /
   logs / output` fetch its results, and `kaggle quota` reads your weekly GPU quota.
 - Code-competition notebooks and model weights (`/kg-kernel`): `kaggle kernels push` and
-  `kaggle datasets create / version`, private unless you make them public.
+  `kaggle datasets create / version`, private unless you make them public. After the deadline
+  `/kg-showcase` audits them and asks before making any of them public.
 - Public notebooks: `kaggle kernels list / pull` (`kgkit kernels top / pull`).
 - Forums: `kaggle competitions topics` / `topic-messages` (CLI 2.2.4+), and for finished competitions
   `kaggle datasets download kaggle/meta-kaggle`, Kaggle's public forum export (`kgkit discussions --source meta`).

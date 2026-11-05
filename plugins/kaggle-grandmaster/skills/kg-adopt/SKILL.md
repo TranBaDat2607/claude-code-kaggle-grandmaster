@@ -2,10 +2,42 @@
 name: kg-adopt
 description: Adopt an existing mid-competition Kaggle repo in place — write .kaggle-gm/ (competition facts), import the past Kaggle submissions and the experiments the repo already tracks, mark the accepted baseline — so the hooks, budget checks and kgkit work. Use instead of kg-start when the competition work already exists (kernel folders, an experiment log, a validation set).
 argument-hint: [competition-slug]
-allowed-tools: [Read, Glob, Grep]
+allowed-tools:
+  - Read
+  - Glob
+  - Grep
+  - 'Bash(PYTHONPATH="${CLAUDE_PLUGIN_ROOT}" python -m kgkit adopt *)'
+  - 'Bash(python -m kgkit adopt *)'
+  - 'PowerShell(python -m kgkit adopt *)'
+  - 'Bash(PYTHONPATH="${CLAUDE_PLUGIN_ROOT}" python -m kgkit audit-repo *)'
+  - 'Bash(python -m kgkit audit-repo *)'
+  - 'PowerShell(python -m kgkit audit-repo *)'
+  - 'Bash(PYTHONPATH="${CLAUDE_PLUGIN_ROOT}" python -m kgkit config *)'
+  - 'Bash(python -m kgkit config *)'
+  - 'PowerShell(python -m kgkit config *)'
+  - 'Bash(PYTHONPATH="${CLAUDE_PLUGIN_ROOT}" python -m kgkit ledger *)'
+  - 'Bash(python -m kgkit ledger *)'
+  - 'PowerShell(python -m kgkit ledger *)'
+  - 'Bash(PYTHONPATH="${CLAUDE_PLUGIN_ROOT}" python -m kgkit metrics *)'
+  - 'Bash(python -m kgkit metrics *)'
+  - 'PowerShell(python -m kgkit metrics *)'
+  - 'Bash(PYTHONPATH="${CLAUDE_PLUGIN_ROOT}" python -m kgkit status *)'
+  - 'Bash(python -m kgkit status *)'
+  - 'PowerShell(python -m kgkit status *)'
+  - 'Bash(PYTHONPATH="${CLAUDE_PLUGIN_ROOT}" python -m kgkit whoami *)'
+  - 'Bash(python -m kgkit whoami *)'
+  - 'PowerShell(python -m kgkit whoami *)'
+  - 'Bash(kaggle competitions list *)'
+  - 'PowerShell(kaggle competitions list *)'
+  - 'Bash(kaggle competitions submissions *)'
+  - 'PowerShell(kaggle competitions submissions *)'
 ---
 
 # /kg-adopt — adopt an existing competition repo
+
+Run kgkit with the Bash tool, as `PYTHONPATH="${CLAUDE_PLUGIN_ROOT}" python -m kgkit <command>`: this command
+pre-approves that form for the kgkit calls it makes. Submitting, pushing or publishing still asks (so does a
+PowerShell `$env:` assignment).
 
 Arguments: `$ARGUMENTS` (competition slug; optional when the repo's `kernel-metadata.json` or README names it).
 
@@ -60,7 +92,9 @@ does around the existing work: submission logging and the daily budget, the sess
    - with a score only: `python -m kgkit ledger add <name> <cv> <notes>`;
    - with no validation score at all (a fork of public notebooks, a blend with public files):
      `python -m kgkit ledger add <name> lb-only <notes>`, then attach its public score.
-   Attach public scores you can match to a submission with `python -m kgkit ledger lb <id> <score>`.
+   Attach public scores: `python -m kgkit ledger sync-lb` attaches them to every record a submission's
+   description or file name gives the ledger id of (`--dry-run` first). Attach the rest you can match by hand with
+   `python -m kgkit ledger lb <id> <score>`.
    Mark the model the user currently builds on with `python -m kgkit ledger decide <id> baseline`.
    Do not invent numbers: skip an experiment whose CV you cannot find, and say so.
 5. **Folds.** If the repo has a fixed validation split, point to it (or export it as `data/folds.csv`

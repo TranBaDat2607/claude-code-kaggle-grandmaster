@@ -2,11 +2,52 @@
 name: kg-gpu
 description: Run training on Kaggle's GPUs within the weekly quota — plan the GPU budget, screen ideas on one fold (two per 2xT4 session, with pruning), promote winners to full-fold remote runs, resume timed-out runs, collect results into the ledger with GPU-hour accounting.
 argument-hint: "[plan | screen <idea> [<idea2>] | run <experiment> | resume <kernel> | status | collect <kernel>]"
-allowed-tools: [Read, Glob, Grep, Agent]
+allowed-tools:
+  - Read
+  - Glob
+  - Grep
+  - Agent
+  - 'Bash(PYTHONPATH="${CLAUDE_PLUGIN_ROOT}" python -m kgkit gpu quota *)'
+  - 'Bash(python -m kgkit gpu quota *)'
+  - 'PowerShell(python -m kgkit gpu quota *)'
+  - 'Bash(PYTHONPATH="${CLAUDE_PLUGIN_ROOT}" python -m kgkit gpu plan *)'
+  - 'Bash(python -m kgkit gpu plan *)'
+  - 'PowerShell(python -m kgkit gpu plan *)'
+  - 'Bash(PYTHONPATH="${CLAUDE_PLUGIN_ROOT}" python -m kgkit gpu build *)'
+  - 'Bash(python -m kgkit gpu build *)'
+  - 'PowerShell(python -m kgkit gpu build *)'
+  - 'Bash(PYTHONPATH="${CLAUDE_PLUGIN_ROOT}" python -m kgkit gpu status *)'
+  - 'Bash(python -m kgkit gpu status *)'
+  - 'PowerShell(python -m kgkit gpu status *)'
+  - 'Bash(PYTHONPATH="${CLAUDE_PLUGIN_ROOT}" python -m kgkit gpu wait *)'
+  - 'Bash(python -m kgkit gpu wait *)'
+  - 'PowerShell(python -m kgkit gpu wait *)'
+  - 'Bash(PYTHONPATH="${CLAUDE_PLUGIN_ROOT}" python -m kgkit gpu collect *)'
+  - 'Bash(python -m kgkit gpu collect *)'
+  - 'PowerShell(python -m kgkit gpu collect *)'
+  - 'Bash(PYTHONPATH="${CLAUDE_PLUGIN_ROOT}" python -m kgkit gpu release *)'
+  - 'Bash(python -m kgkit gpu release *)'
+  - 'PowerShell(python -m kgkit gpu release *)'
+  - 'Bash(PYTHONPATH="${CLAUDE_PLUGIN_ROOT}" python -m kgkit gpu log *)'
+  - 'Bash(python -m kgkit gpu log *)'
+  - 'PowerShell(python -m kgkit gpu log *)'
+  - 'Bash(PYTHONPATH="${CLAUDE_PLUGIN_ROOT}" python -m kgkit backlog *)'
+  - 'Bash(python -m kgkit backlog *)'
+  - 'PowerShell(python -m kgkit backlog *)'
+  - 'Bash(PYTHONPATH="${CLAUDE_PLUGIN_ROOT}" python -m kgkit ledger *)'
+  - 'Bash(python -m kgkit ledger *)'
+  - 'PowerShell(python -m kgkit ledger *)'
+  - 'Bash(PYTHONPATH="${CLAUDE_PLUGIN_ROOT}" python -m kgkit status *)'
+  - 'Bash(python -m kgkit status *)'
+  - 'PowerShell(python -m kgkit status *)'
 disable-model-invocation: true
 ---
 
 # /kg-gpu: quota-aware remote training
+
+Run kgkit with the Bash tool, as `PYTHONPATH="${CLAUDE_PLUGIN_ROOT}" python -m kgkit <command>`: this command
+pre-approves that form for the kgkit calls it makes. Submitting, pushing or publishing still asks (so does a
+PowerShell `$env:` assignment).
 
 Request: `$ARGUMENTS` (default: `plan`).
 
