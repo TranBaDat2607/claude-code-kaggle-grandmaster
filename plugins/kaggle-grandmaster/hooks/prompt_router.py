@@ -7,7 +7,9 @@ skills by keyword and tells Claude to load them first. Unrelated prompts produce
 
 Only user-typed prompts are routed: harness-injected text (goal check-ins, task notifications) is
 ignored. Each skill is suggested at most once per session (state kept in the temp dir, keyed by
-session_id), and inside a workspace whose task is known, other domains' skills are not suggested.
+session_id), and inside a workspace whose task is known, other domains' skills are not suggested. After the
+deadline a prompt with no keyword hit loads kg-postmortem rather than the playbook; on the deadline's own day,
+while fewer finals are selected than allowed, every session hears once how many are (``finals.last_day_line``).
 
 A slash-only command (``disable-model-invocation``) cannot be loaded by Claude, so its route (HINTS) adds a line
 telling Claude to suggest the command to the user instead.
@@ -93,7 +95,7 @@ HINTS: list[tuple[str, str, str]] = [
      r"make (it|my|our|the|this) (repo|repository|notebook|code|work|solution|weights)? ?public|"
      r"publish (my|our|the) (solution|work|code|notebook|weights|repo)|(my|our) (kaggle )?write-?up|"
      r"write (a|my|our|the) (kaggle )?(solution )?write-?up|"
-     r"(update|polish|tidy|clean up|rebuild) (my|our|the) (repo|repository|readme|project)\b",
+     r"(update|polish|tidy|clean up|rebuild) ((my|our|the) )?(repo|repository|readme|project)\b",
      "To show the work after the competition (README rebuilt around the result, own work separated from public "
      "work, license, figures, a public notebook and weights, a Kaggle write-up draft), suggest the user run "
      "`/kg-showcase`, a slash command: it audits the repo first and asks before each public step. Make nothing "
@@ -115,7 +117,9 @@ def hints(prompt: str, in_workspace: bool) -> list[str]:
     return [name for name, rx, _ in COMPILED_HINTS if rx.search(prompt)]
 
 
-def route(prompt: str, in_workspace: bool, task: str = "") -> list[str]:
+def route(prompt: str, in_workspace: bool, task: str = "", ended: bool = False) -> list[str]:
+    """Skills to load for this prompt. With no keyword hit, the playbook; after the deadline (``ended``) the
+    post-mortem instead, since the playbook's mid-competition loop no longer applies."""
     if not (GATE.search(prompt) or in_workspace):
         return []
     own = TASK_DOMAIN.get(task.strip().lower())
@@ -132,7 +136,7 @@ def route(prompt: str, in_workspace: bool, task: str = "") -> list[str]:
     chosen = sorted((name for _, name in top), key=lambda n: order[n])
     if chosen or hints(prompt, in_workspace):  # a slash command to suggest is answer enough without the fallback
         return chosen
-    return ["grandmaster-playbook"]
+    return ["kg-postmortem" if ended else "grandmaster-playbook"]
 
 
 def _seen_file(payload: dict) -> Path | None:
@@ -159,14 +163,13 @@ def _remember(path: Path | None, skills: set[str]) -> None:
         pass
 
 
-def _task(root: Path | None) -> str:
+def _state(root: Path | None):
     if root is None:
-        return ""
+        return None
     try:
-        state = C.S.load(root)
+        return C.S.load(root)
     except (OSError, ValueError, TypeError):
-        return ""
-    return state.task if state else ""
+        return None
 
 
 def main() -> None:
@@ -177,14 +180,21 @@ def main() -> None:
     if HARNESS.search(prompt):
         return  # goal check-ins and task notifications are not the user asking
     root = C.workspace(payload)
+    st = _state(root)
+    days = C.S.deadline_days(st) if st is not None else None
     seen_file = _seen_file(payload)
     seen = _seen(seen_file)
-    skills = [s for s in route(prompt, root is not None, _task(root)) if s not in seen]
+    skills = [s for s in route(prompt, root is not None, st.task if st else "", days is not None and days < 0)
+              if s not in seen]
     suggest = [h for h in hints(prompt, root is not None) if f"hint:{h}" not in seen]
-    if not (skills or suggest):
+    last_day = C.FN.last_day_line(st) if st is not None else ""
+    last_key = f"last-day:{st.deadline}" if last_day else ""
+    if last_key in seen:  # once per session, whatever the prompt
+        last_day = ""
+    if not (skills or suggest or last_day):
         return
-    _remember(seen_file, seen | set(skills) | {f"hint:{h}" for h in suggest})
-    lines = []
+    _remember(seen_file, seen | set(skills) | {f"hint:{h}" for h in suggest} | ({last_key} if last_day else set()))
+    lines = [f"[kaggle-grandmaster] {last_day}"] if last_day else []
     if skills:
         names = ", ".join(f"kaggle-grandmaster:{s}" for s in skills)
         lines.append(f"[kaggle-grandmaster] This is competition work. Before answering, load these skills with the "

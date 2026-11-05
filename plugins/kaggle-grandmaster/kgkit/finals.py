@@ -14,8 +14,10 @@ confirmed, because nothing has asked Kaggle. ``kgkit final`` asks Kaggle what is
 silences the warning.
 
 After the deadline ``kgkit final`` reports the outcome instead (``outcome``): the finals or the pool Kaggle picked
-from, with their private scores, the best private score of any submission and the team's rank. ``link_scores``
-matches Kaggle's scored submissions to ledger records for ``kgkit ledger sync-lb``.
+from, with their private scores, the best private score of any submission and the team's rank, and caches those
+facts in ``.kaggle-gm/standing.json`` (``standing``) for the session brief's after-the-deadline checklist
+(``ended_lines``). ``last_day_line`` is the prompt router's reminder on the deadline's day. ``link_scores`` matches
+Kaggle's scored submissions to ledger records for ``kgkit ledger sync-lb``.
 
 Kaggle has an API to list the selected submissions, none to select them: only the website does.
 
@@ -561,6 +563,15 @@ def _names(views: list[dict], most: int = 6) -> str:
     return ", ".join(names[:most]) + (f" and {len(names) - most} more" if len(names) > most else "")
 
 
+def _auto_heading(n: int, auto: list) -> str:
+    """What Kaggle did with no finals selected: it took the best public scores, and among files tied at the cut its
+    API does not say which."""
+    if len(auto) > n:
+        return (f"Competition ended; no finals were selected, so Kaggle auto-selected from the {n} best public "
+                f"score(s): {len(auto)} tie at the cut, and Kaggle's API can't tell which of the tied ones it took")
+    return f"Competition ended; no finals were selected, so Kaggle auto-selected the {n} best public score(s)"
+
+
 def outcome(st: S.CompetitionState, recs: list[dict], data: dict) -> tuple[list[str], list[str] | None]:
     """The text of ``kgkit final`` once the competition has ended, and the ids to record as ``final_picks`` (None
     when nothing was selected): the finals, or the pool Kaggle picked from when nobody selected, with their private
@@ -575,6 +586,7 @@ def outcome(st: S.CompetitionState, recs: list[dict], data: dict) -> tuple[list[
     end = S.deadline_date(st)
     out = [f"The competition has ended{f' ({end.isoformat()})' if end else ''}. Kaggle lists {len(scored)} scored "
            f"submission(s) for {st.slug}; {len(selected)} selected as finals."]
+    auto = [] if selected else _top(scored, n, greater)
     privates = [v for v in views if v["private"] is not None]
     if not privates:
         out.append("No private scores yet: Kaggle shows them once the private leaderboard is final (a code "
@@ -582,6 +594,8 @@ def outcome(st: S.CompetitionState, recs: list[dict], data: dict) -> tuple[list[
                    "again then.")
         if selected:
             out += [f"Selected as finals ({len(selected)} of {n}):", *(_row_text(v) for v in selected)]
+        else:
+            out += [_auto_heading(n, auto) + ":", *(_row_text(v) for v in auto)]
         return out, picks
     out += standing_lines(data)
     on_board = team_score(data)
@@ -591,10 +605,7 @@ def outcome(st: S.CompetitionState, recs: list[dict], data: dict) -> tuple[list[
         final = better(got) if got else None
         out.append(f"Kaggle scores a team by the best private score among its finals: {_fmt(final)}.")
     else:
-        auto = _top(scored, n, greater)
-        ties = f"; {len(auto)} tie at the cut" if len(auto) > n else ""
-        out += [f"Nothing was selected, so Kaggle picked the finals itself among the {n} best public score(s){ties} "
-                "(public / private):", *(_out_row(v) for v in auto)]
+        out += [_auto_heading(n, auto) + " (public / private):", *(_out_row(v) for v in auto)]
         final = on_board
         if on_board is not None:
             hit = [v for v in auto if v["private"] is not None and abs(v["private"] - on_board) < 1e-9]
@@ -622,3 +633,158 @@ def outcome(st: S.CompetitionState, recs: list[dict], data: dict) -> tuple[list[
                  f" The finals scored {_fmt(final)}, {gap:.5f} short of it.")
     out.append(line)
     return out, picks
+
+
+# ---------------------------------------------------------------------------- what the session brief says after the end
+STANDING = "standing.json"  # the outcome `kgkit final` last read after the deadline, for the session brief
+POSTMORTEM = Path("reports") / "postmortem.md"
+
+
+def standing_path(root) -> Path:
+    return Path(root) / S.STATE_DIR / STANDING
+
+
+def standing(st: S.CompetitionState, recs: list[dict], data: dict) -> dict:
+    """The facts of ``outcome`` the session brief repeats, without asking Kaggle again: what was selected (or the
+    pool Kaggle auto-selected from), and the team's rank, score and medal zone once the private leaderboard is out."""
+    index = _index([r for r in recs if isinstance(r, dict)])
+    n, greater = _picks(st), st.greater_is_better
+    views = [_view(index, r) for r in data.get("scored") or ()]
+    scored = sorted((v for v in views if v["score"] is not None), key=lambda v: v["score"], reverse=greater)
+    selected = [_short(_view(index, r)) for r in data.get("selected") or ()]
+    auto = [] if selected else [_short(v) for v in _top(scored, n, greater)]
+    shown = _board(data)[0]
+    rank, scores = _rank(shown)
+    private, complete = revealed(data), bool(shown.get("complete"))
+    medal = None
+    if private and complete and rank:
+        cut = medal_cutoffs(len(scores))
+        medal = next((m for m in ("gold", "silver", "bronze") if rank <= cut[m]), "no medal")
+    return {"slug": st.slug, "at": dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"), "n": n,
+            "selected": selected, "auto": auto, "tied": len(auto) > n, "private": private, "board_read": bool(shown),
+            "rank": rank, "teams": len(scores), "complete": complete, "score": scores[rank - 1] if rank else None,
+            "medal": medal}
+
+
+def save_standing(root, st: S.CompetitionState, recs: list[dict], data: dict) -> None:
+    """Cache ``standing`` in ``.kaggle-gm/standing.json``. Never raises."""
+    try:
+        p = standing_path(root)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(json.dumps(standing(st, recs, data), indent=1), encoding="utf-8")
+    except Exception:
+        pass
+
+
+def load_standing(root, slug: str) -> dict | None:
+    try:
+        d = json.loads(standing_path(root).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return d if isinstance(d, dict) and d.get("slug") == slug else None
+
+
+def _standing_line(c: dict | None) -> str:
+    if c is None:
+        return "Final standing: not read yet: `python -m kgkit final` reads it once the private leaderboard is out."
+    when = str(c.get("at") or "")[:10]
+    if not c.get("private"):
+        return (f"Final standing: the private leaderboard was not out at the last check ({when}): run "
+                "`python -m kgkit final` again.")
+    rank, teams = c.get("rank"), c.get("teams")
+    if not c.get("board_read"):
+        return (f"Final standing: private scores are out, but the leaderboard was not read ({when}): run "
+                "`python -m kgkit final` again.")
+    if not isinstance(rank, int) or not isinstance(teams, int) or not teams:
+        return f"Final standing: the team is not on the private leaderboard (`kgkit final` of {when})."
+    medal = c.get("medal")
+    zone = ("" if not medal else ", outside the medal zones by Kaggle's table (computed)" if medal == "no medal"
+            else f", {medal} zone by Kaggle's table (computed)")
+    count = f"{teams:,}" if c.get("complete") else f"at least {teams:,}"
+    return (f"Final standing: private rank {rank:,} of {count} teams (top {100 * rank / teams:.1f}%), score "
+            f"{_fmt(_num(c.get('score')))}{zone} (`kgkit final` of {when}).")
+
+
+def _finals_line(st: S.CompetitionState, c: dict | None) -> str:
+    if c is not None:
+        sel = [str(x) for x in c.get("selected") or ()]
+        if sel:
+            return f"Finals: {len(sel)} of {c.get('n') or _picks(st)} selected on Kaggle: {', '.join(sel)}."
+        auto = [str(x) for x in c.get("auto") or ()]
+        if not auto:
+            return "Finals: none were selected, and Kaggle listed no public score to auto-select from."
+        return (f"Finals: none were selected, so Kaggle auto-selected from {', '.join(auto)}"
+                + (" (tied at the cut: the API can't tell which it took)." if c.get("tied") else "."))
+    picks = [str(p) for p in st.final_picks or ()]
+    if picks and st.final_picks_confirmed:
+        return (f"Finals: {', '.join(picks)} selected on Kaggle (checked {st.final_picks_confirmed}): "
+                "`python -m kgkit final` reports how they did.")
+    return ("Finals: not checked since the deadline: `python -m kgkit final` says what was selected, or what Kaggle "
+            "auto-selected.")
+
+
+def _repo_line(root: Path) -> str:
+    from . import audit  # stdlib-only too; imported here so the tool hooks, which import this module, never load it
+
+    c = audit.load_cache(root)
+    if c is None:
+        return ("Repo: not audited for competition data: `python -m kgkit audit-repo` before anything goes public "
+                "(/kg-showcase runs it).")
+    vis = {True: "the repo is PUBLIC", False: "the repo is not public"}.get(c.get("public"), "visibility unknown")
+    leaks, checks = c.get("leaks") or [], c.get("checks") or []
+    found = (f"found competition data in git ({len(leaks)} file(s), see the warning below)" if leaks else
+             f"found no copies, and {len(checks)} judgment call(s) to review (`python -m kgkit audit-repo`)" if checks
+             else "found no competition data")
+    return f"Repo: {vis}; audit of {str(c.get('at') or '')[:10]} {found}."
+
+
+def _lessons_line(slug: str) -> str:
+    p = Path.home() / ".kaggle-gm" / "lessons.md"
+    try:
+        text = p.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        text = ""
+    if slug and slug.lower() in text.lower():
+        return "Lessons: appended to ~/.kaggle-gm/lessons.md."
+    return f"Lessons: none for {slug} in ~/.kaggle-gm/lessons.md yet (/kg-postmortem appends them)."
+
+
+def ended_lines(root, st: S.CompetitionState) -> list[str]:
+    """The session brief after the deadline: what is left to do now that the CV, submission and GPU checks no longer
+    matter. The standing and finals come from the last ``kgkit final`` (``standing.json``); the post-mortem, the repo
+    audit and the lessons from the files those steps write. No network. Never raises."""
+    root = Path(root)
+    out = ["After the competition (the CV, submission and GPU checks are off):"]
+    c = load_standing(root, st.slug)
+    for build in (lambda: _standing_line(c), lambda: _finals_line(st, c),
+                  lambda: "Post-mortem: reports/postmortem.md " + ("written." if (root / POSTMORTEM).is_file() else
+                                                                   "not written yet: run /kg-postmortem."),
+                  lambda: _repo_line(root), lambda: _lessons_line(st.slug)):
+        try:  # one malformed cache costs its own line, not the brief
+            out.append("  - " + build())
+        except Exception:
+            continue
+    return out
+
+
+def last_day_line(st: S.CompetitionState) -> str:
+    """On the deadline's own day (UTC), how many finals are selected on Kaggle as kgkit last read it, while fewer than
+    the allowed number are: the prompt router repeats it once per session, so a session that began days earlier still
+    hears it. Empty otherwise. Never raises."""
+    try:
+        if S.deadline_days(st) != 0:
+            return ""
+        n = _picks(st)
+        picks = [str(p) for p in st.final_picks or ()]
+        confirmed = st.final_picks_confirmed if picks and isinstance(st.final_picks_confirmed, str) else ""
+        k = len(picks) if confirmed else 0
+        if k >= n:
+            return ""
+        how = f"checked {confirmed}, `python -m kgkit final` checks again" if confirmed else "`python -m kgkit final`"
+        intended = f" Intended picks (NOT confirmed on Kaggle): {', '.join(picks)}." if picks and not confirmed else ""
+        return (f"Last day (deadline {utc_deadline(st)}): {k} of {n} finals selected on Kaggle ({how}). Unselected "
+                f"slots go to Kaggle's auto-selection by public score. Kaggle has no API to select them: tell the user "
+                f"to tick them on the website, {URL.format(slug=st.slug)}, then run `python -m kgkit final` to read the "
+                f"selection back.{intended}")
+    except Exception:
+        return ""
