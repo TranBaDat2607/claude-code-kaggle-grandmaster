@@ -3,7 +3,9 @@
 **A Claude Code plugin that helps you win Kaggle competitions.** Install it and Claude works the way a
 Kaggle Grandmaster does. It builds validation you can trust, runs and logs many small experiments,
 ensembles honestly, packages offline notebooks for code competitions and picks final submissions
-that hold up on the private leaderboard.
+that hold up on the private leaderboard. A pane beside the chat (`/kaggle-monitor`) shows your running
+Kaggle kernels' live CPU, GPU, RAM and disk, the GPU/TPU quota of every account you register, and lets
+you switch between Kaggle accounts, so you don't have to keep Kaggle open in a browser.
 
 [![tests](https://github.com/TranBaDat2607/claude-code-kaggle-grandmaster/actions/workflows/tests.yml/badge.svg)](https://github.com/TranBaDat2607/claude-code-kaggle-grandmaster/actions/workflows/tests.yml)
 ![Claude Code plugin](https://img.shields.io/badge/Claude%20Code-plugin-d97757)
@@ -105,9 +107,10 @@ when no other plugin uses the same name.
 | **Slash commands** | 18 | `kg-start`, `kg-adopt`, `kg-recon`, `kg-eda`, `kg-cv`, `kg-baseline`, `kg-experiment`, `kg-grind`, `kg-gpu`, `kg-ensemble`, `kg-submit`, `kg-status`, `kg-kernel`, `kg-final`, `kg-debug`, `kg-ideas`, `kg-postmortem`, `kg-showcase` |
 | **Specialist agents** | 9 | competition-analyst, solution-researcher, data-detective, validation-auditor, feature-engineer, experiment-runner, error-analyst, ensemble-architect, kernel-packager |
 | **Hooks** | 4 | session brief (incl. GPU quota), Kaggle-prompt → skill router, submission + GPU-push + upload guard (validation, repeated files, daily budget, weekly GPU quota, credential protection), submission / GPU-run logger |
+| **Kaggle pane** | 1 mod | `/kaggle-monitor`: running kernels with live CPU / GPU / RAM / disk and what each GPU is doing, recent kernels and submissions, GPU/TPU quota for every account, multi-account token management ([below](#kaggle-pane-kaggle-monitor)) |
 | **`kgkit` toolkit** | 23 modules | Tested Python: leak-free folds, 35+ metrics, threshold/rounding optimisers, hill climbing / multi-level and residual stacking / library pruning, adversarial validation, leak-safe features, brute-force feature search, EDA red flags, experiment ledger with decisions + lineage, paired experiment comparison, fresh-split recheck, idea backlog, public-notebook review, competition pages and discussions, submission validation, Kaggle GPU/TPU pipeline, dataset download with per-file fallback, upload and third-party-text safety |
-| **Templates** | 4 + metadata | Tabular (LightGBM/XGBoost/CatBoost/HGB + linear/kNN/SVM/MLP), timm image models, HF transformers (both resumable), offline inference kernel |
-| **Evals** | 15 cases | `claude plugin eval` suite with a no-plugin baseline arm |
+| **Templates** | 5 + metadata | Tabular (LightGBM/XGBoost/CatBoost/HGB + linear/kNN/SVM/MLP), timm image models, HF transformers (both resumable), offline inference kernel, Kaggle-pane monitor cell for any notebook |
+| **Evals** | 43 cases | `claude plugin eval` suite with a no-plugin baseline arm |
 
 ## How a competition flows
 
@@ -162,6 +165,28 @@ artifacts/<exp_id>/           oof.npy + test.npy, the inputs for ensembling
 Hooks never block for any other reason. They exit 0 on internal errors, and Python only starts
 for commands that mention Kaggle (or `VERBOSE`), which keeps overhead around 70 ms. Relative paths
 (`-p`, `-f`) are read from the folder the command's own `cd` steps lead to at that point.
+
+## Kaggle pane (`/kaggle-monitor`)
+
+The plugin also ships a mod, `hooks/monitor/`: a TypeScript hooks module that Claude Code loads beside the Python
+hooks and that opens a pane beside the chat, so you do not have to keep Kaggle open in a browser. Run
+`/kaggle-monitor` (or `/kaggle-monitor quota`, `accounts`, `use <alias>`, `refresh`); in a competition workspace it
+opens by itself. Keys: `1` `2` `3` switch tabs, `r` refreshes.
+
+| Tab | Shows |
+|---|---|
+| Activity | Every kernel running on any registered account, with its session's live CPU, RAM, each GPU and disk, what it is doing (job and fold on each GPU) and its newest log line; the other kernels of the last 24 h (running blue, complete green, failed red); the workspace's latest submissions and scores. A notification when a kernel finishes or a submission is scored. `c` opens *This computer*: local CPU, RAM, disk, NVIDIA GPUs and your training processes, each described from its command line |
+| Quotas | GPU and TPU hours used and left, and the reset time, for every account, and the total across them |
+| Accounts | The accounts of `~/.kaggle/kg_accounts.json`: **Use** points this session's Kaggle CLI and kgkit at that account's token file (`KAGGLE_API_TOKEN`), tells Claude which account it is, and is remembered for the next session; **Add** checks a pasted API token (or a token file) with Kaggle, then saves it to `~/.kaggle/access_token_<alias>`, readable by you alone; the registry holds only paths. Where the Kaggle CLI is, found from its install without contacting Kaggle |
+
+Kaggle's API reports no resources of a running session, so the kernel prints them: kernels built by
+`kgkit gpu build` print a `[kgmon] {...}` line every 30 s (`KG_MONITOR_S`, `0` turns it off), and for any other
+notebook paste `templates/kaggle_monitor_cell.py` as its first cell (`kgmon_doing("fold 2")` adds what it is doing).
+The pane follows each running kernel's live log (`kaggle kernels logs -f`, Kaggle CLI 2.2 or later). Only batch runs
+(Save Version, `kaggle kernels push`) have a log the API streams; an interactive editor session does not.
+
+Mods need a Claude Code release that loads hooks modules; elsewhere the pane is simply absent and the rest of the
+plugin works as before.
 
 ## `kgkit` toolkit
 
@@ -218,6 +243,7 @@ multi_level_stack / residual_stack / prune_library`; `kgkit.compare.compare_fold
 | `train_image.py` | timm; AMP (bf16/fp16), EMA, cosine warmup, head LR multiplier, hflip TTA; `--folds` lets you split folds across GPUs, and the run that completes the set logs the experiment; checkpoints before a session deadline and resumes, learning-curve pruning, `--assemble` |
 | `train_transformer.py` | HF AutoModel with mean/attention/CLS pooling, layer-wise LR decay, gradient accumulation, several evaluations per epoch, length-sorted inference, offline-model friendly; same deadline/resume/pruning/`--assemble` support |
 | `kgkit/kaggle_gpu_runner.py` | filled in by `kgkit gpu build`, and part of the package so that a vendored kgkit (`kgkit vendor src`) builds kernels too: the kernel that runs your training command on Kaggle (code bundle embedded, inputs linked into `data/` or one folder each, one (job, fold) per GPU, deadline, resume, assembly, `kg_run.json` report) |
+| `kaggle_monitor_cell.py` | the first cell for a notebook kgkit did not build: prints the session's CPU, RAM, disk and GPUs as `[kgmon]` lines for the Kaggle pane |
 | `inference_kernel.py` + `kernel/*.json` | offline Kaggle kernel: runtime test discovery, offline wheels, time-budgeted ensemble members with fallback, output validation; metadata with internet off |
 
 ## Training on Kaggle GPUs
@@ -270,9 +296,11 @@ What it does for you:
 
 ## Verification
 
-- **147 pytest tests** (one runs only when LightGBM is installed) cover kgkit (including paired comparisons, the backlog, feature search, multi-level/residual stacking, notebook review, competition pages, upload checks and repo adoption), all templates end to end (tiny synthetic data, plus an
+- **614 pytest tests** (one runs only when LightGBM is installed) cover kgkit (including paired comparisons, the backlog, feature search, multi-level/residual stacking, notebook review, competition pages, upload checks and repo adoption), all templates end to end (tiny synthetic data, plus an
   offline tiny BERT), the remote GPU runner executed in a simulated `/kaggle` layout (build, run on two
-  fake GPUs, resume, prune, collect), and the hooks driven through `run.sh` exactly as Claude Code calls them.
+  fake GPUs, resume, prune, collect, `[kgmon]` resource lines), and the hooks driven through `run.sh` exactly as Claude Code calls them.
+  The Kaggle pane's own tests (`claude plugin test`) draw it on the terminal and desktop surfaces and parse the
+  runner's `[kgmon]` lines.
 - **Live Claude Code sessions** confirmed the SessionStart brief and the credential guard
   (tested against a dummy `kaggle.json`).
 - **Real-data dry run** on `playground-series-s6e2` (630k rows, no submission made): EDA 6 s,
@@ -309,6 +337,8 @@ plugins/kaggle-grandmaster/
   skills/<name>/SKILL.md               21 knowledge skills + 18 kg-* commands
   agents/*.md                          9 subagents
   hooks/                               hooks.json, run.sh launcher, stdlib-only Python hooks
+  hooks/monitor/                       the Kaggle pane mod (TypeScript hooks module) and its tests
+  types/index.d.ts                     the pane's state types
   kgkit/                               the toolkit (python -m kgkit) and the remote GPU kernel runner
   templates/                           training / inference templates, CLAUDE.md template
   evals/                               plugin eval suite

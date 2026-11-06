@@ -37,6 +37,8 @@ public).
 - `hooks/`: session brief (accepted baseline, backlog top, GPU quota, competition data in git), prompt→skill router, submission +
   GPU-quota + upload guard (credentials never printed or uploaded, repeated files caught), submission /
   GPU-run logger
+- `hooks/monitor/`: the Kaggle pane (`/kaggle-monitor`), a mod: running kernels with live CPU/GPU/RAM/disk,
+  submissions, GPU/TPU quota of every account, switching the session's Kaggle account
 - `kgkit/`: Python toolkit (`python -m kgkit --help`):
   - experiment loop: `ledger compare` (paired per-fold test + paired noise on stored OOF or holdout
     predictions for any metric, projected to the public LB with `--public-n`), `ledger noise` (one score's
@@ -61,7 +63,7 @@ public).
     compared by content with the competition's files on your machine, and is the GitHub remote public? Run
     by `adopt`; `init` adds `data/` to an existing `.gitignore`
 - `templates/`: tabular (GBDTs + linear / kNN / SVM / MLP), image and transformer training, offline inference
-  kernel, workspace CLAUDE.md
+  kernel, a notebook cell that reports a session's resources to the pane, workspace CLAUDE.md
 - `evals/`: `claude plugin eval` suite (16 cases)
 
 ## Data and network access

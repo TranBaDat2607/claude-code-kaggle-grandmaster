@@ -24,5 +24,6 @@
   ],
   "license": "MIT",
   "homepage": "https://github.com/TranBaDat2607/claude-code-kaggle-grandmaster",
-  "repository": "https://github.com/TranBaDat2607/claude-code-kaggle-grandmaster"
+  "repository": "https://github.com/TranBaDat2607/claude-code-kaggle-grandmaster",
+  "types": "./types/index.d.ts"
 }

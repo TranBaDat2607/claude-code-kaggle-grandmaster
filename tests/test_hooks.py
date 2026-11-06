@@ -340,6 +340,20 @@ def test_prompt_router_after_the_deadline(plugin_root, tmp_path_factory, ws):
     assert ask("update the README of my React project to show the results", cwd=plain) is None
 
 
+def test_prompt_router_suggests_the_monitor_pane(plugin_root, tmp_path_factory):
+    """Quota, running-kernel and account questions point to /kaggle-monitor, the pane the plugin's mod opens."""
+    plain = tmp_path_factory.mktemp("plain6")
+
+    def ask(prompt):
+        return hook(plugin_root, "prompt_router.py", {"hook_event_name": "UserPromptSubmit", "prompt": prompt,
+                                                      "cwd": str(plain), "session_id": uuid.uuid4().hex})
+
+    for prompt in ("how many GPU hours do I have left on Kaggle?", "is my kaggle kernel still running",
+                   "switch kaggle account to acc2", "what is my Kaggle notebook's GPU usage right now"):
+        assert "`/kaggle-monitor`" in ask(prompt)["additionalContext"], prompt
+    assert ask("monitor my React app's memory usage") is None
+
+
 def test_prompt_router_adopt(plugin_root, tmp_path):
     out = hook(plugin_root, "prompt_router.py", {
         "hook_event_name": "UserPromptSubmit", "cwd": str(tmp_path), "session_id": uuid.uuid4().hex,

@@ -193,11 +193,11 @@ def test_build_kernel(gws):
         G.build_kernel(gws, "fk", _cmd("fk"), hours=1, user="tester", extra_jobs=[("fk", _cmd("fk"))])
 
 
-def _run_kernel(kdir, base, gpus="2"):
+def _run_kernel(kdir, base, gpus="2", **extra):
     meta = json.loads((kdir / "kernel-metadata.json").read_text())
     inp, work = base / "input", base / "working"
     env = dict(os.environ, KAGGLE_INPUT=str(inp), KAGGLE_WORKING=str(work), KG_RUN_DIR=str(base / "run"),
-               KG_FAKE_GPUS=gpus)
+               KG_FAKE_GPUS=gpus, **extra)
     env.pop("PYTHONPATH", None)
     r = subprocess.run([sys.executable, str(kdir / meta["code_file"])], env=env, capture_output=True, text=True,
                        timeout=300)
@@ -239,6 +239,40 @@ def test_runner_end_to_end_and_collect(gws, tmp_path):
     G.collect(gws, "tester/fk-train", from_dir=work)
     assert len(Ledger(gws).records()) == 2
     assert "fk" in G.run_table(gws)
+
+
+def _kgmon(out):
+    return [json.loads(l[len("[kgmon] "):]) for l in out.splitlines() if l.startswith("[kgmon] ")]
+
+
+def test_runner_reports_live_resources(gws, tmp_path):
+    """The session's resources reach the log as [kgmon] JSON lines (the kaggle-monitor pane follows them)."""
+    kdir = G.build_kernel(gws, "fk", _cmd("fk"), hours=2, user="tester")
+    _kaggle_input(tmp_path / "m1", gws)
+    out, _ = _run_kernel(kdir, tmp_path / "m1", KG_MONITOR_S="0.2")
+    mon = _kgmon(out)
+    assert mon, out[-2000:]
+    first = mon[0]
+    assert first["v"] == 1 and first["cores"] >= 1 and isinstance(first["t"], int)
+    assert len(first["disk"]) == 2 and first["disk"][0] <= first["disk"][1]
+    assert "gpus" not in first  # fake GPUs: no nvidia-smi call
+    _kaggle_input(tmp_path / "m2", gws)
+    out, _ = _run_kernel(kdir, tmp_path / "m2", KG_MONITOR_S="0")
+    assert _kgmon(out) == []
+
+
+def test_monitor_cell_prints_the_runner_reading(plugin_root, tmp_path):
+    """The notebook cell prints the same [kgmon] line as the runner, so the pane reads either."""
+    cell = plugin_root / "templates" / "kaggle_monitor_cell.py"
+    assert cell.read_text(encoding="utf-8").isascii()
+    env = dict(os.environ, KAGGLE_WORKING=str(tmp_path))
+    r = subprocess.run([sys.executable, str(cell)], env=env, capture_output=True, text=True, timeout=60)
+    assert r.returncode == 0, r.stderr
+    (snap,) = _kgmon(r.stdout)
+    assert snap["v"] == 1 and len(snap["disk"]) == 2 and snap["cores"] >= 1
+    r = subprocess.run([sys.executable, str(cell)], env=dict(env, KG_MONITOR_S="0"), capture_output=True, text=True,
+                       timeout=60)
+    assert _kgmon(r.stdout) == []
 
 
 def test_runner_resume_skips_done_folds(gws, tmp_path):

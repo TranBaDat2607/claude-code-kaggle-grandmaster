@@ -24,6 +24,10 @@ What it does inside the Kaggle session:
   5. writes kg_run.json (fold statuses, timings, GPU utilisation, ledger records) for
      `python -m kgkit gpu collect`.
 
+While it runs it prints a `[kgmon] {...}` line every KG_MONITOR_S seconds (default 30; 0 turns it off):
+the session's CPU, RAM, disk and each GPU, and which tasks are running. The kaggle-monitor pane follows the
+live log (`kaggle kernels logs -f`) and draws the latest one, since Kaggle's API reports no session resources.
+
 Standard library only. Prints ASCII only.
 """
 
@@ -54,7 +58,8 @@ WEIGHT_SUFFIXES = (".pt", ".pth", ".bin", ".ckpt", ".safetensors")
 
 def log(msg):
     msg = str(msg).encode("ascii", "replace").decode("ascii")  # input file names can be anything
-    print("[kg %6.1fm] %s" % ((time.time() - T0) / 60, msg), flush=True)
+    with OUT_LOCK:
+        print("[kg %6.1fm] %s" % ((time.time() - T0) / 60, msg), flush=True)
 
 
 # ----------------------------------------------------------------------------- inputs
@@ -403,14 +408,147 @@ class UtilSampler(threading.Thread):
         return out
 
 
+# ----------------------------------------------------------------------------- live resources
+MONITOR_TAG = "[kgmon] "
+DOING = {}  # slot -> what it runs ("exp/f2"), read by the reporter
+DOING_LOCK = threading.Lock()
+OUT_LOCK = threading.Lock()  # one writer at a time, so a [kgmon] line is never split by a task's output
+
+
+def emit(text):
+    with OUT_LOCK:
+        sys.stdout.write(text)
+        sys.stdout.flush()
+
+
+def doing(slot, what=None):
+    with DOING_LOCK:
+        if what is None:
+            DOING.pop(slot, None)
+        else:
+            DOING[slot] = what
+
+
+def _read(path):
+    try:
+        with open(path, encoding="ascii", errors="replace") as f:
+            return f.read().strip()
+    except OSError:
+        return None
+
+
+def _cgroup_cpu_us():
+    """CPU time this container has used, in microseconds (cgroup v2, else v1); None outside a cgroup."""
+    stat = _read("/sys/fs/cgroup/cpu.stat")
+    if stat:
+        for line in stat.splitlines():
+            if line.startswith("usage_usec "):
+                return int(line.split()[1])
+    v1 = _read("/sys/fs/cgroup/cpuacct/cpuacct.usage") or _read("/sys/fs/cgroup/cpu,cpuacct/cpuacct.usage")
+    return int(v1) // 1000 if v1 and v1.isdigit() else None
+
+
+def _cores():
+    quota = (_read("/sys/fs/cgroup/cpu.max") or "").split()
+    if len(quota) == 2 and quota[0].isdigit() and int(quota[1] or 0) > 0:
+        return max(1.0, int(quota[0]) / int(quota[1]))
+    try:
+        return float(len(os.sched_getaffinity(0)))
+    except (AttributeError, OSError):
+        return float(os.cpu_count() or 1)
+
+
+def _ram_mb():
+    """[used, limit] in MB: the container's cgroup figures when it has a limit, else /proc/meminfo."""
+    used = _read("/sys/fs/cgroup/memory.current") or _read("/sys/fs/cgroup/memory/memory.usage_in_bytes")
+    limit = _read("/sys/fs/cgroup/memory.max") or _read("/sys/fs/cgroup/memory/memory.limit_in_bytes")
+    mem = {}
+    for line in (_read("/proc/meminfo") or "").splitlines():
+        k, _, v = line.partition(":")
+        if v.split():
+            mem[k] = int(v.split()[0]) * 1024
+    host = mem.get("MemTotal")
+    if used and used.isdigit() and limit and limit.isdigit() and (host is None or int(limit) < host):
+        return [int(used) // 2 ** 20, int(limit) // 2 ** 20]
+    if host and "MemAvailable" in mem:
+        return [(host - mem["MemAvailable"]) // 2 ** 20, host // 2 ** 20]
+    return None
+
+
+def _disk_mb(path):
+    try:
+        du = shutil.disk_usage(str(path))
+        return [du.used // 2 ** 20, du.total // 2 ** 20]
+    except OSError:
+        return None
+
+
+def _gpus():
+    """[[index, util %, memory used MB, memory total MB, name], ...] from nvidia-smi; [] without one."""
+    try:
+        out = subprocess.run(["nvidia-smi", "--query-gpu=index,utilization.gpu,memory.used,memory.total,name",
+                              "--format=csv,noheader,nounits"], capture_output=True, text=True, timeout=20).stdout
+    except (OSError, subprocess.SubprocessError):
+        return []
+    rows = []
+    for line in out.splitlines():
+        p = [x.strip() for x in line.split(",")]
+        if len(p) >= 5 and p[0].isdigit():
+            try:
+                rows.append([int(p[0]), int(float(p[1])), int(float(p[2])), int(float(p[3])),
+                             p[4].encode("ascii", "replace").decode("ascii")])
+            except ValueError:
+                continue
+    return rows
+
+
+def snapshot(prev, has_gpu=True):
+    """One reading: (dict for the [kgmon] line, state for the next CPU delta)."""
+    now, cpu_us = time.time(), _cgroup_cpu_us()
+    snap = {"v": 1, "t": int(now - T0), "cores": round(_cores(), 1)}
+    if cpu_us is not None and prev and prev[1] is not None and now > prev[0]:
+        snap["cpu"] = round(100.0 * (cpu_us - prev[1]) / 1e6 / (now - prev[0]) / snap["cores"], 1)
+    ram = _ram_mb()
+    if ram:
+        snap["ram"] = ram
+    for key, path in (("disk", OUT), ("tmp", RUN.parent if not RUN.exists() else RUN)):
+        d = _disk_mb(path)
+        if d:
+            snap[key] = d
+    if has_gpu:
+        snap["gpus"] = _gpus()
+    with DOING_LOCK:
+        if DOING:
+            snap["doing"] = [DOING[k] for k in sorted(DOING)]
+    return snap, (now, cpu_us)
+
+
+class Reporter(threading.Thread):
+    """Prints the session's resources to the log every `interval` seconds, for a pane that follows it."""
+
+    def __init__(self, interval, has_gpu):
+        super().__init__(daemon=True)
+        self.interval, self.has_gpu, self.stop = interval, has_gpu, threading.Event()
+
+    def run(self):
+        prev = None
+        while True:
+            try:
+                snap, prev = snapshot(prev, self.has_gpu)
+                emit(MONITOR_TAG + json.dumps(snap, separators=(",", ":")) + "\n")
+            except Exception:  # a reading must never stop the training it reports on
+                pass
+            if self.stop.wait(self.interval):
+                return
+
+
 # ----------------------------------------------------------------------------- jobs
 def stream(proc, logfile, prefix):
     with open(logfile, "a", encoding="utf-8", errors="replace") as f:
         for line in iter(proc.stdout.readline, ""):
             f.write(line)
             f.flush()
-            sys.stdout.write(prefix + line.encode("ascii", "replace").decode("ascii"))
-            sys.stdout.flush()
+            emit(prefix + line.encode("ascii", "replace").decode("ascii"))
 
 
 def run_cmd(cmd, env, logfile, prefix, hard_deadline):
@@ -546,6 +684,9 @@ def main():
     sampler = UtilSampler(float(os.environ.get("KG_SAMPLE_S", "30")))
     if gpus and "KG_FAKE_GPUS" not in os.environ:
         sampler.start()
+    reporter = Reporter(float(os.environ.get("KG_MONITOR_S", "30")), bool(gpus) and "KG_FAKE_GPUS" not in os.environ)
+    if reporter.interval > 0:
+        reporter.start()
 
     # 2. tasks = (job, fold); one process per task, one task per GPU at a time. Interleaved by fold so
     #    two screens (or two folds of one job) keep both T4s busy.
@@ -553,7 +694,9 @@ def main():
     if len(jobs) == 1 and "{fold}" not in jobs[0]["cmd"]:  # a command that drives the GPUs itself (DDP)
         t = time.time()
         e = dict(env, PJRT_DEVICE="TPU") if tpu else env
+        doing(0, jobs[0]["name"])
         rc, killed = run_cmd(jobs[0]["cmd"], e, logs / "train.log", "[train] ", hard_deadline)
+        doing(0)
         results[(0, None)] = {"rc": rc, "killed": killed, "seconds": round(time.time() - t, 1)}
     else:
         todo = []
@@ -585,8 +728,10 @@ def main():
                 cmd = job["cmd"].replace("{fold}", str(f))
                 log("%s -> %s: %s" % (tag, ("tpu chip %s" if tpu else "gpu %s") % slot if devices else "cpu", cmd))
                 t = time.time()
+                doing(slot, "%s on %s" % (tag, ("tpu%s" if tpu else "gpu%s") % slot if devices else "cpu"))
                 rc, killed = run_cmd(cmd, e, logs / ("%s_fold%d.log" % (job["name"], f)), "[%s] " % tag,
                                      hard_deadline)
+                doing(slot)
                 results[(ji, f)] = {"rc": rc, "killed": killed, "seconds": round(time.time() - t, 1), "gpu": slot}
                 log("%s finished rc=%s in %.1f min" % (tag, rc, (time.time() - t) / 60))
 
@@ -613,8 +758,10 @@ def main():
         if complete and job.get("assemble_cmd"):
             e = {k: v for k, v in env.items() if k != "KG_DEADLINE"}
             log("%s: all folds done: %s" % (job["name"], job["assemble_cmd"]))
+            doing(0, "%s: assembling" % job["name"])
             rc, _ = run_cmd(job["assemble_cmd"], e, logs / ("%s_assemble.log" % job["name"]),
                             "[asm %s] " % job["name"], T0 + budget_s - 120)
+            doing(0)
             assembled = rc == 0
         removed = 0
         for f in done:
@@ -636,6 +783,7 @@ def main():
         if time.time() < hard_deadline:
             run_cmd(cmd, env, logs / ("post%d.log" % i), "[post%d] " % i, hard_deadline)
     sampler.stop.set()
+    reporter.stop.set()
 
     # 4. outputs
     for d, ok in live.items():
