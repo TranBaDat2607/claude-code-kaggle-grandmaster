@@ -25,6 +25,13 @@ This repo is a Claude Code marketplace (`.claude-plugin/marketplace.json`) conta
   own version. A file kgkit code fills in or runs belongs in the package (`kgkit/kaggle_gpu_runner.py`); a
   user-facing template stays in `templates/` and is found with `cli._plugin_file` (beside kgkit, else the plugin at
   `$KGKIT_HOME`), and the command says what it skipped when neither has it.
+- `hooks/monitor/` is the exception to the standard-library rule: a TypeScript hooks module (a mod, listed under
+  `modules` in `hooks.json`) for the `/kaggle-monitor` pane. It may pass `$` only to functions declared at the top of
+  a file, writes `$.state` only under the plugin's own name (`kaggle-grandmaster`), and never reads a token's value:
+  accounts are token files, given to the CLI as `KAGGLE_API_TOKEN=<path>`. Check it with
+  `claude plugin validate plugins/kaggle-grandmaster` and `claude plugin test plugins/kaggle-grandmaster`
+  (`tests/test_monitor_mod.py` runs the latter when `claude` is on PATH). The `[kgmon]` line the runner and
+  `templates/kaggle_monitor_cell.py` print is its input: change all three together.
 - Hooks exit 0 on any internal error; only deny/ask for credentials (printed, or in an upload folder), invalid or
   byte-identical repeat submissions, an exhausted daily budget, or a GPU push that the cached weekly GPU quota
   cannot cover.

@@ -1,5 +1,5 @@
 {
-  "description": "kaggle-grandmaster: competition context at session start, Kaggle prompt -> skill routing, submission validation/budget guard, credential protection, submission logging",
+  "description": "kaggle-grandmaster: competition context at session start, Kaggle prompt -> skill routing, submission validation/budget guard, credential protection, submission logging; a Kaggle pane (/kaggle-monitor): running kernels with live CPU/GPU/RAM/disk, submissions, GPU/TPU quota per account, account switching",
   "hooks": {
     "SessionStart": [
       {
@@ -47,5 +47,8 @@
         ]
       }
     ]
-  }
+  },
+  "modules": [
+    "./monitor/register.tsx"
+  ]
 }

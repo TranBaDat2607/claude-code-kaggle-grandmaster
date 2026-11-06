@@ -100,6 +100,15 @@ HINTS: list[tuple[str, str, str]] = [
      "work, license, figures, a public notebook and weights, a Kaggle write-up draft), suggest the user run "
      "`/kg-showcase`, a slash command: it audits the repo first and asks before each public step. Make nothing "
      "public from here."),
+    ("kaggle-monitor",
+     r"\b(gpu|tpu) (quota|hours)\b|how many (gpu|tpu) hours|quota (left|remaining)|"
+     r"\b(is|are) (my|the|our) (kaggle )?(kernels?|notebooks?|runs?|training) (still )?(running|done|finished)|"
+     r"\b(kernels?|notebooks?|sessions?)'?s? (cpu|gpu|ram|memory|disk|resources?)( usage| use)?\b|"
+     r"\bswitch (kaggle )?accounts?\b|\b(which|what) kaggle account|\banother kaggle account|"
+     r"\bmonitor (my |the )?(kaggle|kernels?|notebooks?|training|runs?)\b",
+     "To watch Kaggle from inside Claude Code (running kernels with their live CPU, GPU, RAM and disk, recent "
+     "submissions, the GPU/TPU quota of every registered account, and switching the session's account), suggest the "
+     "user run `/kaggle-monitor`: it opens a pane beside the chat. Answer the question itself as well."),
 ]
 COMPILED_HINTS = [(name, re.compile(rx, re.IGNORECASE), text) for name, rx, text in HINTS]
 

@@ -33,3 +33,7 @@ plugins/kaggle-grandmaster/evals/results/
 
 # Local-only release notes (GitHub releases use generated notes)
 CHANGELOG.md
+
+# What Claude Code writes beside a mod it loads (types for the editor, and a tsconfig extending them)
+plugins/kaggle-grandmaster/.claude-plugin/types/
+plugins/kaggle-grandmaster/tsconfig.json
