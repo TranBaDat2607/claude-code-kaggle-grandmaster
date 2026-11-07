@@ -1,6 +1,7 @@
 #!/bin/sh
 # Launch a kaggle-grandmaster hook script with a working Python 3.
 # - Tool hooks (pre/post) bail out before starting Python unless the command mentions kaggle,
+#   and post_write.py unless the written file is a .py file,
 #   so ordinary shell commands pay no measurable cost. A wrapper script that submits (`bash go.sh x.csv`) shows
 #   neither in its command, so a payload that mentions a submit, or Kaggle's "N submissions remaining today" reply,
 #   passes too.
@@ -14,6 +15,13 @@ case "$SCRIPT" in
   pre_tool.py|post_tool.py)
     case "$INPUT" in
       *kaggle*|*KAGGLE*|*Kaggle*|*submit*|*Submit*|*SUBMIT*|*"remaining today"*) ;;
+      *) exit 0 ;;
+    esac
+    ;;
+  post_write.py)
+    # only a written Python file can be model code
+    case "$INPUT" in
+      *'.py"'*|*'.PY"'*) ;;
       *) exit 0 ;;
     esac
     ;;

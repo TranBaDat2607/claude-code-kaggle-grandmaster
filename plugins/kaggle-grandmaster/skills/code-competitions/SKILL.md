@@ -52,7 +52,9 @@ Kernel push via CLI: `kaggle kernels init -p kernels/infer`, edit `kernel-metada
 - FP16/bf16 inference, larger batches, `torch.inference_mode`, sort by length (NLP), resize once.
 - Free memory between models (`del model; gc.collect(); torch.cuda.empty_cache()`), stream data
   in chunks; RAM is ~29–30 GB on GPU kernels — watch pandas copies.
-- vLLM/ONNX/TensorRT/OpenVINO when they give a measured gain.
+- Exports and engines when they give a measured gain, with OOF parity checked: `torch.compile`, ONNX Runtime,
+  TensorRT (engine built on a Kaggle T4, loaded from a dataset), OpenVINO fp16 on CPU kernels, vLLM or LMDeploy with
+  8-bit or AWQ weights for LLMs. Settings and evidence: `compute-efficiency` (`references/inference.md`).
 - Write intermediate predictions to `/kaggle/working` so a late crash doesn't lose everything; add
   a fallback (e.g. simpler model) if the time budget is about to be exceeded (track elapsed time).
 

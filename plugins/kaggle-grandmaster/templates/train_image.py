@@ -3,12 +3,18 @@
 Copy to src/, edit CONFIG, then:
 
     python src/train_image.py --smoke                     # 1 fold, 2 batches/epoch — crash test
+    python src/train_image.py --bench                     # data loader vs GPU step vs real loop: input- or compute-bound?
     python src/train_image.py --name effb3_384 --backbone tf_efficientnet_b3.ns_jft_in1k --img-size 384
     # two GPUs: run disjoint folds in parallel; the run that completes the set logs the experiment
     CUDA_VISIBLE_DEVICES=0 python src/train_image.py --name cnx --folds 0 2 4 &
     CUDA_VISIBLE_DEVICES=1 python src/train_image.py --name cnx --folds 1 3
     # on Kaggle GPUs (quota-aware, resumable, both T4s busy): see the kaggle-gpu skill
     python -m kgkit gpu build --name cnx --hours 6 --cmd "python src/train_image.py --name cnx --folds {fold}"
+
+Speed defaults (skill compute-efficiency): AMP, channels_last model and inputs, cudnn.benchmark, fused AdamW,
+pinned memory and persistent workers. --compile adds torch.compile (Linux, sm_70+ GPUs: T4 yes, P100 no; pays on
+runs over ~20 min). Images are decoded with PIL and resized every epoch: point image_dir at copies pre-resized to
+img_size (or cache uint8 npy) when --bench says INPUT-BOUND.
 
 The train CSV needs an image path column (relative to image_dir) and the target column(s).
 task: "multiclass" (single label), "multilabel" (several 0/1 columns), "regression"/"binary"
@@ -22,6 +28,7 @@ import argparse
 import copy
 import math
 import os
+import platform
 import sys
 import time
 from pathlib import Path
@@ -37,6 +44,7 @@ try:
     import kgkit  # noqa: F401
 except ImportError:
     sys.path.insert(0, os.environ.get("KGKIT_HOME", ""))
+from kgkit import bench as B
 from kgkit import metrics as M
 from kgkit import state as S
 from kgkit.budget import TrainBudget
@@ -174,7 +182,7 @@ def predict(model, loader, device, task, amp, hflip):
     model.eval()
     out = []
     for x, _ in loader:
-        x = x.to(device, non_blocking=True)
+        x = x.to(device, non_blocking=True, memory_format=memory_format(device))
         with torch.autocast(device_type=device.type, enabled=amp):
             p = to_pred(task, model(x).float())
             if hflip:
@@ -183,12 +191,72 @@ def predict(model, loader, device, task, amp, hflip):
     return np.concatenate(out)
 
 
+def autocast_dtype(device):
+    """bf16 where the GPU has bf16 tensor cores (compute capability 8.0+: A100, L4, H100, RTX 30xx+), else fp16 with a
+    GradScaler. Not torch.cuda.is_bf16_supported(): it also says True on a T4 or P100, which only emulate bf16, slowly."""
+    return torch.bfloat16 if device.type == "cuda" and torch.cuda.get_device_capability(device)[0] >= 8 else torch.float16
+
+
+def memory_format(device):
+    return torch.channels_last if device.type == "cuda" else torch.contiguous_format
+
+
+def compile_ok(device) -> tuple:
+    """(ok, reason): torch.compile needs Triton, i.e. Linux (or WSL2) and a GPU of compute capability 7.0+."""
+    if device.type != "cuda":
+        return False, "no CUDA device"
+    if platform.system() == "Windows":
+        return False, "native Windows has no official Triton (use WSL2)"
+    if torch.cuda.get_device_capability() < (7, 0):
+        return False, f"{torch.cuda.get_device_name()} is below compute capability 7.0 (P100: use a T4)"
+    return True, ""
+
+
 def metric_input(task, metric, pred):
     if metric.kind == "label" and task == "multiclass":
         return pred.argmax(1)
     if task in ("binary", "regression") and pred.ndim == 2:
         return pred[:, 0]
     return pred
+
+
+# ----------------------------------------------------------------------------- bench
+def bench(steps, loader, train_step, device, mf, cfg, use_compile):
+    """Samples/s of the data loader alone, of train_step on one batch already on the device, and of the real loop.
+    The slower of the first two limits training; kgkit.bench prints the verdict and the speed-up against the last
+    bench of this run name (reports/bench.jsonl)."""
+    it = B.forever(loader)
+    x0, y0 = next(it)
+    fixed = (x0.to(device, non_blocking=True, memory_format=mf), y0.to(device, non_blocking=True))
+
+    def data_step():
+        x, _ = next(it)
+        return len(x)
+
+    def compute_step():
+        train_step(*fixed)
+        return len(fixed[0])
+
+    def full_step():
+        x, yb = next(it)
+        train_step(x.to(device, non_blocking=True, memory_format=mf), yb.to(device, non_blocking=True))
+        return len(x)
+
+    cuda = device.type == "cuda"
+    if cuda:
+        torch.cuda.reset_peak_memory_stats()
+    rates = B.measure({"data": data_step, "compute": compute_step, "full": full_step}, n=steps,
+                      warmup=10 if use_compile else 3, sync=torch.cuda.synchronize if cuda else None)
+    extra = {"device": torch.cuda.get_device_name() if cuda else "cpu (rates are for this CPU, not a GPU)",
+             "cpu cores": os.cpu_count(), "workers": cfg["num_workers"]}
+    if cuda:
+        total = torch.cuda.get_device_properties(0).total_memory / 2 ** 20
+        extra["peak GPU memory"] = (f"{torch.cuda.max_memory_allocated() / 2 ** 20:.0f} MB of {total:.0f} MB "
+                                    "(headroom: a larger batch, if the score holds)")
+    config = {k: cfg[k] for k in ("backbone", "img_size", "batch_size", "num_workers", "image_dir")}
+    config.update(device=extra["device"], compile=use_compile,
+                  amp=("bf16" if autocast_dtype(device) == torch.bfloat16 else "fp16") if cuda else False)
+    B.report(cfg["name"], rates, config=config, extra=extra, kind="train_image")
 
 
 # ----------------------------------------------------------------------------- main
@@ -205,6 +273,11 @@ def main():
     ap.add_argument("--notes")
     ap.add_argument("--smoke", action="store_true", help="1 fold, 2 batches per epoch, 1 epoch, nothing logged")
     ap.add_argument("--assemble", action="store_true", help="no training: assemble finished folds and log")
+    ap.add_argument("--bench", type=int, nargs="?", const=30, metavar="STEPS",
+                    help="time the data loader alone, the training step alone and the real loop on the first "
+                         "fold (default 30 steps each), print the verdict and the speed-up against the last bench; "
+                         "trains and logs nothing")
+    ap.add_argument("--compile", action="store_true", help="torch.compile the model for training (Linux, sm_70+)")
     a = ap.parse_args()
     cfg = dict(CONFIG)
     for k in ("name", "backbone", "img_size", "epochs", "batch_size", "lr", "notes"):
@@ -223,6 +296,14 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     amp = device.type == "cuda"
     seed_everything(cfg["seed"])
+    if device.type == "cuda":
+        torch.backends.cudnn.benchmark = True  # fixed input size: cuDNN picks the fastest kernels once
+    use_compile = False
+    if a.compile:
+        use_compile, why = compile_ok(device)
+        if not use_compile:
+            print(f"note: --compile skipped: {why}", flush=True)
+    mf = memory_format(device)
 
     train = pd.read_csv(cfg["train"])
     folds_df = pd.read_csv(cfg["folds"])
@@ -253,6 +334,8 @@ def main():
     if a.smoke:
         run_folds = run_folds[:1]
         cfg["epochs"] = 1
+    if a.bench:
+        run_folds = run_folds[:1]
     tf_train, tf_eval = build_transforms(cfg["img_size"], True), build_transforms(cfg["img_size"], False)
     loader_kw = dict(num_workers=cfg["num_workers"], pin_memory=amp, persistent_workers=cfg["num_workers"] > 0)
     crit = loss_fn(task, cfg["label_smoothing"])
@@ -271,13 +354,33 @@ def main():
         model = timm.create_model(cfg["backbone"], pretrained=cfg["pretrained"], num_classes=n_out).to(device)
         if device.type == "cuda":
             model = model.to(memory_format=torch.channels_last)
-        opt = torch.optim.AdamW(param_groups(model, cfg["lr"], cfg["head_lr_mult"], cfg["weight_decay"]))
+        fwd = torch.compile(model) if use_compile else model  # shares the weights; EMA and checkpoints use model
+        opt = torch.optim.AdamW(param_groups(model, cfg["lr"], cfg["head_lr_mult"], cfg["weight_decay"]),
+                                **({"fused": True} if device.type == "cuda" else {}))
         total = cfg["epochs"] * len(dl_tr)
         sched = cosine_with_warmup(opt, total, int(cfg["warmup_frac"] * total))
-        scaler = torch.amp.GradScaler(enabled=amp and not torch.cuda.is_bf16_supported())
+        amp_dtype = autocast_dtype(device)
+        scaler = torch.amp.GradScaler(enabled=amp and amp_dtype == torch.float16)
         ema = EMA(model, cfg["ema_decay"])
         best, best_pred, start_epoch = metric.worst(), None, 0
         budget = TrainBudget(out_dir, fold, cfg["epochs"], metric.greater_is_better)
+
+        def train_step(x, yb):
+            with torch.autocast(device_type=device.type, enabled=amp, dtype=amp_dtype):
+                loss = crit(fwd(x).float(), yb)
+            opt.zero_grad(set_to_none=True)
+            scaler.scale(loss).backward()
+            scaler.unscale_(opt)
+            nn.utils.clip_grad_norm_(model.parameters(), cfg["grad_clip"])
+            scaler.step(opt)
+            scaler.update()
+            sched.step()
+            ema.update(model)
+            return loss
+
+        if a.bench:
+            bench(a.bench, dl_tr, train_step, device, mf, cfg, use_compile)
+            return
         resume = out_dir / f"fold{fold}_resume.pt"
         if resume.exists() and not a.smoke:  # continue a fold the previous session checkpointed
             ck = torch.load(resume, map_location=device, weights_only=False)
@@ -292,18 +395,7 @@ def main():
             budget.start_epoch()
             model.train()
             for x, yb in dl_tr:
-                x, yb = x.to(device, non_blocking=True), yb.to(device, non_blocking=True)
-                with torch.autocast(device_type=device.type, enabled=amp,
-                                    dtype=torch.bfloat16 if amp and torch.cuda.is_bf16_supported() else torch.float16):
-                    loss = crit(model(x).float(), yb)
-                opt.zero_grad(set_to_none=True)
-                scaler.scale(loss).backward()
-                scaler.unscale_(opt)
-                nn.utils.clip_grad_norm_(model.parameters(), cfg["grad_clip"])
-                scaler.step(opt)
-                scaler.update()
-                sched.step()
-                ema.update(model)
+                loss = train_step(x.to(device, non_blocking=True, memory_format=mf), yb.to(device, non_blocking=True))
             pred = predict(ema.module, dl_va, device, task, amp, hflip=False)
             score = metric(y_metric[va], metric_input(task, metric, pred))
             print(f"fold {fold} epoch {epoch} loss {loss.item():.4f} val {metric.name} {score:.5f}", flush=True)

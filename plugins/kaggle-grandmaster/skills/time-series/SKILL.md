@@ -28,6 +28,9 @@ One LightGBM over all series (store×item etc.), rows = (series, date), features
 - **Price/promotion/exogenous**: relative price vs series mean, promo flags, weather.
 - **Trend proxies**: ratio of recent window mean to long window mean.
 Objectives: Tweedie/Poisson for sparse counts (M5), L2 on log1p for skewed sales, L1 for MAE.
+Compute: panels of series × dates get big fast. Build features with polars or cuDF in float32, write them per day
+into a preallocated array (Optiver 1st), keep the features that matter when RAM binds, and train XGBoost/CatBoost on
+the GPU when rows run into the millions (`compute-efficiency`, `references/tabular.md`).
 
 ## 3. Multi-horizon strategy
 

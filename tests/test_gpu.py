@@ -241,6 +241,28 @@ def test_runner_end_to_end_and_collect(gws, tmp_path):
     assert "fk" in G.run_table(gws)
 
 
+def test_remote_bench_record_comes_back(gws, tmp_path, capsys):
+    """A bench session (a command without {fold}: one run, both GPUs visible) saves reports/bench.jsonl with the
+    output; collect merges it into the local history and prints its speed-up against the previous bench."""
+    from kgkit import bench as B
+
+    B.report("img", {"data": 50.0, "compute": 200.0, "full": 48.0}, config={"image_dir": "raw"}, root=gws,
+             kind="train_image", out=lambda s: None)
+    code = ("from kgkit import bench as B; B.report('img', {'data': 400.0, 'compute': 200.0, 'full': 192.0}, "
+            "config={'image_dir': 'npy'}, kind='train_image')")
+    kdir = G.build_kernel(gws, "bench", f'"{sys.executable}" -c "{code}"', hours=0.3, folds=[0], user="tester")
+    _kaggle_input(tmp_path / "b1", gws)
+    out, work = _run_kernel(kdir, tmp_path / "b1")
+    assert (work / "reports" / "bench.jsonl").is_file(), out[-2000:]
+    G.log_run(gws, {"kernel": "tester/bench-train", "version": 1, "name": "bench", "hours": 0.3, "status": "running",
+                    "pushed_at": G._iso(G._now())})
+    capsys.readouterr()
+    res = G.collect(gws, "tester/bench-train", from_dir=work)
+    printed = capsys.readouterr().out
+    assert res["status"] == "complete" and "[bench] remote img" in printed and "x4.00 faster" in printed
+    assert [r["config"]["image_dir"] for r in B.records(gws / "reports" / "bench.jsonl")] == ["raw", "npy"]
+
+
 def _kgmon(out):
     return [json.loads(l[len("[kgmon] "):]) for l in out.splitlines() if l.startswith("[kgmon] ")]
 

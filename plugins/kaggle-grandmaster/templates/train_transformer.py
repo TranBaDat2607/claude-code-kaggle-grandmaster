@@ -3,6 +3,7 @@
 Copy to src/, edit CONFIG, then:
 
     python src/train_transformer.py --smoke
+    python src/train_transformer.py --bench          # data loader vs GPU step vs real loop, padding share
     python src/train_transformer.py --name debv3b_512 --model microsoft/deberta-v3-base --max-len 512
     CUDA_VISIBLE_DEVICES=0 python src/train_transformer.py --name x --folds 0 2 4 &   # split folds across GPUs
     CUDA_VISIBLE_DEVICES=1 python src/train_transformer.py --name x --folds 1 3
@@ -12,6 +13,9 @@ Copy to src/, edit CONFIG, then:
 Recipe: mean/attention pooling head, layer-wise LR decay, linear warmup + cosine decay, AMP,
 gradient accumulation, evaluation several times per epoch with best-checkpoint selection,
 length-sorted dynamic-padding inference. task: regression | binary | multiclass | multilabel.
+Speed defaults (skill compute-efficiency): text tokenised once, length-bucketed training batches with dynamic
+padding (--no-bucket for plain shuffled batches), fused AdamW on CUDA, pinned memory and persistent workers.
+Set max_len from the token-length distribution (95-99th percentile), not the model maximum.
 For offline Kaggle kernels point --model at a local folder (save_pretrained output).
 """
 
@@ -34,6 +38,7 @@ try:
     import kgkit  # noqa: F401
 except ImportError:
     sys.path.insert(0, os.environ.get("KGKIT_HOME", ""))
+from kgkit import bench as B
 from kgkit import metrics as M
 from kgkit import state as S
 from kgkit.budget import TrainBudget
@@ -65,6 +70,7 @@ CONFIG = dict(
     evals_per_epoch=4,
     grad_clip=1.0,
     num_workers=2,
+    length_buckets=True,         # training batches of similar length: much less padding (--no-bucket: off)
     seed=42,
     notes="",
 )
@@ -97,6 +103,33 @@ class Collate:
         return out
 
 
+class LengthBucketSampler(torch.utils.data.Sampler):
+    """Batches of similar token length with a random order: shuffle, sort inside chunks of `chunk` batches, cut
+    into batches, shuffle the batches. Most of the padding goes while every epoch stays random."""
+
+    def __init__(self, lengths, batch_size, drop_last, seed, chunk=50):
+        self.lengths, self.bs, self.drop_last = np.asarray(lengths), batch_size, drop_last
+        self.span, self.seed, self.epoch = batch_size * chunk, seed, 0
+
+    def __iter__(self):
+        rng = np.random.default_rng(self.seed + self.epoch)
+        self.epoch += 1
+        idx, batches = rng.permutation(len(self.lengths)), []
+        for s in range(0, len(idx), self.span):
+            part = idx[s: s + self.span]
+            part = part[np.argsort(self.lengths[part], kind="stable")]
+            batches += [part[i: i + self.bs] for i in range(0, len(part), self.bs)]
+        if self.drop_last:
+            batches = [b for b in batches if len(b) == self.bs]
+        rng.shuffle(batches)
+        return iter([b.tolist() for b in batches])
+
+    def __len__(self):
+        n, full = len(self.lengths), (len(self.lengths) // self.span) * (self.span // self.bs)
+        rest = n % self.span
+        return full + (rest // self.bs if self.drop_last else -(-rest // self.bs))
+
+
 class Model(nn.Module):
     def __init__(self, name, n_out, pooling, dropout):
         super().__init__()
@@ -106,7 +139,9 @@ class Model(nn.Module):
         for k in ("hidden_dropout_prob", "attention_probs_dropout_prob"):
             if hasattr(cfg, k) and dropout == 0.0:
                 setattr(cfg, k, 0.0)
-        self.backbone = AutoModel.from_pretrained(name, config=cfg)
+        # fp32 master weights; autocast runs the math in fp16/bf16. transformers 5 loads the checkpoint's own dtype
+        # (fp16 for DeBERTa-v3), which GradScaler refuses ("Attempting to unscale FP16 gradients").
+        self.backbone = AutoModel.from_pretrained(name, config=cfg).float()
         h = cfg.hidden_size
         self.pooling = pooling
         if pooling == "attention":
@@ -203,6 +238,50 @@ def metric_input(task, metric, pred):
     return pred
 
 
+def bench(steps, loader, train_step, device, cfg):
+    """Samples/s of the data loader alone, of train_step on batches already on the device, and of the real loop, plus
+    the share of padding tokens; kgkit.bench prints the verdict and the speed-up against the last bench. Batch lengths
+    vary, so the step phase cycles over a pool of real batches rather than repeating one."""
+    it = B.forever(loader)
+    pool = [{k: v.to(device, non_blocking=True) for k, v in next(it).items()} for _ in range(max(2, min(16, steps)))]
+    turn = {"i": 0}
+    tokens = {"pad": 0, "all": 0}
+
+    def data_step():
+        b = next(it)
+        m = b["attention_mask"]
+        tokens["pad"] += int((m == 0).sum())
+        tokens["all"] += m.numel()
+        return len(m)
+
+    def compute_step():
+        b = pool[turn["i"] % len(pool)]
+        turn["i"] += 1
+        train_step(dict(b))
+        return len(b["input_ids"])
+
+    def full_step():
+        b = {k: v.to(device, non_blocking=True) for k, v in next(it).items()}
+        train_step(b)
+        return len(b["input_ids"])
+
+    cuda = device.type == "cuda"
+    if cuda:
+        torch.cuda.reset_peak_memory_stats()
+    rates = B.measure({"data": data_step, "compute": compute_step, "full": full_step}, n=steps,
+                      sync=torch.cuda.synchronize if cuda else None)
+    extra = {"device": torch.cuda.get_device_name() if cuda else "cpu (rates are for this CPU, not a GPU)",
+             "padding": f"{100 * tokens['pad'] / max(1, tokens['all']):.0f}% of the tokens in training batches",
+             "step phase": f"cycles over {len(pool)} batches already on the device (their lengths vary)"}
+    if cuda:
+        total = torch.cuda.get_device_properties(0).total_memory / 2 ** 20
+        extra["peak GPU memory"] = f"{torch.cuda.max_memory_allocated() / 2 ** 20:.0f} MB of {total:.0f} MB"
+    config = {k: cfg[k] for k in ("model", "max_len", "batch_size", "num_workers", "length_buckets")}
+    config.update(device=extra["device"],
+                  amp=("bf16" if torch.cuda.get_device_capability(device)[0] >= 8 else "fp16") if cuda else False)
+    B.report(cfg["name"], rates, config=config, extra=extra, kind="train_transformer")
+
+
 def main():
     ap = argparse.ArgumentParser()
     for k, t in (("name", str), ("model", str), ("max_len", int), ("batch_size", int), ("epochs", int),
@@ -211,11 +290,17 @@ def main():
     ap.add_argument("--folds", type=int, nargs="+")
     ap.add_argument("--smoke", action="store_true")
     ap.add_argument("--assemble", action="store_true", help="no training: assemble finished folds and log")
+    ap.add_argument("--bench", type=int, nargs="?", const=30, metavar="STEPS",
+                    help="time the data loader alone, the training step alone and the real loop on the first "
+                         "fold (default 30 steps each); trains and logs nothing")
+    ap.add_argument("--no-bucket", action="store_true", help="plain shuffled batches instead of length buckets")
     a = ap.parse_args()
     cfg = dict(CONFIG)
     for k in ("name", "model", "max_len", "batch_size", "epochs", "lr", "notes"):
         if getattr(a, k) is not None:
             cfg[k] = getattr(a, k)
+    if a.no_bucket:
+        cfg["length_buckets"] = False
 
     from transformers import AutoTokenizer, get_cosine_schedule_with_warmup
 
@@ -262,6 +347,8 @@ def main():
     run_folds = a.folds if a.folds is not None else all_folds
     if a.smoke:
         run_folds, cfg["epochs"] = run_folds[:1], 1
+    if a.bench:
+        run_folds = run_folds[:1]
     crit = loss_fn(task)
     t0 = time.time()
     stopped = None  # "timeout" | "pruned": the session deadline or the baseline curve ended this run early
@@ -275,17 +362,43 @@ def main():
         if a.smoke:
             tr, va = tr[: 4 * cfg["batch_size"]], va[: 2 * cfg["batch_size"]]
         ds_tr, ds_va = TextDataset(subset(enc, tr), y[tr]), TextDataset(subset(enc, va), y[va])
-        dl = DataLoader(ds_tr, batch_size=cfg["batch_size"], shuffle=True, collate_fn=collate,
-                        num_workers=cfg["num_workers"], drop_last=len(tr) > cfg["batch_size"])
+        loader_kw = dict(collate_fn=collate, num_workers=cfg["num_workers"], pin_memory=amp,
+                         persistent_workers=cfg["num_workers"] > 0)
+        drop = len(tr) > cfg["batch_size"]
+        if cfg["length_buckets"]:
+            lengths = [len(x) for x in ds_tr.enc["input_ids"]]
+            dl = DataLoader(ds_tr, batch_sampler=LengthBucketSampler(lengths, cfg["batch_size"], drop,
+                                                                     cfg["seed"] + fold), **loader_kw)
+        else:
+            dl = DataLoader(ds_tr, batch_size=cfg["batch_size"], shuffle=True, drop_last=drop, **loader_kw)
         model = Model(cfg["model"], n_out, cfg["pooling"], cfg["dropout"]).to(device)
-        opt = torch.optim.AdamW(llrd_groups(model, cfg["lr"], cfg["head_lr"], cfg["llrd"], cfg["weight_decay"]))
+        opt = torch.optim.AdamW(llrd_groups(model, cfg["lr"], cfg["head_lr"], cfg["llrd"], cfg["weight_decay"]),
+                                **({"fused": True} if device.type == "cuda" else {}))
         steps = math.ceil(len(dl) / cfg["grad_accum"]) * cfg["epochs"]
         sched = get_cosine_schedule_with_warmup(opt, int(cfg["warmup_frac"] * steps), steps)
-        use_bf16 = amp and torch.cuda.is_bf16_supported()
+        # bf16 only with bf16 tensor cores (compute capability 8.0+). torch.cuda.is_bf16_supported() also says True on a
+        # T4 or P100, which emulate bf16 slowly: fp16 + GradScaler is their fast path
+        use_bf16 = amp and torch.cuda.get_device_capability(device)[0] >= 8
         scaler = torch.amp.GradScaler(enabled=amp and not use_bf16)
         eval_at = set(np.linspace(0, len(dl), cfg["evals_per_epoch"] + 1, dtype=int)[1:].tolist())
         best, best_pred, start_epoch = metric.worst(), None, 0
         budget = TrainBudget(out_dir, fold, cfg["epochs"], metric.greater_is_better)
+        if a.bench:
+            def bench_step(batch):  # one optimiser step per batch, the cost of a training step
+                labels = batch.pop("labels")
+                with torch.autocast(device_type=device.type, enabled=amp,
+                                    dtype=torch.bfloat16 if use_bf16 else torch.float16):
+                    loss = crit(model(**batch).float(), labels)
+                scaler.scale(loss).backward()
+                scaler.unscale_(opt)
+                nn.utils.clip_grad_norm_(model.parameters(), cfg["grad_clip"])
+                scaler.step(opt)
+                scaler.update()
+                opt.zero_grad(set_to_none=True)
+
+            model.train()
+            bench(a.bench, dl, bench_step, device, cfg)
+            return
         resume = out_dir / f"fold{fold}_resume.pt"
         if resume.exists() and not a.smoke:  # continue a fold the previous session checkpointed
             ck = torch.load(resume, map_location=device, weights_only=False)
@@ -299,7 +412,7 @@ def main():
             budget.start_epoch()
             model.train()
             for step, batch in enumerate(dl, 1):
-                batch = {k: v.to(device) for k, v in batch.items()}
+                batch = {k: v.to(device, non_blocking=True) for k, v in batch.items()}
                 labels = batch.pop("labels")
                 with torch.autocast(device_type=device.type, enabled=amp,
                                     dtype=torch.bfloat16 if use_bf16 else torch.float16):

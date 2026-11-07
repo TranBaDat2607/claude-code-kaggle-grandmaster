@@ -8,8 +8,8 @@ What it does inside the Kaggle session:
   1. unpacks the code into a scratch dir and links every attached input into ./data (competition data
      always; datasets and kernel outputs there too, or each in its own folder such as
      ./data/ext/<slug>), so the training command runs with the same relative paths as on your
-     machine. A name two inputs share is linked once, with a warning; ./artifacts and ./subs point
-     into /kaggle/working (the saved output). ./data/folds.csv is written back from the packed split
+     machine. A name two inputs share is linked once, with a warning; ./artifacts, ./subs and ./reports
+     (bench records) point into /kaggle/working (the saved output). ./data/folds.csv is written back from the packed split
      (or linked from the dataset given to --split-from) and checked against yours: the run stops
      before anything else when it differs;
   2. copies fold artefacts from `resume_sources` (a previous session's output) and skips folds that
@@ -651,7 +651,7 @@ def main():
         log("ERROR: %s not written: %s. Nothing was run." % (split["file"], why))
         sys.exit(1)
     OUT.mkdir(parents=True, exist_ok=True)
-    live = {d: link_dir(RUN / d, OUT / d) for d in ("artifacts", "subs")}
+    live = {d: link_dir(RUN / d, OUT / d) for d in ("artifacts", "subs", "reports")}
     arts = {}
     resume_dirs = [Path(r["path"]) for r in inputs if r.get("use") == "resume" and r["path"]]
     for job in jobs:

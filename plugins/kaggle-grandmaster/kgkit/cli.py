@@ -1476,12 +1476,15 @@ def cmd_features(a):
         if (recheck == folds).all():
             print("WARNING: the recheck split equals the screening split (deterministic splitter); recheck skipped")
             recheck = None
+    if a.device == "cuda" and (a.model == "lgbm" or (a.model == "auto" and not FS._have("xgboost")
+                                                    and FS._have_lgbm())):
+        print(FS.lightgbm_device_params("cuda")[1])
     res = FS.feature_search(train, y, folds, cats, nums, metric, base_cols=list(dict.fromkeys(cats + nums)),
                             test=test, specs=specs,
                             batch_size=a.batch, max_batches=a.max_batches,
                             screen_folds=[int(x) for x in a.screen_folds.split(",")] if a.screen_folds else None,
                             model=a.model, time_budget_s=a.minutes * 60 if a.minutes else None,
-                            recheck_folds=recheck, seed=a.seed)
+                            recheck_folds=recheck, seed=a.seed, device=a.device)
     out = FS.save_specs(a.out, res)
     md = Path(a.out).with_suffix(".md")
     md.write_text(FS.report(res), encoding="utf-8")
@@ -1669,6 +1672,18 @@ def cmd_recheck(a):
     from .recheck import main_recheck
 
     main_recheck(a)
+
+
+def cmd_bench(a):
+    from .bench import main_bench
+
+    main_bench(a)
+
+
+def cmd_speedcheck(a):
+    from .speedcheck import main_speedcheck
+
+    main_speedcheck(a)
 
 
 def cmd_validate(a):
@@ -2107,7 +2122,10 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--max-batches", type=int)
     s.add_argument("--minutes", type=float, help="time budget")
     s.add_argument("--screen-folds", help="e.g. 0,1: screen on a subset of folds for speed")
-    s.add_argument("--model", default="auto", choices=["auto", "lgbm", "hgb"])
+    s.add_argument("--model", default="auto", choices=["auto", "lgbm", "xgb", "hgb"],
+                   help="screening model (auto: lgbm, else sklearn HGB; with --device cuda: xgb when installed)")
+    s.add_argument("--device", default="cpu", choices=["cpu", "cuda"],
+                   help="cuda: screen on the GPU (XGBoost, or LightGBM's GPU build when one works)")
     s.add_argument("--recheck-seed", type=int, help="re-check the kept set on folds re-drawn with this seed")
     s.add_argument("--group", help="group column for the recheck split")
     s.add_argument("--seed", type=int, default=0)
@@ -2156,6 +2174,22 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--train")
     s.add_argument("--id-col")
     s.set_defaults(fn=cmd_recheck)
+
+    s = sub.add_parser("bench", help="time commands while sampling the GPUs: idle, under-used or busy, and the "
+                                     "speed-up of each run against the first (kept in reports/bench.jsonl)")
+    s.add_argument("--run", action="append", default=[],
+                   help="shell command to time (repeat to compare); a reduced setting that runs in minutes")
+    s.add_argument("--name", help="record name (default: the command itself, so running it again after a change "
+                                  "prints the speed-up)")
+    s.add_argument("--sample-s", type=float, default=0.5, help="seconds between nvidia-smi samples")
+    s.add_argument("--no-record", action="store_true", help="do not append to reports/bench.jsonl")
+    s.set_defaults(fn=cmd_bench)
+
+    s = sub.add_parser("speedcheck", help="slow patterns in training or inference scripts (fp32 training, data "
+                                          "loading in the main process, row loops, ...) and the compute defaults "
+                                          "of their domain")
+    s.add_argument("files", nargs="+")
+    s.set_defaults(fn=cmd_speedcheck)
 
     s = sub.add_parser("kernels", help="study and reproduce public notebooks")
     s.add_argument("action", choices=["top", "pull", "review"])

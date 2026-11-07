@@ -67,7 +67,12 @@ def load_test() -> pd.DataFrame:
 
 
 def predict_model_a(test: pd.DataFrame) -> np.ndarray:
-    """Example member: average the fold models' predictions."""
+    """Example member: average the fold models' predictions.
+
+    Fast path (skill compute-efficiency, references/inference.md): torch.inference_mode(), fp16 autocast, large
+    batches sorted by length (text), preprocessing done once and shared by all members, one process per GPU on
+    2xT4. Exports (torch.compile, ONNX Runtime, TensorRT, OpenVINO on CPU) only with a measured gain and OOF parity.
+    """
     preds = []
     for ckpt in sorted(WEIGHTS.glob("model_a/fold*.pt")):
         # model = build_model(); model.load_state_dict(torch.load(ckpt, map_location="cuda")); ...

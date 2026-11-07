@@ -58,6 +58,17 @@ model.fit(Pool(X_tr, y_tr, cat_features=cats), eval_set=Pool(X_va, y_va, cat_fea
 ```
 Text columns: `text_features=[...]` gives CatBoost built-in text processing.
 
+## Speed settings
+
+- LightGBM: `n_jobs` = physical cores (often faster than every hardware thread), `max_bin=63` while exploring,
+  `force_col_wise=True` with many columns, one `lgb.Dataset` reused across seeds. GPU: `device_type="gpu"`
+  (OpenCL, in the pip wheel) or `"cuda"` (source build); `train_gbdt.py --device cuda` probes both.
+- XGBoost: always `tree_method="hist"` (`exact` and `approx` are much slower, `gpu_hist` is deprecated), with
+  `device="cuda"` on a GPU.
+- CatBoost: `task_type="GPU"` on large data; `border_count=128` while exploring.
+- When the GPU is worth the quota, and RAPIDS for features and sklearn-style models: `compute-efficiency`
+  (`references/tabular.md`).
+
 ## Tuning order (do features first!)
 
 1. Fix learning_rate high (0.05–0.1) for speed.

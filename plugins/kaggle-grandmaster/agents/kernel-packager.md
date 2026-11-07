@@ -27,9 +27,12 @@ environment and produce a valid submission on the hidden test set.
    push takes). If the weights came from a remote training kernel (`kgkit gpu`), list
    that kernel in `kernel_sources` (its `artifacts/<name>/fold*.pt`) instead of re-uploading them.
    GPU inference pushes spend the weekly quota: check `python -m kgkit gpu quota` first.
-5. Locally: run the inference script against a synthetic test of the hidden-test size (or the
-   training data reshaped like test) to measure runtime and verify parity with OOF predictions on a
-   validation fold.
+5. Make it fast before timing it: `PYTHONPATH="$KGKIT_HOME" python -m kgkit speedcheck <script>`, and the checklist
+   in `$KGKIT_HOME/skills/compute-efficiency/references/inference.md` (`inference_mode`, fp16, sorted batches, one
+   process per T4, preprocessing shared by all models, exports such as TensorRT/ONNX/OpenVINO only with a measured
+   gain and OOF parity, LLM engines and quantisation). Then locally: run the inference script against a synthetic
+   test of the hidden-test size (or the training data reshaped like test) to measure runtime and verify parity with
+   OOF predictions on a validation fold.
 6. Ask the user before creating/uploading datasets or pushing kernels (outward-facing actions),
    unless they have already authorised it. Then `kaggle datasets create/version`, `kaggle kernels
    push` (`-t` = the measured runtime x 1.3-1.5, not a tight fit: Kaggle kills the session at it, and a run

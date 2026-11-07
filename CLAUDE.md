@@ -16,7 +16,7 @@ This repo is a Claude Code marketplace (`.claude-plugin/marketplace.json`) conta
 
 ## Conventions
 - `kgkit/state.py`, `kgkit/gpu.py`, `kgkit/budget.py`, `kgkit/backlog.py`, `kgkit/adopt.py`, `kgkit/safety.py`,
-  `kgkit/evalset.py`, `kgkit/finals.py`, `kgkit/audit.py`, `kgkit/progress.py`,
+  `kgkit/evalset.py`, `kgkit/finals.py`, `kgkit/audit.py`, `kgkit/progress.py`, `kgkit/speedcheck.py`, `kgkit/bench.py`,
   `kgkit/kaggle_gpu_runner.py` and everything under `hooks/` must stay **standard-library only** (hooks import them, the runner executes inside Kaggle; they must be fast and never fail closed).
   `kgkit/kaggle_search.py`, `kgkit/kaggle_submissions.py`, `kgkit/kaggle_outputs.py` and `kgkit/kaggle_cli.py` too, at import time: they run under the Kaggle CLI's
   interpreter, which may have nothing else installed (they import kagglesdk / the CLI inside `main`).

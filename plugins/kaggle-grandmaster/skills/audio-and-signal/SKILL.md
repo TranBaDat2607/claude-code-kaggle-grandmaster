@@ -11,6 +11,8 @@ description: Playbook for Kaggle audio and biosignal competitions — bioacousti
   frames) fed to ImageNet-pretrained CNNs (EfficientNet, NFNet, ConvNeXt, eca_nfnet) — the
   default winner for bioacoustics. Normalise per-sample or per-dataset; try PCEN.
 - **Raw waveform** 1D CNNs / wav2vec2 / BEATs / audio transformers (AST, PaSST) for diversity.
+- Compute: decode audio once at the model's sample rate (npy cache) and compute the spectrogram on the GPU inside
+  the model (torchaudio, as HMS 3rd did). See `compute-efficiency` (`references/audio-and-signal.md`).
 - **Biosignals (EEG/ECG)**: spectrograms per channel/bipolar montage stacked as image tiles,
   or 1D CNN/GRU/transformer on raw signals with band-pass filtering; also domain features
   (band powers, HRV) for GBDT stackers.
@@ -37,9 +39,10 @@ description: Playbook for Kaggle audio and biosignal competitions — bioacousti
 
 ## 4. Inference under CPU-only limits
 
-Bioacoustics comps often require CPU inference on hours of audio: use ONNX/OpenVINO, smaller
-backbones, 32 kHz → lower sample rate if acceptable, precompute mel on the fly in batches,
-multiprocessing; post-process with temporal smoothing across neighbouring windows and
+Bioacoustics comps often require CPU inference on hours of audio: export to ONNX, then OpenVINO with fp16 weights
+and a fixed input shape (BirdCLEF 2024 1st, BirdCLEF+ 2025 2nd), one spectrogram per window shared by every model,
+smaller backbones, 32 kHz → lower sample rate if acceptable, all 4 cores
+(multiprocessing); post-process with temporal smoothing across neighbouring windows and
 file-level max/mean pooling boosts (e.g. add a fraction of clip-level max to each window).
 Measure throughput on the exact hardware early.
 

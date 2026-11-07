@@ -102,6 +102,14 @@ def test_gbdt_template_lgbm_smoke_and_full(tmp_path, plugin_root):
     assert rec["cv"] > 0.8 and len(rec["fold_scores"]) == 5
 
 
+@pytest.mark.skipif(importlib.util.find_spec("lightgbm") is None, reason="lightgbm not installed")
+def test_gbdt_template_lgbm_device_cuda(tmp_path, plugin_root):
+    """--device cuda with LightGBM: its GPU build when one trains here, else the CPU with a note (never a crash)."""
+    ws = _make_ws(tmp_path, plugin_root, "binary")
+    out = _run(["src/train_gbdt.py", "--smoke", "--device", "cuda"], ws, plugin_root)
+    assert "smoke run OK" in out and ("note: LightGBM trains on the GPU" in out or "trains on the CPU" in out)
+
+
 @pytest.mark.skipif(importlib.util.find_spec("timm") is None or importlib.util.find_spec("torch") is None,
                     reason="needs torch + timm")
 def test_image_template_tiny(tmp_path, plugin_root):
@@ -136,6 +144,13 @@ def test_image_template_tiny(tmp_path, plugin_root):
     args = ["src/train_image.py", "--backbone", "resnet18", "--no-pretrained", "--img-size", "32",
             "--batch-size", "8", "--lr", "3e-3"]
     assert "smoke run OK" in _run([*args, "--smoke"], tmp_path, plugin_root)
+    # --bench: data loader alone vs the training step alone vs the real loop, recorded; logs no experiment
+    n_logged = len(Ledger(tmp_path).records())
+    out = _run([*args, "--bench", "3"], tmp_path, plugin_root)
+    assert "[bench]" in out and "real loop" in out and "verdict:" in out
+    out = _run([*args, "--bench", "3", "--batch-size", "4"], tmp_path, plugin_root)
+    assert "vs previous bench of this name" in out and "batch_size 8 -> 4" in out
+    assert len(Ledger(tmp_path).records()) == n_logged and (tmp_path / "reports" / "bench.jsonl").is_file()
     # split folds across two "GPUs": first call must not log, second completes the set
     out1 = _run([*args, "--epochs", "3", "--name", "r18", "--folds", "0"], tmp_path, plugin_root)
     assert "the run that completes the set" in out1
@@ -194,6 +209,10 @@ def test_transformer_template_tiny(tmp_path, plugin_root):
     (tmp_path / "src" / "train_transformer.py").write_text(src.replace("num_workers=2", "num_workers=0"), encoding="utf-8")
     args = ["src/train_transformer.py", "--model", "tinybert", "--max-len", "16", "--batch-size", "8", "--lr", "1e-3"]
     assert "smoke run OK" in _run([*args, "--smoke"], tmp_path, plugin_root)
+    out = _run([*args, "--bench", "3"], tmp_path, plugin_root)
+    assert "[bench]" in out and "verdict:" in out and "padding:" in out
+    out = _run([*args, "--bench", "3", "--no-bucket"], tmp_path, plugin_root)
+    assert "length_buckets True -> False" in out
     _run([*args, "--epochs", "10", "--name", "tiny"], tmp_path, plugin_root)
     rec = Ledger(tmp_path).records()[-1]
     assert rec["name"] == "tiny" and len(rec["fold_scores"]) == 2

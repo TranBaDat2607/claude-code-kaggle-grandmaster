@@ -66,7 +66,9 @@ Load the `kaggle-gpu` skill first and follow its protocol. Commands below are
 use-it-or-lose-it hours before the reset.
 
 ## screen <idea> [<idea2>]
-1. Implement each idea behind a flag in the training script and run `--smoke` locally. Commit.
+1. Implement each idea behind a flag in the training script and run `--smoke` locally. Commit. A new script, or a
+   change to its input pipeline: run its `--bench` first (locally, or in a 0.3 h session) and fix an INPUT-BOUND or
+   GPU IDLE verdict before spending hours of quota on it (skill `compute-efficiency`).
 2. Build one session for both screens on fold 0, with reduced cost settings that are identical for the
    baseline comparison. If no control screen of the baseline exists at these settings yet, make it one of
    the two jobs:

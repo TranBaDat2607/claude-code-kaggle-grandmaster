@@ -21,6 +21,8 @@ noisy and keeps moving until well after the deadline.
    heads) to predict top players' actions. Very effective mid-competition.
 4. **Reinforcement learning** (PPO/IMPALA with self-play, league of past versions) when compute
    allows; initialise from the imitation policy; reward shaping early, sparse win reward later.
+   Throughput decides how far RL gets: Lux AI S3 (1st) split GPUs between training and experience generation and
+   used bf16, `torch.compile` (~1.5x) and pinned zero-copy transfers (`compute-efficiency`).
 5. **Search**: MCTS / beam search / minimax with a learned value or heuristic evaluation when the
    game is tractable (ConnectX-style).
 6. **Engineering**: respect time per turn (watch the overage budget), deterministic seeds for
@@ -48,6 +50,8 @@ LB, so this is pure optimisation.
    MIP/CP, use delta-evaluation of moves (O(1) score updates), precompute lookups.
 5. **Compute**: multi-core, run many restarts with different seeds overnight; keep the best
    solution file versioned. Small improvements late are common — keep optimisers running.
+   Vectorised or compiled scorers pay most: numba on the CPU, `torch.compile` for a GPU simulator (Geophysical
+   Waveform Inversion 1st went from ~10 to 5,000+ samples per minute) — see `compute-efficiency`.
 6. For LLM-themed optimisation (e.g. permutation puzzles scored by a language model's
    perplexity), cache scores, batch evaluations on GPU, and treat it as black-box local search
    with smart move proposals.

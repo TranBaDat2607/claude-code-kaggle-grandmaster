@@ -30,8 +30,10 @@ PowerShell `$env:` assignment).
 Target: `$ARGUMENTS` (default: the best blend/experiment in the ledger).
 
 Delegate to the `kernel-packager` agent with the target experiment(s), the competition constraints
-from `.kaggle-gm/competition.json`, and the inference template
-`${CLAUDE_PLUGIN_ROOT}/templates/inference_kernel.py`. Uploading datasets and pushing kernels are
+from `.kaggle-gm/competition.json`, the inference template
+`${CLAUDE_PLUGIN_ROOT}/templates/inference_kernel.py`, and the inference speed checklist
+`${CLAUDE_PLUGIN_ROOT}/skills/compute-efficiency/references/inference.md` (fp16, both T4s, shared preprocessing,
+exports with OOF parity, LLM engines and quantisation). Uploading datasets and pushing kernels are
 outward-facing: confirm with the user before doing them unless already authorised.
 
 Report artefacts, kernel version, measured runtime vs limit (with ≥20% margin), OOF-parity check,

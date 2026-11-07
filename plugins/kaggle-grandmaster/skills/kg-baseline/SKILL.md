@@ -34,7 +34,9 @@ Arguments: `$ARGUMENTS`
 3. Smoke test (1 fold, tiny settings), then the full run. Keep the baseline simple and fast — its
    job is to be correct and to calibrate CV vs LB. With a local NVIDIA GPU, train XGBoost / CatBoost
    there: `python src/train_gbdt.py --model xgb --device cuda` (or `KG_DEVICE=cuda`). Without `--name`
-   the run is named `<model>_baseline`.
+   the run is named `<model>_baseline`. Keep the templates' compute defaults (skill `compute-efficiency`).
+   Images and text: after the smoke test run `--bench` once. An INPUT-BOUND verdict (images decoded from full size
+   every epoch) slows every later experiment, so pre-resize or cache the inputs before the full run.
 4. **Tabular: diverse baselines on the same folds.** Also run `--model linear` and `--model mlp`
    (plus `knn` / `svm` on data below ~50k rows, or a row subsample), each a few minutes. Report
    which families fit (GBDT ≫ linear → interactions to engineer; linear ≈ GBDT → simple signal or a leak
