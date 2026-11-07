@@ -170,8 +170,8 @@ for commands that mention Kaggle (or `VERBOSE`), which keeps overhead around 70 
 
 The plugin also ships a mod, `hooks/monitor/`: a TypeScript hooks module that Claude Code loads beside the Python
 hooks and that opens a pane beside the chat, so you do not have to keep Kaggle open in a browser. Run
-`/kaggle-monitor` (or `/kaggle-monitor quota`, `accounts`, `use <alias>`, `refresh`); in a competition workspace it
-opens by itself. Keys: `1` `2` `3` switch tabs, `r` refreshes.
+`/kaggle-monitor` (or `/kaggle-monitor quota`, `accounts`, `use <alias>`, `refresh`) to open it; it never opens by
+itself. Keys: `1` `2` `3` switch tabs, `r` refreshes.
 
 | Tab | Shows |
 |---|---|

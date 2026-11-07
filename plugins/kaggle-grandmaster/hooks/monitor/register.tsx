@@ -590,8 +590,8 @@ async function init($: EngineInterface, cwd: string) {
     await publishAccounts($)
     await statusLine($)
   }
+  // The pane opens only on /kaggle-monitor: opened here it came back in every new session.
   $.clock.every(TICK_MS, () => void tick($))
-  if (competition) void $.ui.open({ id: PANE, title: TITLE })
   await detectCli($)
   await tick($)
 }

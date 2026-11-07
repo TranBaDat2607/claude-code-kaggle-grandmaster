@@ -81,6 +81,42 @@ test('session start declares /kaggle-monitor before anything else can fail', asy
   expect(registered).toEqual(['kaggle-monitor'])
 })
 
+test('session start in a competition workspace does not open the pane by itself', async ($, on) => {
+  const opened: string[] = []
+  let isCompetitionRead = false
+  let ticked = () => {}
+  const firstTick = new Promise<void>(resolve => (ticked = resolve))
+  on('command.register', (_, e) => ({ value: { command: e.name } }))
+  on('session.start', (_, e) => ({ cwd: e.cwd }))
+  on('ui.status', () => ({ value: undefined }))
+  on('ui.open', (_, e) => {
+    opened.push(e.id)
+    return { value: { isPlaced: true } }
+  })
+  on('ui.panes', () => {
+    ticked()
+    return { value: [] }
+  })
+  on('env.get', () => ({ value: undefined }))
+  on('store.get', () => ({ value: undefined }))
+  on('clock.now', () => ({ value: Date.UTC(2026, 10, 7) }))
+  on('process.run', () => {
+    throw new Error('no processes in this test')
+  })
+  on('fs.exists', () => ({ value: false }))
+  on('fs.read', (_, e) => {
+    if (e.path === '/ws/.kaggle-gm/competition.json') {
+      isCompetitionRead = true
+      return { value: JSON.stringify({ slug: 'playground-s6e11' }) }
+    }
+    throw new Error(`ENOENT: ${e.path}`)
+  })
+  await $.session.start({ cwd: '/ws', surface: 'terminal', isInteractive: true })
+  await firstTick // the start runs on after it answers; its last step is a first look at the panes
+  expect(isCompetitionRead).toBe(true)
+  expect(opened).toEqual([]) // the pane waits for /kaggle-monitor
+})
+
 test('a [kgmon] line reads as the Kaggle session\'s resources', async () => {
   const r = parseKgmon(
     '[kg   3.0m] [kgmon] {"v":1,"t":180,"cores":4.0,"cpu":97.5,"ram":[12000,30000],"disk":[900,20000],' +
