@@ -140,17 +140,6 @@ def public_noise(root, st) -> tuple[float | None, str]:
     return 2 * se, f"2x the public-LB SE ~{E.fmt_se(se)} measured by `ledger compare --public-n`"
 
 
-def _unit(scores: list[float]) -> float:
-    """The resolution the board shows scores at (1e-5 for five decimals)."""
-    digits = 0
-    for s in scores[:500]:
-        text = repr(float(s))
-        if "e" in text:
-            continue
-        digits = max(digits, len(text.split(".")[1].rstrip("0")) if "." in text else 0)
-    return 10.0 ** -min(digits, 8) if digits else 1.0
-
-
 def crowd(root, st, recs: list[dict]) -> dict | None:
     """Teams on the cached public board within noise of the best honest public score, or None (no board, a private
     one, or no honest public score)."""
@@ -164,7 +153,7 @@ def crowd(root, st, recs: list[dict]) -> dict | None:
     if not scores or ours is None:
         return None
     band, why = public_noise(root, st)
-    unit = _unit(scores)
+    unit = FN.score_unit(scores)
     if band is None or band < unit:
         lead = (f"{why}, is below" if why else
                 "no public-LB noise measured (`ledger compare --public-n`), so")

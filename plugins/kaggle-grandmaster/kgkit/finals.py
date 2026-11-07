@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+import math
 import re
 import subprocess
 import sys
@@ -548,6 +549,66 @@ def _tie_line(scores: list[float | None], rank: int, complete: bool, cut: dict[s
             "rounded, so that order cannot be checked here.")
 
 
+def score_unit(scores) -> float:
+    """The resolution a board shows scores at (1e-5 for five decimals), read off the scores' shortest spelling."""
+    digits = 0
+    for v in list(scores)[:500]:
+        v = _num(v)
+        if v is None:
+            continue
+        text = repr(v)
+        if "e" not in text and "." in text:
+            digits = max(digits, len(text.split(".")[1].rstrip("0")))
+    return 10.0 ** -min(digits, 8) if digits else 1.0
+
+
+def rank_if(board: dict, score: float, greater: bool) -> tuple[int, int] | None:
+    """The rank a team with ``score`` would have had on ``board`` (a cached listing, ``load_board``), the team's own
+    row left out: ``(first, last)``, a range when other teams have the same score (Kaggle's order within a tie
+    cannot be read). None without scores."""
+    if _num(score) is None:
+        return None
+    mine = set((board.get("ranks") or [])[:1])
+    others = [v for i, v in enumerate((_num(x) for x in board.get("scores") or []), 1) if v is not None and i not in mine]
+    if not others:
+        return None
+    tol = score_unit(others) * 1e-6
+    better = sum(1 for v in others if (v > score + tol if greater else v < score - tol))
+    same = sum(1 for v in others if abs(v - score) <= tol)
+    return better + 1, better + same + 1
+
+
+def rank_text(r: tuple[int, int] | None) -> str:
+    if r is None:
+        return "-"
+    return f"rank {r[0]:,}" if r[0] == r[1] else f"rank {r[0]:,}-{r[1]:,} (tie)"
+
+
+def histogram_lines(scores: list[float | None], rank: int, cut: dict[str, int] | None, width: int = 10) -> list[str]:
+    """Teams per score within ``width`` display units of the team's score, best first, with the team and the medal
+    cut-offs marked: at a noise floor of one unit, the rank inside such a block is luck."""
+    s0 = scores[rank - 1] if 1 <= rank <= len(scores) else None
+    if s0 is None:
+        return []
+    unit = score_unit(scores)
+    blocks: dict[int, list] = {}
+    for i, v in enumerate(scores, 1):
+        if v is None:
+            continue
+        k = round((v - s0) / unit)
+        if abs(k) <= width:
+            b = blocks.setdefault(k, [i, i, 0, v])
+            b[1], b[2] = i, b[2] + 1
+    digits = max(0, round(-math.log10(unit)))
+    out = [f"  Private scores within {width} units ({unit:g}) of the team's, teams per score:"]
+    for first, last, n, v in sorted(blocks.values(), key=lambda b: b[0]):
+        marks = (["<- the team"] if first <= rank <= last else []) + [
+            f"{m} cut-off (rank {cut[m]:,})" for m in ("gold", "silver", "bronze") if cut and first <= cut[m] <= last]
+        out.append(f"    {v:.{digits}f}  {n:>5,} team(s)  ranks {first:,}-{last:,}" + (f"  {'; '.join(marks)}"
+                                                                                    if marks else ""))
+    return out
+
+
 def team_score(data: dict | None) -> float | None:
     """The team's score on the leaderboard the website shows (the private one once revealed)."""
     rank, scores = _rank(_board(data)[0])
@@ -591,6 +652,8 @@ def standing_lines(data: dict | None) -> list[str]:
     tie = _tie_line(scores, rank, complete, cut)
     if tie:
         out.append(tie)
+    if private:
+        out += histogram_lines(scores, rank, cut)
     return out
 
 

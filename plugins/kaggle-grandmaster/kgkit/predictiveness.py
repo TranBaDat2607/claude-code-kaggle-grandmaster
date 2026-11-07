@@ -8,8 +8,9 @@ the same run's 58-study holdout had a Spearman of 0.03 with private, against 0.7
 This reports the Spearman rank correlation of each signal with the private score over every scored submission, over
 the ledger records with a validation score of their own, and over the top k of those by public score and by CV, each
 with a 95% bootstrap interval; then what each way of picking the finals would have scored, since Kaggle scores a team
-by the best private score among its finals; then how far private fell from public. Public-LB-fitted files are left
-out: their public score is tilted toward the public labels by construction.
+by the best private score among its finals, and the private rank it would have given on the board ``kgkit final``
+cached; then how far private fell from public. Public-LB-fitted files are left out of those (their public score is
+tilted toward the public labels by construction) and get a row of their own: what fitting cost.
 
 Inputs: the ledger (CV, public and private after ``kgkit ledger sync-lb``) and Kaggle's list of submissions that
 ``sync-lb`` saves (``S.kaggle_list``), which also holds the submissions no ledger record names.
@@ -51,36 +52,32 @@ def saved_list(root) -> dict:
 
 def gather(recs: list[dict], rows: list[dict], holdout: bool) -> dict:
     """The points: ``subs``, every scored submission with both scores (from Kaggle's list, else one per ledger record);
-    ``own``, the ledger records with a validation score of their own and both scores. ``fitted`` counts the
-    public-LB-fitted submissions left out."""
+    ``own``, the ledger records with a validation score of their own and both scores; ``fitted_pts``, the
+    public-LB-fitted submissions left out of both (``fitted`` counts them)."""
     recs = [r for r in recs if isinstance(r, dict) and isinstance(r.get("id"), str)]
     index = FN._index(recs)
-    subs, fitted = [], 0
+    subs, fitted = [], []
     for row in rows:
         v = FN._view(index, row)  # linked to its record; fitted when the record is tagged or the description says so
         if v["score"] is None or v["private"] is None:
             continue
-        if v["fitted"]:
-            fitted += 1
-            continue
-        subs.append({"public": v["score"], "private": v["private"], "date": str(row.get("date") or ""),
-                     "name": FN._short(v)})
+        point = {"public": v["score"], "private": v["private"], "date": str(row.get("date") or ""),
+                 "name": FN._short(v)}
+        (fitted if v["fitted"] else subs).append(point)
     if not rows:  # no list saved: one point per ledger record
         for r in recs:
             pub, prv = _num(r.get("lb_public")), _num(r.get("lb_private"))
             if pub is None or prv is None or r.get("recheck"):
                 continue
-            if E.lb_fitted(r):
-                fitted += 1
-                continue
-            subs.append({"public": pub, "private": prv, "date": str(r.get("time") or ""), "name": r["id"]})
+            point = {"public": pub, "private": prv, "date": str(r.get("time") or ""), "name": r["id"]}
+            (fitted if E.lb_fitted(r) else subs).append(point)
     own = []
     for r in recs:
         pub, prv = _num(r.get("lb_public")), _num(r.get("lb_private"))
         if pub is None or prv is None or r.get("recheck") or not has_own_cv(r, holdout):
             continue
         own.append({"name": r["id"], "cv": float(r["cv"]), "public": pub, "private": prv})
-    return {"subs": subs, "own": own, "fitted": fitted}
+    return {"subs": subs, "own": own, "fitted": len(fitted), "fitted_pts": fitted}
 
 
 def spearman(x, y, n_boot: int = N_BOOT, seed: int = SEED) -> dict:
@@ -157,7 +154,23 @@ def finals_private(st: S.CompetitionState, recs: list[dict], saved: dict) -> dic
     return {"known": False, "n": 0, "private": None}
 
 
-def report(st: S.CompetitionState, g: dict, finals: dict, top: int) -> list[str]:
+def _picked(span: tuple[float, float] | None, board: dict | None, greater: bool) -> str:
+    """'private 0.96236 (rank 390-437 (tie) if picked)': a way of picking's private score and, on the cached
+    private board, the rank it would have given the team."""
+    if span is None:
+        return "private -"
+    if not board:
+        return f"private {_span(span)}"
+    lo, hi = sorted(span)
+    worse, better = (lo, hi) if greater else (hi, lo)
+    a, b = FN.rank_if(board, better, greater), FN.rank_if(board, worse, greater)
+    rank = None if a is None or b is None else (a[0], b[1])
+    return f"private {_span(span)}" + (f"; {FN.rank_text(rank)} if picked" if rank else "")
+
+
+def report(st: S.CompetitionState, g: dict, finals: dict, top: int, board: dict | None = None) -> list[str]:
+    """The tables of ``ledger predictiveness``. ``board``: the cached private leaderboard (``FN.load_board``), for
+    the rank each way of picking would have given the team."""
     greater = st.greater_is_better
     best = max if greater else min
     val = "holdout" if st.holdout else "CV"
@@ -189,11 +202,17 @@ def report(st: S.CompetitionState, g: dict, finals: dict, top: int) -> list[str]
                 "finals):"]
     if g["own"]:
         by_cv = FN.best_of_n([(p["cv"], p["private"]) for p in g["own"]], n, greater)
-        out.append(f"  best {val + ':':24s} private {_span(by_cv)}")
+        out.append(f"  best {val + ':':24s} {_picked(by_cv, board, greater)}")
     none = finals["known"] and not finals["n"]
+    fitted = g.get("fitted_pts") or []
     if g["subs"]:
-        out.append(f"  {'best public score:':29s} private "
-                   f"{_span(FN.best_of_n([(p['public'], p['private']) for p in g['subs']], n, greater))}"
+        out.append(f"  {'best public score:':29s} "
+                   f"{_picked(FN.best_of_n([(p['public'], p['private']) for p in g['subs']], n, greater), board, greater)}"
+                   + ("; Kaggle's rule when nothing is selected" if none and not fitted else ""))
+    if fitted:
+        both = g["subs"] + fitted
+        out.append(f"  {'best public, fitted included:':29s} "
+                   f"{_picked(FN.best_of_n([(p['public'], p['private']) for p in both], n, greater), board, greater)}"
                    + ("; Kaggle's rule when nothing is selected" if none else ""))
     if not finals["known"]:
         out.append(f"  {'your finals:':29s} unknown (`python -m kgkit ledger sync-lb` saves Kaggle's selection)")
@@ -202,13 +221,18 @@ def report(st: S.CompetitionState, g: dict, finals: dict, top: int) -> list[str]
     elif finals["private"] is None:
         out.append(f"  {'your finals:':29s} {finals['n']} selected, no private score on record")
     else:
-        out.append(f"  {'your finals:':29s} private {finals['private']:.5f} ({finals['n']} selected)")
+        out.append(f"  {'your finals:':29s} {_picked((finals['private'],) * 2, board, greater)} "
+                   f"({finals['n']} selected)")
     every = g["subs"] or g["own"]
     if every:
         top_p = best(p["private"] for p in every)
         names = [p["name"] for p in every if abs(p["private"] - top_p) < 1e-9]
-        out.append(f"  {'best possible:':29s} private {top_p:.5f} ({', '.join(names[:5])}"
+        out.append(f"  {'best possible:':29s} {_picked((top_p, top_p), board, greater)} ({', '.join(names[:5])}"
                    + (f" and {len(names) - 5} more" if len(names) > 5 else "") + ")")
+    if not board:
+        out.append("  note: no private leaderboard cached, so no rank if picked: `python -m kgkit final` after the "
+                   "close caches it (.kaggle-gm/cache/leaderboard.json)")
+    out += fitted_lines(fitted, board, greater)
 
     if g["subs"]:
         sign = 1 if greater else -1
@@ -216,6 +240,26 @@ def report(st: S.CompetitionState, g: dict, finals: dict, top: int) -> list[str]
         out += ["", f"Public minus private (positive: private was worse): mean {d.mean():+.4f} (SD {d.std():.4f}), "
                     f"from {d.min():+.4f} to {d.max():+.4f} over {len(d)} submissions."]
     return out
+
+
+def fitted_lines(fitted: list[dict], board: dict | None, greater: bool) -> list[str]:
+    """What fitting the public LB cost: the fitted files' fall from public to private, and the best of them by public
+    score (the one Kaggle would have taken with nothing selected) with its private score and rank if picked."""
+    if not fitted:
+        return []
+    sign = 1 if greater else -1
+    d = np.array([sign * (p["public"] - p["private"]) for p in fitted])
+    top = _best_first(fitted, "public", greater)[0]
+    rank = FN.rank_if(board, top["private"], greater) if board else None
+    best_p = _best_first(fitted, "private", greater)[0]
+    drop = (f"public minus private {d[0]:+.5f}" if len(d) == 1 else
+            f"public minus private mean {d.mean():+.5f} (from {d.min():+.5f} to {d.max():+.5f})")
+    line = (f"Public-LB-fitted submissions ({len(fitted)}, left out above): {drop}. The best of them by public "
+            f"score, {top['name']} (public {top['public']:.5f}), scored private {top['private']:.5f}"
+            + (f", {FN.rank_text(rank)} had it been a final" if rank else ""))
+    if best_p is not top and best_p["private"] != top["private"]:
+        line += f"; the best of them by private score: {best_p['private']:.5f} ({best_p['name']})"
+    return ["", line + ". A fitted file's public score says nothing about its private one."]
 
 
 def _when(text: str) -> dt.datetime | None:
@@ -296,7 +340,9 @@ def main(led, a) -> None:
               "below is a ledger record, and submissions no record names are missing")
     top = max(2, int(a.top or 10))
     finals = finals_private(st, led.records(), saved)
-    print("\n".join(safety.clean(line) for line in report(st, g, finals, top)))
+    board = FN.load_board(led.root, st.slug)
+    board = board if board and board.get("private") else None
+    print("\n".join(safety.clean(line) for line in report(st, g, finals, top, board)))
     if a.plot:
         written, why = figures(a.plot, g, st)
         if why:
