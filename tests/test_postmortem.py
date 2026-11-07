@@ -360,6 +360,21 @@ def test_predictiveness_shows_what_fitting_cost_and_the_rank_of_each_pick(tmp_pa
     assert "rank 207-214 (tie) had it been a final" in fitted and "no private leaderboard cached" not in out
 
 
+def test_predictiveness_reports_public_tuned_submissions_apart(tmp_path, monkeypatch, capsys, fake_kaggle):
+    """#86: where public stopped predicting private is visible when the public-tuned files have rows of their own."""
+    led = _ended_ws(tmp_path)
+    for i in ("0004", "0005", "0006"):
+        led.tag(i, "public-tuned")
+    fake_kaggle()
+    monkeypatch.chdir(tmp_path)
+    cli.main(["ledger", "sync-lb"])
+    capsys.readouterr()
+    cli.main(["ledger", "predictiveness", "--top", "3"])
+    out = capsys.readouterr().out
+    rows = {l.split("  ")[2].strip(): l.split() for l in out.splitlines() if l.startswith("    of those")}
+    assert rows["of those, public-tuned"][3] == "3" and rows["of those, not public-tuned"][4] == "5"
+
+
 def test_predictiveness_figures_or_why_not(tmp_path, monkeypatch, capsys, fake_kaggle):
     _ended_ws(tmp_path, validation="holdout+lb")
     fake_kaggle()

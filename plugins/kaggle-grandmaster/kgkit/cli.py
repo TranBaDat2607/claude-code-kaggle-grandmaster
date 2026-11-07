@@ -450,6 +450,7 @@ def cmd_final(a):
         text, picks = [f"The deadline has passed, but Kaggle could not be asked for the outcome ({error})."], None
     else:
         text, picks = FN.report(st, recs, data, error, local=FN.lines(root, st, recs))
+        text += FN.tuned_lines(st, recs, probes=True)
     print("\n".join(text))
     if picks:
         if st.final_picks and st.final_picks != picks and not st.final_picks_confirmed:
@@ -1898,7 +1899,7 @@ _LEDGER_ACTIONS = {
                                                "with public files)"),
                                   ("notes", "*", "free text")],
             "--parent --tag --variant --notes --pred --sub " + _PAIRED),
-    "tag": ("add tags to a record, or remove them (--remove): mark a logged file public-lb-fitted",
+    "tag": ("add tags to a record, or remove them (--remove): mark a logged file public-lb-fitted or public-tuned",
             [_EXP, ("tag", "+", "tags to add (or remove)")], "--remove"),
     "compare": ("paired comparison of two experiments (or artifacts/<name> folders of per-fold OOFs)",
                 [("new", None, "ledger id/name or artifacts folder"),

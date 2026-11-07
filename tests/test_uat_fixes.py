@@ -2220,7 +2220,7 @@ def test_status_and_the_brief_warn_that_kaggle_would_select_the_fitted_files(tmp
     assert "https://www.kaggle.com/competitions/demo/submissions" in warning
     honest = warning.split("Honest candidates: ")[1]
     assert "0001_stack (accepted baseline, best CV; CV 0.96220, LB 0.96185)" in honest
-    assert "0002_blend (best public score not fitted; LB-only, LB 0.96214)" in honest
+    assert "0002_blend (best public score neither fitted nor public-tuned; LB-only, LB 0.96214)" in honest
     assert "Then run `python -m kgkit final`" in warning and "final_picks=<id>,<id>" not in warning
     assert ("best public LB: 0.96297 (0003_tilt-a, CV LB-only); public-LB fitted; best not fitted: 0.96214 "
             "(0002_blend, LB-only)") in out

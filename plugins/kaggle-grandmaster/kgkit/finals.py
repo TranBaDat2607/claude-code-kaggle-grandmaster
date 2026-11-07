@@ -40,6 +40,9 @@ from . import state as S
 
 URL = "https://www.kaggle.com/competitions/{slug}/submissions"
 FITTED_WORDS = re.compile(r"public[\s_-]*lb[\s_-]*fitted", re.IGNORECASE)  # a submission description that says so
+TUNED_WORDS = re.compile(r"public[\s_-]*tuned", re.IGNORECASE)
+PROBE_MIN = 3  # LB-scored variants of one blend, differing only in numbers: probably weights picked on the public LB
+NUMBERS = re.compile(r"\d+(?:\.\d+)?")
 LEADING_NUMBER = re.compile(r"^\W*(\d{4})\b")  # "0054 [public-LB fitted] tilt ..." names a ledger record by its number
 LIVE_TIMEOUT = 90
 LEADERBOARD_TIMEOUT = 300  # the whole private leaderboard: ~0.6 s per 200 teams
@@ -176,6 +179,7 @@ def _honest(st: S.CompetitionState, by_id: dict, score: dict) -> list[tuple[str,
     """Candidates that are safe to select, as ``(id, reasons)``: the accepted baseline, the best CV of its own, the
     best public score that is not fitted. Fitted, rechecked and discarded records are not candidates."""
     ok = [r for r in by_id.values() if not E.lb_fitted(r) and not r.get("recheck") and r.get("decision") != "discard"]
+    untuned = [r for r in ok if not E.public_tuned(r)]  # picked on the public LB: its public score is no evidence
     sign = 1 if st.greater_is_better else -1
     found: dict[str, list[str]] = {}
     base = next((r for r in reversed(list(by_id.values())) if r.get("decision") in ("baseline", "keep")
@@ -185,11 +189,56 @@ def _honest(st: S.CompetitionState, by_id: dict, score: dict) -> list[tuple[str,
     own = [r for r in ok if E.own_score(r, st.holdout)]
     if own:
         found.setdefault(max(own, key=lambda r: sign * r["cv"])["id"], []).append("best CV")
-    public = [r for r in ok if r["id"] in score]
+    public = [r for r in untuned if r["id"] in score]
     if public:
         top = max(public, key=lambda r: sign * score[r["id"]])
-        found.setdefault(top["id"], []).append("best public score not fitted")
+        found.setdefault(top["id"], []).append("best public score neither fitted nor public-tuned")
+    for i, why in found.items():
+        if E.public_tuned(by_id[i]):
+            why.append("public-tuned: not a hedge")
     return list(found.items())
+
+
+def probe_groups(recs: list[dict]) -> list[list[dict]]:
+    """Groups of PROBE_MIN or more LB-scored records without a validation score of their own (``lb-blend``,
+    ``lb-only``) whose names differ only in numbers (``blend w0.30``, ``blend w0.35``, ...), none tagged
+    ``public-tuned`` or fitted: their weights were probably picked by comparing public scores."""
+    groups: dict[str, list[dict]] = {}
+    for r in recs:
+        if not isinstance(r, dict) or _num(r.get("lb_public")) is None or r.get("recheck"):
+            continue
+        if not set(r.get("tags") or ()) & set(E.LB_ONLY_TAGS):
+            continue
+        stem = " ".join(NUMBERS.sub("#", str(r.get("name") or r.get("id") or "")).replace("_", " ").split()).lower()
+        groups.setdefault(stem, []).append(r)
+    return [g for g in groups.values() if len(g) >= PROBE_MIN
+            and not any(E.public_tuned(r) or E.lb_fitted(r) for r in g)]
+
+
+def tuned_lines(st: S.CompetitionState, recs: list[dict], sel: dict | None = None, probes: bool = False) -> list[str]:
+    """A note when a final pick is public-tuned (it is not a hedge: name the CV-chosen alternative); with ``probes``
+    (``kgkit final``), one per group of LB-scored blend variants that look public-tuned but are not tagged."""
+    index = _index([r for r in recs if isinstance(r, dict)])
+    by_id = index[0]
+    out = []
+    picks = [by_id[p["id"]] for p in (sel or {}).get("picks") or () if p.get("id") in by_id]
+    tuned = [r["id"] for r in picks if E.public_tuned(r) and not E.lb_fitted(r)]
+    if tuned:
+        own = [r for r in by_id.values() if E.own_score(r, st.holdout) and not r.get("recheck")
+               and not E.public_tuned(r) and r.get("decision") != "discard"]
+        sign = 1 if st.greater_is_better else -1
+        alt = max(own, key=lambda r: sign * r["cv"]) if own else None
+        out.append(f"note: final pick(s) {', '.join(tuned)} are public-tuned (weights or members picked on the public "
+                   "LB): not a hedge, their public edge is selection; on a large test it is noise at best."
+                   + (f" The CV-chosen alternative: {alt['id']} ({_cv_text(alt)}"
+                      + (f", LB {alt['lb_public']:.5f}" if _num(alt.get("lb_public")) is not None else "") + ")."
+                      if alt else ""))
+    for g in probe_groups(recs) if probes else ():
+        ids = sorted(r["id"] for r in g)
+        out.append(f"note: {len(g)} LB-scored blend variants differ only in numbers ({ids[0]} .. {ids[-1]}): if their "
+                   "weights or members were picked by comparing public scores, tag them `python -m kgkit ledger tag "
+                   "<id> public-tuned`; a public-tuned file is not an honest hedge.")
+    return out
 
 
 # ---------------------------------------------------------------------------- the text
@@ -304,7 +353,8 @@ def lines(root, st: S.CompetitionState, recs: list[dict], subs=None) -> list[str
     try:
         subs = S.submission_records(root) if subs is None else subs
         by_id = _index([r for r in recs if isinstance(r, dict)])[0]
-        return _warning(selection(st, recs, subs), st, by_id)
+        sel = selection(st, recs, subs)
+        return _warning(sel, st, by_id) + tuned_lines(st, recs, sel)
     except Exception:
         return []
 
@@ -361,13 +411,17 @@ def _view(index: tuple[dict, dict], row: dict) -> dict:
             "score": _num(row.get("public_score")), "private": _num(row.get("private_score")),
             "id": rec["id"] if rec else None,
             "label": _label(row.get("description") or row.get("file")),
-            "fitted": (rec is not None and E.lb_fitted(rec)) or bool(FITTED_WORDS.search(text))}
+            "fitted": (rec is not None and E.lb_fitted(rec)) or bool(FITTED_WORDS.search(text)),
+            "tuned": (rec is not None and E.public_tuned(rec)) or bool(TUNED_WORDS.search(text))}
 
 
 def _row_text(v: dict) -> str:
     score = f"{v['score']:.5f}" if v["score"] is not None else "   -   "
-    return (f"  {score}  {v['id'] or '(no ledger record)':<34} {v['date']:<16}  {v['label']}"
-            + ("  [public-LB fitted]" if v["fitted"] else ""))
+    return (f"  {score}  {v['id'] or '(no ledger record)':<34} {v['date']:<16}  {v['label']}" + _marks(v))
+
+
+def _marks(v: dict) -> str:
+    return "  [public-LB fitted]" if v.get("fitted") else "  [public-tuned]" if v.get("tuned") else ""
 
 
 def report(st: S.CompetitionState, recs: list[dict], data: dict | None, error: str | None,
@@ -396,6 +450,9 @@ def report(st: S.CompetitionState, recs: list[dict], data: dict | None, error: s
     if any(v["fitted"] for v in selected):
         out.append("WARNING: a selected final is public-LB fitted: replace it on the website "
                    f"before {utc_deadline(st)}.")
+    if any(v["tuned"] and not v["fitted"] for v in selected):
+        out.append("note: a selected final is public-tuned (picked on the public LB): it is not a hedge. Keep a "
+                   "CV-chosen candidate among the finals.")
     if len(selected) < n:
         out.append(f"Only {len(selected)} of {n} are selected: select the other {n - len(selected)} as well; what "
                    "Kaggle does with an empty slot is not something to rely on.")
@@ -659,7 +716,7 @@ def standing_lines(data: dict | None) -> list[str]:
 
 def _out_row(v: dict) -> str:
     return (f"  {_fmt(v['score'])} / {_fmt(v['private'])}  {v['id'] or '(no ledger record)':<34} {v['date']:<16}  "
-            f"{v['label']}" + ("  [public-LB fitted]" if v["fitted"] else ""))
+            f"{v['label']}" + _marks(v))
 
 
 def _short(v: dict) -> str:

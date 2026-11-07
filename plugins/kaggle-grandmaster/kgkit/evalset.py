@@ -41,6 +41,10 @@ LB_ONLY_TAGS = ("lb-only", "lb-blend")
 # public-lb-fitted: tilted toward an estimate of the public labels. Its public score says nothing about private, and
 # Kaggle auto-selects the best public scores when no finals are selected, so it must never be a final pick.
 LB_FITTED_TAGS = ("public-lb-fitted",)
+# public-tuned: its weights, members or thresholds were picked by comparing public-LB scores (LB probes). Its public
+# score is optimistic by selection, so it is not the "best public" candidate and not an honest hedge; it can still be
+# selected, unlike a fitted file. Over 13 such blends in UAT, public was anti-correlated with private (-0.59).
+PUBLIC_TUNED_TAGS = ("public-tuned",)
 DECIDED = ("keep", "discard", "inconclusive")
 COMPARISONS = "comparisons.jsonl"
 
@@ -283,6 +287,11 @@ def record_key(rec: dict, holdout: bool) -> str | None:
 def lb_fitted(rec: dict) -> bool:
     """True for a record tagged ``public-lb-fitted``: display only, never a final pick."""
     return isinstance(rec, dict) and bool(set(rec.get("tags") or ()) & set(LB_FITTED_TAGS))
+
+
+def public_tuned(rec: dict) -> bool:
+    """True for a record tagged ``public-tuned``: chosen on the public LB, so not a hedge."""
+    return isinstance(rec, dict) and bool(set(rec.get("tags") or ()) & set(PUBLIC_TUNED_TAGS))
 
 
 def own_score(rec: dict, holdout: bool = False) -> bool:

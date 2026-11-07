@@ -62,14 +62,15 @@ def gather(recs: list[dict], rows: list[dict], holdout: bool) -> dict:
         if v["score"] is None or v["private"] is None:
             continue
         point = {"public": v["score"], "private": v["private"], "date": str(row.get("date") or ""),
-                 "name": FN._short(v)}
+                 "name": FN._short(v), "tuned": v["tuned"]}
         (fitted if v["fitted"] else subs).append(point)
     if not rows:  # no list saved: one point per ledger record
         for r in recs:
             pub, prv = _num(r.get("lb_public")), _num(r.get("lb_private"))
             if pub is None or prv is None or r.get("recheck"):
                 continue
-            point = {"public": pub, "private": prv, "date": str(r.get("time") or ""), "name": r["id"]}
+            point = {"public": pub, "private": prv, "date": str(r.get("time") or ""), "name": r["id"],
+                     "tuned": E.public_tuned(r)}
             (fitted if E.lb_fitted(r) else subs).append(point)
     own = []
     for r in recs:
@@ -122,6 +123,11 @@ def correlations(g: dict, top: int, greater: bool) -> list[tuple[str, int, dict 
     """``(set, n, CV->private or None, public->private)`` for each set of points."""
     out = [("every scored submission", len(g["subs"]), None,
             spearman([p["public"] for p in g["subs"]], [p["private"] for p in g["subs"]]))]
+    tuned = [p for p in g["subs"] if p.get("tuned")]
+    if tuned and len(tuned) < len(g["subs"]):  # picked on the public LB: is that where public stopped predicting?
+        rest = [p for p in g["subs"] if not p.get("tuned")]
+        out += [(name, len(pts), None, spearman([p["public"] for p in pts], [p["private"] for p in pts]))
+                for name, pts in (("  of those, public-tuned", tuned), ("  of those, not public-tuned", rest))]
     own = g["own"]
     sets = [("records with their own validation score", own)] if own else []
     if len(own) > top:
@@ -342,7 +348,8 @@ def main(led, a) -> None:
     finals = finals_private(st, led.records(), saved)
     board = FN.load_board(led.root, st.slug)
     board = board if board and board.get("private") else None
-    print("\n".join(safety.clean(line) for line in report(st, g, finals, top, board)))
+    probes = FN.tuned_lines(st, led.records(), probes=True)  # untagged public-tuned blends blur the rows above
+    print("\n".join(safety.clean(line) for line in report(st, g, finals, top, board) + probes))
     if a.plot:
         written, why = figures(a.plot, g, st)
         if why:
