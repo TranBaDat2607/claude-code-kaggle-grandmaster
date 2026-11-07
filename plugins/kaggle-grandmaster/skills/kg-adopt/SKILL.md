@@ -75,8 +75,8 @@ does around the existing work: submission logging and the daily budget, the sess
 3. **Competition data in git.** The repo has been in git, maybe on a public GitHub, for weeks. The adopt output
    ends with the audit: whether the GitHub remote is public, and what git holds that comes from the competition's
    files. It compares contents, so a file made from `train.csv` under another name counts, and it checks every
-   branch and the history. Run it again with `python -m kgkit audit-repo` (add `--data <path>` when the
-   competition's tables are not in the repo's `data/`).
+   branch and the history. Run it again with `python -m kgkit audit-repo` (add `--data <files>` when the
+   competition's tables are not at the top of the repo's `data/`; it replaces the default, so name them all).
    - **LEAK**: tell the user at once, before anything else, and show the steps the audit prints. Rewriting
      history, force-pushing and changing the repo's visibility are the user's decisions: never do them without an
      explicit go-ahead.

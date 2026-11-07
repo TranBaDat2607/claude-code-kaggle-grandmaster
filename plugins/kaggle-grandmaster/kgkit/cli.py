@@ -300,11 +300,16 @@ def cmd_adopt(a):
         from . import audit as AU
 
         print()
-        print("\n".join(AU.report(AU.run(root, max_seconds=120))))
+        print("\n".join(AU.report(AU.run(root, max_seconds=120, log=_progress))))
         print()
     print("next: record past experiments in the ledger (`kgkit ledger import <name> <oof> --truth ... --folds ...` "
           "or `kgkit ledger add <name> <cv> <notes>`), mark the accepted one with `kgkit ledger decide <id> baseline`, "
           "then `kgkit status`")
+
+
+def _progress(line: str) -> None:
+    """A progress line on stderr, so a long command is visibly working and its report on stdout stays clean."""
+    print(line, file=sys.stderr, flush=True)
 
 
 def cmd_audit_repo(a):
@@ -313,7 +318,7 @@ def cmd_audit_repo(a):
     from . import audit as AU
 
     res = AU.run(a.dir, a.data, max_seconds=a.max_seconds, max_blob_mb=a.max_blob_mb, online=not a.offline,
-                 fix_gitignore=a.fix_gitignore)
+                 fix_gitignore=a.fix_gitignore, log=_progress)
     print("\n".join(AU.report(res)))
     sys.exit(1 if res["leaks"] else 0)
 
@@ -1986,12 +1991,15 @@ def build_parser() -> argparse.ArgumentParser:
                                    "(--fix-gitignore) and .kaggle-gm/audit.json.")
     s.add_argument("--dir", default=".")
     s.add_argument("--data", nargs="+", action="extend", default=[], metavar="PATH",
-                   help="competition files or folders to compare with (default: the untracked files in data/ and "
-                        "input/), e.g. train.csv kept outside the repo")
+                   help="the competition's files or folders to compare with, instead of the default: the untracked "
+                        "files at the top of data/ and input/ (or of their <slug>/), beside train/test files, or in "
+                        "the download zip; other files there (OOF libraries, outputs) are only checked for exact "
+                        "copies. E.g. train.csv test.csv kept outside the repo, or the original dataset")
     s.add_argument("--fix-gitignore", action="store_true",
                    help="add the data folders to .gitignore when git does not ignore them yet")
     s.add_argument("--offline", action="store_true", help="do not ask GitHub whether the remote is public")
-    s.add_argument("--max-seconds", type=float, default=300, help="time budget for reading git's history")
+    s.add_argument("--max-seconds", type=float, default=300,
+                   help="time budget for the whole audit; reading the competition's files gets at most half")
     s.add_argument("--max-blob-mb", type=float, default=50, help="larger blobs are only checked for exact copies")
     s.set_defaults(fn=cmd_audit_repo)
 

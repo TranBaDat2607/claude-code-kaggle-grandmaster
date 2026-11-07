@@ -5,8 +5,12 @@ everyone. A ``.gitignore`` that names the downloaded files (``data/train.csv``) 
 from them under another name: in UAT a subset of ``train.csv`` (the report text and expert labels of 58 studies) sat
 in a public repository for two and a half months. So ``kgkit audit-repo`` compares contents, not names.
 
-* The reference is the competition's files on this machine: files under ``data/`` and ``input/`` that git does not
-  track (downloads are kept out of git), plus any ``--data`` path.
+* The reference is the competition's files on this machine, among the files under ``data/`` and ``input/`` that git
+  does not track (downloads are kept out of git): those at the top of the folder (or of ``<folder>/<slug>/``), those
+  beside a ``train``/``test``/``sample_submission`` file, and those the download zip (``<folder>/<slug>.zip``) lists.
+  The rest of the folder (public OOF libraries, notebook outputs, matrices made from the data) is not the
+  competition's data and is only checked for exact copies: in UAT a ``data/`` of 39 GB took the audit 39+ minutes.
+  ``--data`` names the reference instead. Indexing it gets at most half the time budget.
 * Every blob reachable from a branch or tag is checked (history too: a file deleted in a later commit is still
   published), and so are the files ``git add -A`` would commit next. A file shares competition data when it is an
   exact copy of a reference file, holds rows of a reference table (cells compared as values, so a re-saved CSV still
@@ -37,6 +41,7 @@ import re
 import shutil
 import subprocess
 import time
+import zipfile
 from collections import Counter
 from pathlib import Path
 
@@ -188,6 +193,10 @@ class Reference:
         self.dense_ids = False              # IDs 0..N-1: any column of small integers would "overlap" them
         self.n_rows = 0
         self.partial: list[str] = []
+        self.deadline = float("inf")        # time.monotonic() at which reading reference files stops
+
+    def late(self) -> bool:
+        return time.monotonic() > self.deadline
 
     @property
     def tables(self) -> bool:
@@ -222,12 +231,12 @@ class Reference:
                 if len(self.passages) > CAPS["passages"]:
                     self._shrink("passages", self.passages)
 
-    def _file(self, path: Path, label: str, kind: str) -> int:
+    def _file(self, path: Path, label: str, kind: str, role: str = "competition") -> int:
         try:
             size = path.stat().st_size
         except OSError:
             size = -1
-        self.files.append({"path": label, "kind": kind, "rows": 0, "size": size, "abs": path})
+        self.files.append({"path": label, "kind": kind, "rows": 0, "size": size, "abs": path, "role": role})
         self.sizes.setdefault(size, []).append(len(self.files) - 1)
         return len(self.files) - 1
 
@@ -251,6 +260,9 @@ class Reference:
                 for r, row in enumerate(reader):
                     if r >= MAX_REF_ROWS:
                         self.partial.append(f"{label}: only its first {MAX_REF_ROWS:,} rows were read")
+                        break
+                    if not r & 0xFFFF and r and self.late():
+                        self.partial.append(f"{label}: only its first {r:,} rows were read (time budget)")
                         break
                     info["rows"] += 1
                     cells = [_cell(c) for c in row]
@@ -295,6 +307,9 @@ class Reference:
             return
         lines = Path(label).suffix.lower() in LINE_EXT
         for r, unit in enumerate(text.splitlines() if lines else re.split(r"\n\s*\n", text)):
+            if not r & 0xFFF and r and self.late():
+                self.partial.append(f"{label}: only its first {r:,} parts were read (time budget)")
+                break
             info["rows"] += 1
             if lines and len(unit.strip()) >= MIN_ROW_CHARS:
                 self._put("rows", self.rows, hash(("line", unit.strip())), fi)
@@ -302,8 +317,8 @@ class Reference:
                 self._add_passages([unit], fi << 40 | r)
         self.n_rows += info["rows"]
 
-    def add_other(self, path: Path, label: str) -> None:
-        self._file(path, label, "file")  # exact copies only (parquet, images, archives)
+    def add_other(self, path: Path, label: str, role: str = "competition") -> None:
+        self._file(path, label, "file", role)  # exact copies only (parquet, images, archives, derived files)
 
     # ------------------------------------------------------------------------ checks
     def copy_of(self, size: int, ident: str, algo: str) -> str | None:
@@ -661,31 +676,105 @@ def _header(path: Path, delim: str) -> list[str]:
         return []
 
 
-def reference(top: Path, base: Path, st, tracked: set[str], data=()) -> tuple[Reference, list[str]]:
-    """The competition's files on this machine, fingerprinted: untracked files under ``base``'s data folders and
-    ``data`` (files or folders, used as given even when tracked)."""
+def _zip_listing(base: Path, slug: str) -> set[str]:
+    """Paths (relative to ``base``) the competition's download zip lists, when it is still in a data folder: only
+    its directory is read, not its contents."""
+    out: set[str] = set()
+    for d in DATA_DIRS if slug else ():
+        z = base / d / f"{slug}.zip"
+        try:
+            with zipfile.ZipFile(z) as zf:
+                for n in zf.namelist():
+                    n = n.replace("\\", "/").strip("/")
+                    if n:
+                        out |= {f"{d}/{n}", f"{d}/{slug}/{n}"}  # extracted into the folder or into <slug>/
+        except (OSError, zipfile.BadZipFile, ValueError):
+            continue
+    return out
+
+
+def _competition_files(base: Path, files: list[Path], slug: str) -> set[Path]:
+    """Which of the data folders' ``files`` are the competition's own: at the top of a data folder or of its
+    ``<slug>/`` subfolder, in a folder that also holds a train/test/sample_submission file, or listed by the
+    download zip. The others (``data/ext/``, ``data/oof/``, notebook outputs) were made or downloaded later."""
+    listed = _zip_listing(base, slug)
+    rel = {}
+    for f in files:
+        try:
+            rel[f] = f.relative_to(base).as_posix()
+        except ValueError:
+            rel[f] = ""
+    comp_dirs = {f.parent for f in files if COMPETITION_FILE.match(f.name)}
+    out = set()
+    for f, r in rel.items():
+        parts = r.split("/")
+        if (len(parts) == 2 or (len(parts) == 3 and slug and parts[1] == slug) or f.parent in comp_dirs
+                or r in listed):
+            out.add(f)
+    return out
+
+
+def _size(n: float) -> str:
+    for unit in ("B", "KB", "MB", "GB"):
+        if n < 1024 or unit == "GB":
+            return f"{n:.0f} {unit}" if unit == "B" else f"{n:.1f} {unit}"
+        n /= 1024
+    return ""
+
+
+def _sizes(paths) -> int:
+    total = 0
+    for p in paths:
+        try:
+            total += p.stat().st_size
+        except OSError:
+            pass
+    return total
+
+
+def reference(top: Path, base: Path, st, tracked: set[str], data=(), *, deadline: float = float("inf"),
+              log=None) -> tuple[Reference, list[str]]:
+    """The competition's files on this machine, fingerprinted. ``data`` (files or folders, used as given even when
+    tracked) names them; without it they are the untracked files under ``base``'s data folders that
+    ``_competition_files`` picks, and the folders' other files are only checked for exact copies. Reading stops
+    at ``deadline`` (``time.monotonic()``); what was not read is said in the notes. ``log`` gets progress lines."""
     notes: list[str] = []
     found: dict[str, Path] = {}
-    for d in DATA_DIRS:
-        if (base / d).is_dir():
-            for f in _walk(base / d, notes):
-                rel = _rel(f, top)
-                if rel not in tracked:
-                    found.setdefault(rel, f)
-    for spec in data:
-        p = Path(spec).expanduser()
-        if p.is_dir():
-            for f in _walk(p, notes):
-                found.setdefault(_rel(f, top), f)
-        elif p.is_file():
-            found.setdefault(_rel(p, top), p)
-        else:
-            notes.append(f"--data {spec}: no such file or folder")
+    derived: dict[str, Path] = {}
+    if data:
+        for spec in data:
+            p = Path(spec).expanduser()
+            if p.is_dir():
+                for f in _walk(p, notes):
+                    found.setdefault(_rel(f, top), f)
+            elif p.is_file():
+                found.setdefault(_rel(p, top), p)
+            else:
+                notes.append(f"--data {spec}: no such file or folder")
+    else:
+        walked = []
+        for d in DATA_DIRS:
+            if (base / d).is_dir():
+                walked += [f for f in _walk(base / d, notes) if _rel(f, top) not in tracked]
+        own = _competition_files(base, walked, st.slug if st is not None else "")
+        for f in walked:
+            (found if f in own else derived).setdefault(_rel(f, top), f)
     readable = {rel: p for rel, p in found.items() if p.suffix.lower() in TABLE_EXT or p.suffix.lower() in TEXT_EXT}
-    others = [(rel, p) for rel, p in found.items() if rel not in readable]
+    others = [(rel, p, "competition") for rel, p in found.items() if rel not in readable]
+    others += [(rel, p, "other") for rel, p in derived.items()]
+    if derived:
+        notes.append(f"{len(derived):,} other file(s) in the data folders ({_size(_sizes(derived.values()))}, e.g. "
+                     f"{_few(sorted({str(Path(r).parent.as_posix()) for r in derived}), 3)}) are not the competition's "
+                     "files (not at the top of the folder, not beside train/test files, not in the download zip): "
+                     "only checked for exact copies. `--data <files>` names the competition's files instead")
+    if log:
+        log(f"audit-repo: indexing {len(readable):,} competition file(s) ({_size(_sizes(readable.values()))})"
+            + (f"; {len(derived):,} other file(s) in the data folders only checked for exact copies" if derived else "")
+            + ("" if data else "; `--data <files>` names the competition's files instead"))
     heads = {rel: _header(p, TABLE_EXT[p.suffix.lower()]) for rel, p in readable.items()
              if p.suffix.lower() in TABLE_EXT}
     ref = Reference(*_names(st, heads))
+    ref.deadline = deadline
 
     def order(item):  # who owns a passage both have: the competition's own tables before files made from them
         rel, p = item
@@ -696,13 +785,22 @@ def reference(top: Path, base: Path, st, tracked: set[str], data=()) -> tuple[Re
             size = 0
         return _is_sample(name), not COMPETITION_FILE.match(name), -size
 
-    for rel, p in sorted(readable.items(), key=order):
+    queue = sorted(readable.items(), key=order)
+    for i, (rel, p) in enumerate(queue):
+        if ref.late():  # the rest is still looked for as exact copies
+            notes.append(f"time budget: {len(queue) - i:,} of {len(queue):,} competition file(s) were only checked "
+                         f"for exact copies, e.g. {_few([r for r, _ in queue[i:]], 3)} (`--max-seconds` for more, or "
+                         "`--data <files>` for fewer)")
+            others = [(r, q, "competition") for r, q in queue[i:]] + others
+            break
+        if log and _sizes([p]) > 100 * 2**20:
+            log(f"audit-repo: reading {rel} ({_size(_sizes([p]))})")
         if p.suffix.lower() in TABLE_EXT:
             ref.add_table(p, rel, TABLE_EXT[p.suffix.lower()])
         else:
             ref.add_text(p, rel)
-    for rel, p in others[:MAX_OTHER]:  # images, archives, parquet: exact copies only
-        ref.add_other(p, rel)
+    for rel, p, role in others[:MAX_OTHER]:  # images, archives, parquet, derived files: exact copies only
+        ref.add_other(p, rel, role)
     if len(others) > MAX_OTHER:
         notes.append(f"{len(others) - MAX_OTHER:,} more files in the data folders (images, archives) were not checked "
                      "for exact copies")
@@ -776,9 +874,10 @@ def _verdict(f: dict, tables: bool) -> tuple[str, list[str]]:
 
 
 def run(start=".", data=(), *, max_seconds: float = 300, max_blob_mb: float = 50, online: bool = True,
-        fix_gitignore: bool = False, save: bool = True) -> dict:
+        fix_gitignore: bool = False, save: bool = True, log=None) -> dict:
     """Audit the git repository around ``start``; see the module docstring. Returns the result (``report`` prints it)
-    and caches its summary in ``.kaggle-gm/audit.json`` when ``start`` is in a workspace."""
+    and caches its summary in ``.kaggle-gm/audit.json`` when ``start`` is in a workspace. ``max_seconds`` bounds the
+    whole audit, of which reading the competition's files gets at most half; ``log`` gets progress lines."""
     t0 = time.monotonic()
     _csv_limit()
     start = Path(start).resolve()
@@ -820,10 +919,10 @@ def run(start=".", data=(), *, max_seconds: float = 300, max_blob_mb: float = 50
     tracked = set(_z(_git(top, "ls-files", "-z")))
     pending = list(dict.fromkeys(_z(_git(top, "ls-files", "-z", "--others", "--exclude-standard"))
                                  + _z(_git(top, "ls-files", "-z", "-m"))))
-    ref, res["notes"] = reference(top, base, st, tracked, data)
+    ref, res["notes"] = reference(top, base, st, tracked, data, deadline=t0 + max_seconds / 2, log=log)
     res["notes"] += ref.partial
     res["tables"] = ref.tables
-    res["references"] = [{k: f[k] for k in ("path", "kind", "rows", "size")} for f in ref.files]
+    res["references"] = [{k: f[k] for k in ("path", "kind", "rows", "size", "role")} for f in ref.files]
     algo = "sha256" if (_git(top, "rev-parse", "--show-object-format", timeout=30) or b"").strip() == b"sha256" else "sha1"
     prefixes = tuple(_rel(base / d, top) + "/" for d in dirs)
     max_blob = int(max_blob_mb * 2**20)
@@ -860,6 +959,9 @@ def run(start=".", data=(), *, max_seconds: float = 300, max_blob_mb: float = 50
         n_path[path] += 1
     queue.sort()
     by_id = {q[3]: q for q in queue}
+    if log:
+        log(f"audit-repo: reading {len(queue):,} blob(s) of git history "
+            f"({max(0, max_seconds - (time.monotonic() - t0)):.0f} s left of --max-seconds {max_seconds:.0f})")
     done = 0
     blobs_read = _cat(top, [q[3] for q in queue])
     for ident, data_ in blobs_read:
@@ -1003,7 +1105,7 @@ def report(res: dict) -> list[str]:
     for r in res["remotes"]:
         out.append(f"  remote {r['name']}: " + (f"github.com/{r['repo']} is {_vis(r)}" if r.get("repo") else
                                                f"{r['url']} (not GitHub: check who can read it yourself)"))
-    refs = res["references"]
+    refs = [x for x in res["references"] if x.get("role", "competition") == "competition"]
     if refs:
         shown = "; ".join(f"{x['path']}" + (f" ({x['rows']:,} rows)" if x["kind"] != "file" else "") for x in refs[:5])
         out.append(f"  compared with {len(refs)} competition file(s) on this machine that git does not track: {shown}"
