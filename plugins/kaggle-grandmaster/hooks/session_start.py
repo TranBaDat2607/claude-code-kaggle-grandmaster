@@ -1,7 +1,7 @@
 """SessionStart: expose kgkit to the session and, inside a competition workspace, inject a compact
-status brief (facts, deadline countdown, best CV/LB, accepted baseline, CV-LB agreement, recent
-experiments, top of the idea backlog, submissions today, lessons from past competitions). After the deadline the
-brief is short: what is left to do (standing, finals, post-mortem, repo audit, lessons; ``finals.ended_lines``)
+status brief (facts, deadline countdown, best CV/LB, accepted baseline, CV-LB agreement, a plateau of the
+accepted baseline or a crowd around it on the public LB (``kgkit.progress``), recent experiments, top of the idea
+backlog, submissions today, lessons from past competitions). After the deadline the brief is short: what is left to do (standing, finals, post-mortem, repo audit, lessons; ``finals.ended_lines``)
 instead of the CV, submission and GPU lines. Outside a
 workspace, a repo with signs of Kaggle work (kernel-metadata.json, competition URLs) is pointed at
 /kg-adopt rather than the full /kg-start bootstrap."""
@@ -161,6 +161,7 @@ def brief(root: Path) -> str:
             lines.append("No accepted baseline yet: decide one (`kgkit ledger decide <id> baseline`) so experiments "
                          "are compared against a deliberate choice, not the luckiest CV.")
         lines.extend(C.FN.lines(root, st, recs))  # a warning when Kaggle would auto-select a public-LB fitted file
+        lines.extend(C.PG.lines(root, st, recs))  # a plateau of the honest track, a crowd on the public LB
         for r in recs[-3:]:
             note = (r.get("notes") or "").replace("\n", " ")[:80]
             cv = f"{r['cv']:.5f}" if isinstance(r.get("cv"), (int, float)) else "?"

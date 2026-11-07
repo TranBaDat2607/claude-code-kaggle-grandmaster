@@ -159,6 +159,11 @@ plugin's `templates/` folder.
 - Discarding consistent small gains because they are below the fold std (paired noise is far smaller),
   and accepting single-seed gains that are within paired noise.
 - Letting the highest CV, rather than a decided baseline, become the reference for new ideas.
+- Adding more of the same once the stack is saturated. When the accepted baseline has been flat for days
+  (`kgkit status`: PLATEAU), or dozens of teams sit within noise of your public score (CROWD: everyone blends
+  the same public notebooks and OOF files), your rank inside that crowd is noise. Only something the crowd
+  lacks moves you out of it: a new model family, a new data view, or a new signal. Fitting the public LB moves
+  only the public rank.
 - Huge hyperparameter searches before the features and validation are right.
 - Ensembling OOFs from different fold splits (blend weights become optimistic garbage).
 - Ignoring runtime limits until the last day of a code competition.

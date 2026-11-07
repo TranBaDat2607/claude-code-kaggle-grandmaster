@@ -19,6 +19,7 @@ from kgkit import backlog as B  # noqa: E402  (stdlib-only module)
 from kgkit import evalset as EV  # noqa: E402  (stdlib-only module)
 from kgkit import finals as FN  # noqa: E402  (stdlib-only module)
 from kgkit import gpu as G  # noqa: E402  (stdlib-only module)
+from kgkit import progress as PG  # noqa: E402  (stdlib-only module)
 from kgkit import safety as SF  # noqa: E402  (stdlib-only module)
 from kgkit import state as S  # noqa: E402  (stdlib-only module)
 from kgkit.state import (server_remaining_today, submission_records, submissions_log,  # noqa: E402,F401

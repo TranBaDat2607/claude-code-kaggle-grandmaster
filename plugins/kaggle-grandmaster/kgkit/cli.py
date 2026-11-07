@@ -445,6 +445,7 @@ def cmd_final(a):
     if ended:
         text, picks = FN.outcome(st, recs, data)
         FN.save_standing(root, st, recs, data)  # for the session brief after the deadline
+        FN.save_board(root, st.slug, data, by="final")
     elif after:
         text, picks = [f"The deadline has passed, but Kaggle could not be asked for the outcome ({error})."], None
     else:
@@ -491,7 +492,9 @@ def cmd_standing(a):
     print("\n".join(FN.standing_lines(data)))
     if root is not None and st is not None and st.slug == slug and FN.save_standing(
             root, st, Ledger(root).records(), data, by="standing"):
-        print("cached in .kaggle-gm/standing.json (the session brief repeats it after the deadline)")
+        FN.save_board(root, slug, data)
+        print("cached in .kaggle-gm/standing.json (the session brief repeats it after the deadline) and the scores in "
+              ".kaggle-gm/cache/leaderboard.json (the crowd check in the brief and `kgkit status` reads them)")
 
 
 def cmd_status(a):
@@ -563,6 +566,10 @@ def cmd_status(a):
             print(f"best public LB: {bl['lb_public']:.5f} ({bl['id']}, CV {fmt_cv(bl)})"
                   + (f"; {fitted}" if fitted else ""))
         for line in FN.lines(root, st, recs):  # the same lines as the session brief
+            print(line)
+        from . import progress as PG
+
+        for line in PG.lines(root, st, recs):  # plateau and crowd, as in the session brief
             print(line)
         agreement = led.cv_lb_summary() or led.noise_note()  # the noise line rides on the CV-LB line when there is one
         if agreement:

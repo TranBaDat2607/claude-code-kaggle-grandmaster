@@ -733,6 +733,38 @@ def save_standing(root, st: S.CompetitionState, recs: list[dict], data: dict, by
         return False
 
 
+BOARD = "leaderboard.json"
+
+
+def save_board(root, slug: str, data: dict | None, by: str = "standing") -> bool:
+    """Cache the leaderboard scores ``live(..., leaderboard=True)`` read, in rank order (scores only, no team names),
+    in ``.kaggle-gm/cache/leaderboard.json``: the crowd check (``kgkit.progress``) and the post-mortem read them there
+    instead of reading the whole board again. ``private``: the listing is the private board. Never raises."""
+    shown, public = _board(data)
+    if not shown.get("scores"):
+        return False
+    try:
+        out = {"slug": slug, "at": dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"), "by": by,
+               "private": revealed(data), **_listing(shown), "public": _listing(public) if public else None}
+        (S.cache_dir(root) / BOARD).write_text(json.dumps(out), encoding="utf-8")
+        return True
+    except Exception:
+        return False
+
+
+def _listing(board: dict) -> dict:
+    return {"scores": [_num(x) for x in board.get("scores") or []],
+            "ranks": [r for r in board.get("ranks") or [] if isinstance(r, int)], "complete": bool(board.get("complete"))}
+
+
+def load_board(root, slug: str) -> dict | None:
+    try:
+        d = json.loads((Path(root) / S.STATE_DIR / "cache" / BOARD).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return d if isinstance(d, dict) and d.get("slug") == slug else None
+
+
 def load_standing(root, slug: str) -> dict | None:
     try:
         d = json.loads(standing_path(root).read_text(encoding="utf-8"))
