@@ -560,12 +560,12 @@ def cmd_status(a):
         elif not st.holdout and n_dec >= 20:
             print(f"{n_dec} keep/discard decisions taken on the current folds: the CV is getting optimistic. "
                   "Re-check on a fresh fold seed: `kgkit recheck --seed 7 --run <old> --run <current> --exp <root> <baseline>`")
-        with_lb = [r for r in recs if r.get("lb_public") is not None]
-        if with_lb:
-            bl = sorted(with_lb, key=lambda r: r["lb_public"], reverse=st.greater_is_better)[0]
-            fitted = FN.not_fitted_note(recs, st)
-            print(f"best public LB: {bl['lb_public']:.5f} ({bl['id']}, CV {fmt_cv(bl)})"
-                  + (f"; {fitted}" if fitted else ""))
+        bl, fitted = FN.public_headline(recs, st)
+        if bl is not None or fitted is not None:
+            head = (f"best public LB: {bl['lb_public']:.5f} ({bl['id']}, CV {fmt_cv(bl)}"
+                    + (", public-tuned" if E.public_tuned(bl) else "") + ")" if bl is not None else
+                    "best public LB: none that is not public-LB fitted")
+            print(head + (f"; {FN.fitted_display_note(fitted)}" if fitted is not None else ""))
         for line in FN.lines(root, st, recs):  # the same lines as the session brief
             print(line)
         from . import progress as PG

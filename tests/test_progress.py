@@ -141,3 +141,61 @@ def test_status_and_brief_print_both(ws, capsys, monkeypatch):
                        input=json.dumps({"hook_event_name": "SessionStart", "cwd": str(root)}), timeout=60)
     ctx = json.loads(r.stdout)["hookSpecificOutput"]["additionalContext"]
     assert "PLATEAU:" in ctx and "CROWD:" in ctx
+
+
+# ----------------------------------------------------------------------------- #85: public-rank goals, LB fitting
+def _log_subs(root, rows):
+    S.submissions_log(root).parent.mkdir(parents=True, exist_ok=True)
+    S.submissions_log(root).write_text("".join(json.dumps(r) + "\n" for r in rows))
+
+
+def test_lb_fitting_while_the_honest_track_is_flat(ws):
+    root, st = ws
+    recs = _flat()
+    recs += [_rec(40 + k, None, 1, tags=["public-lb-fitted"], lb=0.9647) for k in range(6)]
+    subs = [{"time_utc": f"2026-10-2{k}T10:00:00", "file": f"subs/{40 + k:04d}_tilt.csv", "exp_id": f"{40 + k:04d}_m{40 + k}",
+             "status": "complete"} for k in range(6)]
+    subs += [{"time_utc": "2026-10-19T10:00:00", "file": "subs/0007.csv", "exp_id": "0007_m7"},
+             {"time_utc": "2026-10-19T11:00:00", "file": "subs/x.csv", "message": "blend w0.3 public-tuned"}]
+    _log_subs(root, subs)
+    assert PG.lb_chase(root, st, recs) == {"n": 8, "k": 7}
+    line = PG.fitting_line(root, st, recs, now=NOW)
+    assert line.startswith("LB-FITTING: the honest track has been flat for 8 days (accepted baseline 0002_m2) while "
+                           "7 of the last 8 submissions went to fitting or probing the public LB")
+    assert "cannot raise the private score" in line and "/kg-ideas" in line
+    _log_subs(root, subs[:3] + [{"time_utc": "2026-10-23T10:00:00", "file": f"subs/h{k}.csv"} for k in range(5)])
+    assert PG.fitting_line(root, st, recs, now=NOW) == ""  # 3 of 8: not most of them
+
+
+def test_a_public_rank_goal_gets_the_honest_target_once_per_session(ws, plugin_root):
+    import subprocess
+    import sys
+
+    root, st = ws
+    from kgkit.experiment import Ledger
+
+    led = Ledger(root)
+    led.attach_lb(led.log("stack", 0.962249)["id"], 0.96185)
+    led.decide("0001", "baseline")
+    led.attach_lb(led.log("tilt", None, tags=["public-lb-fitted"])["id"], 0.96473)
+    import uuid
+
+    sid = uuid.uuid4().hex  # the router remembers what it said per session, in the temp dir
+
+    def ask(prompt, session=sid):
+        r = subprocess.run([sys.executable, str(plugin_root / "hooks" / "prompt_router.py")], capture_output=True,
+                           text=True, timeout=60, input=json.dumps({"hook_event_name": "UserPromptSubmit",
+                                                                     "prompt": prompt, "cwd": str(root),
+                                                                     "session_id": session}))
+        return json.loads(r.stdout)["hookSpecificOutput"]["additionalContext"] if r.stdout.strip() else ""
+
+    ctx = ask("/goal public top 10")
+    assert "names a public-leaderboard rank or score" in ctx and "zero expected private value" in ctx
+    assert "above the accepted baseline 0001_stack (0.962249)" in ctx
+    assert "better honest public score than 0.96185 (0001_stack)" in ctx  # not the fitted 0.96473
+    assert "public-leaderboard rank" not in ask("goal check-in: keep pushing toward public top 10")  # once
+    assert "public-leaderboard rank" in ask("let's get top 5 on the public LB", session=sid + "-another-session")
+    assert ask("/goal private top 10", session=sid + "-third") == ""
+    st.deadline = (dt.date.today() - dt.timedelta(days=1)).isoformat()
+    st.save(root)
+    assert "public-leaderboard rank" not in ask("public top 10?", session=sid + "-fourth")

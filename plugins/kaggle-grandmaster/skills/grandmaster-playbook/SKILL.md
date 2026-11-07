@@ -30,7 +30,13 @@ Follow this procedure; deviate only with a reason.
 6. **Diversity beats a single best model.** Different algorithms, inputs, targets, seeds →
    ensemble. But only blend models validated on the same folds.
 7. **Robustness over public LB rank.** Choose final submissions for expected *private*
-   score; shake-ups punish public-LB chasers.
+   score; shake-ups punish public-LB chasers. When the user's goal is a public rank or score
+   ("public top 10"), say once that a gain fitted to the public LB (tilts, weights picked by LB
+   probes) has zero expected private value. Propose the honest equivalent as the target: a
+   validation gain over the accepted baseline beyond the paired noise, or a better honest
+   public score from a change with its own validation gain. Fitted files are display only:
+   `kgkit status` and the brief lead with the best honest public score, and print
+   **LB-FITTING** when most recent submissions chase the public LB while the honest track is flat.
 
 ## 1. Phase map
 

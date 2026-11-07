@@ -92,13 +92,16 @@ def ledger_line(st, recs: list[dict]) -> str:
     if best:
         s += f"; best {'holdout' if holdout else 'CV'} {best[0]['cv']:.5f} ({best[0]['id']})"
     if with_lb:
-        bl = sorted(with_lb, key=lambda r: r["lb_public"], reverse=st.greater_is_better)[0]
-        s += f"; best public LB {bl['lb_public']:.5f} ({bl['id']})"
         try:
-            fitted = C.FN.not_fitted_note(recs, st)
+            bl, fitted = C.FN.public_headline(recs, st)
         except Exception:  # the brief must survive a malformed record
-            fitted = ""
-        s += f" [{fitted}]" if fitted else ""
+            bl, fitted = None, None
+        if bl is not None:
+            s += (f"; best public LB {bl['lb_public']:.5f} ({bl['id']}"
+                  + (", public-tuned" if C.EV.public_tuned(bl) else "") + ")")
+        else:
+            s += "; no public LB score that is not public-LB fitted"
+        s += f" ({C.FN.fitted_display_note(fitted)})" if fitted is not None else ""
         pairs = [r for r in with_lb if _own_cv(r, holdout) and not r.get("recheck")]
         corr = _pearson([r["cv"] for r in pairs], [r["lb_public"] for r in pairs])
         if corr is not None and len({round(r["cv"], 12) for r in pairs}) >= 4:

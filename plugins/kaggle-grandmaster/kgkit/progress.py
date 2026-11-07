@@ -5,6 +5,8 @@
   flat for the last 7 days while most of the remaining GPU quota went unused, and the sessions drifted to fitting the
   public LB. More members of the families already in the stack add ~0 then; the next gain is likelier from a model
   family, a data view or a signal the stack (and the public notebooks) lack.
+* **LB-fitting**: most recent submissions fit or probe the public LB while the honest track is flat (UAT: 24 of 49
+  submissions over four days). ``goal_line`` is what the prompt router adds when a goal names a public rank.
 * **Crowd**: many teams on the public leaderboard sit within noise of the best honest public score. Rank inside
   such a crowd is a coin flip on the private split; only something the crowd lacks moves a team out of it. The
   board comes from the cache ``kgkit standing`` writes (``finals.save_board``), never from the network here.
@@ -185,10 +187,85 @@ def crowd_line(root, st, recs: list[dict]) -> str:
     return s + f" ({when})."
 
 
+# ---------------------------------------------------------------------------- chasing the public LB
+CHASE_TAGS = (*E.LB_FITTED_TAGS, *E.PUBLIC_TUNED_TAGS, "probe")  # submissions that chase the public LB
+CHASE_SHARE = 0.5      # more than this share of the recent submissions ...
+CHASE_MIN = 4          # ... out of at least this many
+CHASE_DAYS_LEFT = 3    # and at least this many days left: time to go back to the honest track
+
+
+def _chases(rec: dict | None, text: str = "") -> bool:
+    from . import finals as FN
+
+    tagged = isinstance(rec, dict) and bool(set(rec.get("tags") or ()) & set(CHASE_TAGS))
+    return tagged or bool(FN.FITTED_WORDS.search(text) or FN.TUNED_WORDS.search(text))
+
+
+def lb_chase(root, st, recs: list[dict]) -> dict:
+    """``{"n", "k"}``: of the last submissions (2 days' worth, at least 6), how many went to fitting or probing the
+    public LB (tagged public-lb-fitted, public-tuned or probe, or saying so in their message). From the submission
+    log, else from the ledger records with a public score."""
+    from . import finals as FN
+
+    last = max(6, 2 * int(st.daily_submissions or 5))
+    index = FN._index([r for r in recs if isinstance(r, dict)])
+    subs = sorted((r for r in S.submission_records(root) if isinstance(r, dict) and r.get("status") != "failed"),
+                  key=lambda r: str(r.get("time_utc") or ""))[-last:]
+    if subs:
+        flags = [_chases(FN._link(index, r.get("message"), r.get("file"), r.get("exp_id")),
+                         f"{r.get('message') or ''} {r.get('file') or ''}") for r in subs]
+    else:
+        scored = sorted((r for r in recs if isinstance(r, dict) and isinstance(r.get("lb_public"), (int, float))),
+                        key=lambda r: str(r.get("time") or ""))[-last:]
+        flags = [_chases(r) for r in scored]
+    return {"n": len(flags), "k": sum(flags)}
+
+
+def fitting_line(root, st, recs: list[dict], now: dt.datetime | None = None) -> str:
+    """'LB-FITTING: ...' when most recent submissions chase the public LB while the accepted baseline has been flat for
+    PLATEAU_DAYS and CHASE_DAYS_LEFT or more days are left; else ''."""
+    p = plateau(root, st, recs, now)
+    if p is None or p["days"] < PLATEAU_DAYS:
+        return ""
+    left = p["days_left"]
+    if left is not None and left < CHASE_DAYS_LEFT:
+        return ""
+    c = lb_chase(root, st, recs)
+    if c["n"] < CHASE_MIN or c["k"] <= CHASE_SHARE * c["n"]:
+        return ""
+    return (f"LB-FITTING: the honest track has been flat for {p['days']:.0f} days (accepted baseline "
+            f"{p['baseline']['id']}) while {c['k']} of the last {c['n']} submissions went to fitting or probing the "
+            "public LB (public-lb-fitted, public-tuned, probe). Those files cannot raise the private score"
+            + (f"; with {left} days left," if left is not None else ";")
+            + " put the submissions and the GPU time back on the honest track (/kg-ideas).")
+
+
+def goal_line(root, st, recs: list[dict]) -> str:
+    """For a goal that names a public rank or score (the prompt router): what fitted gains are worth, and the honest
+    target to propose instead, with this workspace's numbers."""
+    thr, why = threshold(root, st)
+    p = plateau(root, st, recs)
+    honest = []
+    if p is not None:
+        b = p["baseline"]
+        honest.append(f"{'holdout' if st.holdout else 'nested CV'} above the accepted baseline {b['id']} "
+                      f"({b['cv']:.6g}) by more than {E.fmt_se(thr)} ({why})")
+    pub = honest_public(recs, st)
+    if pub is not None:
+        honest.append(f"a better honest public score than {pub['lb_public']:.6g} ({pub['id']}), from a change with "
+                      "its own validation gain")
+    target = "; or ".join(honest) or "a validation gain over an accepted baseline, measured paired (`ledger compare`)"
+    return ("The goal names a public-leaderboard rank or score. Tell the user once: a gain fitted to the public LB "
+            "(tilting predictions toward its labels, or weights and thresholds picked by LB probes) has zero expected "
+            "private value; it moves only the public rank, and the private split decides. Propose the honest "
+            f"equivalent as the target: {target}. Then work toward that, and log any public-LB-fitted file with "
+            "`--tag public-lb-fitted` (display only).")
+
+
 def lines(root, st, recs: list[dict]) -> list[str]:
     """The brief's and ``kgkit status``'s progress lines while the competition runs. Never raises."""
     out = []
-    for f in (plateau_line, crowd_line):
+    for f in (plateau_line, fitting_line, crowd_line):
         try:
             line = f(root, st, recs)
         except Exception:

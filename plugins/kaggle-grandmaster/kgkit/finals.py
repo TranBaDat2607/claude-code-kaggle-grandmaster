@@ -4,8 +4,8 @@ leaderboard is out.
 When a team selects no final submissions, Kaggle auto-selects the best public scores. Late in a competition those are
 often *public-LB-fitted* files (a ranking tilted toward an estimate of the public labels): fine as display entries,
 never as finals, since their public score says nothing about the private one. A ledger record tagged
-``public-lb-fitted`` (``kgkit.evalset.lb_fitted``) is such a file. ``kgkit status`` and the session brief print
-``lines(...)``: a warning when a fitted record is among the submissions Kaggle would auto-select, and in the last
+``public-lb-fitted`` (``kgkit.evalset.lb_fitted``) is such a file; the brief and ``kgkit status`` lead with the best
+public score that is not (``public_headline``). They also print ``lines(...)``: a warning when a fitted record is among the submissions Kaggle would auto-select, and in the last
 ``S.FINAL_DAYS`` days a warning whenever no selection is confirmed (an unticked selection leaves the pick to Kaggle,
 among files that often tie at the cut); a one-line note once Kaggle's selection has been confirmed. Picks typed by
 hand (``kgkit config final_picks=<id>,<id>``) are only *intended*: the warning stays, and lists them as not
@@ -359,16 +359,21 @@ def lines(root, st: S.CompetitionState, recs: list[dict], subs=None) -> list[str
         return []
 
 
-def not_fitted_note(recs: list[dict], st: S.CompetitionState) -> str:
-    """For the ``best public LB`` line: empty unless the best public score is a fitted file, else what the best one
-    that is not fitted is."""
-    ranked = sorted((r for r in recs if isinstance(r, dict) and _num(r.get("lb_public")) is not None),
-                    key=lambda r: r["lb_public"], reverse=st.greater_is_better)
-    if not ranked or not E.lb_fitted(ranked[0]):
-        return ""
-    other = next((r for r in ranked if not E.lb_fitted(r)), None)
-    return "public-LB fitted" + (f"; best not fitted: {other['lb_public']:.5f} ({other['id']}, {_cv_text(other)})"
-                                 if other else "; no other public score yet")
+def public_headline(recs: list[dict], st: S.CompetitionState) -> tuple[dict | None, dict | None]:
+    """``(honest, fitted)``: the record with the best public score that is not public-LB fitted, which the brief and
+    ``kgkit status`` lead with, and the best fitted one when it scores better (shown after it, display only)."""
+    ranked = sorted((r for r in recs if isinstance(r, dict) and _num(r.get("lb_public")) is not None
+                     and not r.get("recheck")), key=lambda r: r["lb_public"], reverse=st.greater_is_better)
+    honest = next((r for r in ranked if not E.lb_fitted(r)), None)
+    fitted = next((r for r in ranked if E.lb_fitted(r)), None)
+    if fitted is not None and honest is not None and ranked.index(fitted) > ranked.index(honest):
+        fitted = None
+    return honest, fitted
+
+
+def fitted_display_note(fitted: dict | None) -> str:
+    return (f"display only, public-LB fitted (never a final): {fitted['lb_public']:.5f} ({fitted['id']})"
+            if fitted is not None else "")
 
 
 # ---------------------------------------------------------------------------- what Kaggle says

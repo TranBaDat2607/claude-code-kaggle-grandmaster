@@ -2222,12 +2222,13 @@ def test_status_and_the_brief_warn_that_kaggle_would_select_the_fitted_files(tmp
     assert "0001_stack (accepted baseline, best CV; CV 0.96220, LB 0.96185)" in honest
     assert "0002_blend (best public score neither fitted nor public-tuned; LB-only, LB 0.96214)" in honest
     assert "Then run `python -m kgkit final`" in warning and "final_picks=<id>,<id>" not in warning
-    assert ("best public LB: 0.96297 (0003_tilt-a, CV LB-only); public-LB fitted; best not fitted: 0.96214 "
-            "(0002_blend, LB-only)") in out
+    assert ("best public LB: 0.96214 (0002_blend, CV LB-only); display only, public-LB fitted (never a final): "
+            "0.96297 (0003_tilt-a)") in out  # #85: the honest score leads
     assert "| 0.96297 (fitted) |" in out
     ctx = _session_context(plugin_root, tmp_path)
     assert warning in ctx.splitlines()
-    assert "best public LB 0.96297 (0003_tilt-a) [public-LB fitted; best not fitted: 0.96214 (0002_blend, LB-only)]" in ctx
+    assert ("best public LB 0.96214 (0002_blend) (display only, public-LB fitted (never a final): 0.96297 "
+            "(0003_tilt-a))") in ctx
 
 
 def test_auto_selection_follows_the_picks_the_direction_and_ties():
@@ -2405,7 +2406,7 @@ def test_nothing_is_printed_after_the_deadline_or_early_without_a_fitted_file(tm
     _finals_ws(tmp_path, days=-1)
     cli.main(["status"])
     out = capsys.readouterr().out
-    assert "WARNING" not in out and "best public LB: 0.96297 (0003_tilt-a, CV LB-only); public-LB fitted" in out
+    assert "WARNING" not in out and "best public LB: 0.96214 (0002_blend, CV LB-only); display only" in out
 
     plain = tmp_path / "plain"
     plain.mkdir()

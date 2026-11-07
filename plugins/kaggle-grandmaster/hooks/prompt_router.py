@@ -13,6 +13,11 @@ while fewer finals are selected than allowed, every session hears once how many 
 
 A slash-only command (``disable-model-invocation``) cannot be loaded by Claude, so its route (HINTS) adds a line
 telling Claude to suggest the command to the user instead.
+
+One check also reads slash commands and goal check-ins: a goal that names a public-leaderboard rank or score
+(``/goal public top 10``, "get to LB 0.965") gets, once per session in a running competition, what a public-LB
+fitted gain is worth and the honest target to propose instead (``kgkit.progress.goal_line``). In UAT such goals drove
+four sessions of LB fitting.
 """
 
 from __future__ import annotations
@@ -112,6 +117,13 @@ HINTS: list[tuple[str, str, str]] = [
 ]
 COMPILED_HINTS = [(name, re.compile(rx, re.IGNORECASE), text) for name, rx, text in HINTS]
 
+# a goal stated as a public-leaderboard rank or score ("public top 10", "top 5 on the public LB", "LB 0.965")
+_BOARD = r"(?:public(?:\s+(?:lb|leaderboard))?|lb|leaderboard)"
+PUBLIC_GOAL = re.compile(
+    rf"(?<!private )\b{_BOARD}\s+(?:top[- ]?\d+%?(?![\d%])(?!\s*(?:teams?|notebooks?|solutions?|kernels?|write-?ups?)\b)|rank(?:ing)?\s*#?\d+|#\d+|\d+(?:st|nd|rd|th)\b|first place|"
+    rf"(?:score\s*)?(?:of\s*)?[<>]?=?\s*\d?\.\d{{3,}})|\btop[- ]?\d+%?\s+(?:on|in|of)\s+(?:the\s+)?{_BOARD}\b",
+    re.IGNORECASE)
+
 # competition.json `task` -> its domain skill; inside a workspace the other domains are not suggested
 TASK_DOMAIN = {"tabular": "tabular-mastery", "cv": "computer-vision", "nlp": "nlp-and-llm", "llm": "nlp-and-llm",
                "timeseries": "time-series", "audio": "audio-and-signal", "rl": "simulation-and-optimization",
@@ -181,18 +193,38 @@ def _state(root: Path | None):
         return None
 
 
+def goal_note(payload: dict, prompt: str, root: Path | None, st, seen: set[str]) -> str:
+    """The once-per-session note for a goal that names a public rank or score, '' otherwise."""
+    if root is None or st is None or "public-goal" in seen or not PUBLIC_GOAL.search(prompt):
+        return ""
+    days = C.S.deadline_days(st)
+    if days is not None and days < 0:
+        return ""
+    try:
+        return C.PG.goal_line(root, st, C.ledger_records(root))
+    except Exception:
+        return ""
+
+
 def main() -> None:
     payload = C.read_input()
     prompt = payload.get("prompt") or ""
-    if not prompt.strip() or prompt.lstrip().startswith("/"):
-        return  # slash commands already carry their own instructions
-    if HARNESS.search(prompt):
-        return  # goal check-ins and task notifications are not the user asking
+    if not prompt.strip():
+        return
     root = C.workspace(payload)
     st = _state(root)
-    days = C.S.deadline_days(st) if st is not None else None
     seen_file = _seen_file(payload)
     seen = _seen(seen_file)
+    goal = goal_note(payload, prompt, root, st, seen)  # read in /goal and goal check-ins too
+    if goal:
+        seen = seen | {"public-goal"}
+        _remember(seen_file, seen)
+    if prompt.lstrip().startswith("/") or HARNESS.search(prompt):
+        # slash commands carry their own instructions; goal check-ins and notifications are not the user asking
+        if goal:
+            C.emit("UserPromptSubmit", additionalContext=f"[kaggle-grandmaster] {goal}")
+        return
+    days = C.S.deadline_days(st) if st is not None else None
     skills = [s for s in route(prompt, root is not None, st.task if st else "", days is not None and days < 0)
               if s not in seen]
     suggest = [h for h in hints(prompt, root is not None) if f"hint:{h}" not in seen]
@@ -200,10 +232,11 @@ def main() -> None:
     last_key = f"last-day:{st.deadline}" if last_day else ""
     if last_key in seen:  # once per session, whatever the prompt
         last_day = ""
-    if not (skills or suggest or last_day):
+    if not (skills or suggest or last_day or goal):
         return
     _remember(seen_file, seen | set(skills) | {f"hint:{h}" for h in suggest} | ({last_key} if last_day else set()))
     lines = [f"[kaggle-grandmaster] {last_day}"] if last_day else []
+    lines += [f"[kaggle-grandmaster] {goal}"] if goal else []
     if skills:
         names = ", ".join(f"kaggle-grandmaster:{s}" for s in skills)
         lines.append(f"[kaggle-grandmaster] This is competition work. Before answering, load these skills with the "

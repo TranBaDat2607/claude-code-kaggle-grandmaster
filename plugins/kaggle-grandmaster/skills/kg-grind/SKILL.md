@@ -30,6 +30,10 @@ PowerShell `$env:` assignment).
 
 Budget / focus: `$ARGUMENTS` (default: 6 experiments, no specific focus).
 
+If the target is a public rank or score ("public top 10", "LB 0.965"), say once that a gain fitted to the public LB
+has zero expected private value. Grind toward the honest equivalent instead: a validation gain over the accepted
+baseline beyond the paired noise, which `kgkit status` reports. The loop never fits or probes the public LB.
+
 ## Guardrails
 - **Never submit to Kaggle** unless the user explicitly authorised autonomous submissions in this
   request; prepare and validate submission files instead.
