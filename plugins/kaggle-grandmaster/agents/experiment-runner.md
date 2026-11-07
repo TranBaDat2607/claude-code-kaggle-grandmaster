@@ -16,7 +16,10 @@ You run exactly one experiment with scientific discipline.
    the delegating request names another.
 3. Implement the change behind a flag/config in the existing training script (don't fork a copy
    unless necessary). Commit code before a long run if the workspace is a git repo.
-4. Smoke-test on a tiny subset (1 fold, few iterations/epochs) to catch crashes quickly.
+4. Smoke-test on a tiny subset (1 fold, few iterations/epochs) to catch crashes quickly. Then check the script
+   against the compute defaults: `PYTHONPATH="$KGKIT_HOME" python -m kgkit speedcheck <script>` names slow
+   patterns and the domain's reference (`$KGKIT_HOME/skills/compute-efficiency/references/`). When the change
+   touches the input pipeline, resolution or model size, run the template's `--bench` and report its rates.
 5. Run the full experiment on the frozen folds with the same seed(s) as the baseline. For long
    runs use background execution and check on progress rather than blocking. With no local GPU,
    the run goes to Kaggle via `python -m kgkit gpu build/push/wait/collect` (skill `kaggle-gpu`).

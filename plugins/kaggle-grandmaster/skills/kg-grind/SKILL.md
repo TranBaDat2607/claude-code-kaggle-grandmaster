@@ -47,7 +47,8 @@ baseline beyond the paired noise, which `kgkit status` reports. The loop never f
    CLAUDE.md notes, `reports/` (recon, eda, error analyses).
 2. **Backlog**: `python -m kgkit backlog list`. Refill it when fewer than ~5 open ideas by
    (a) dispatching `error-analyst` on the accepted baseline, (b) the domain skill's untried levers,
-   (c) `solution-researcher` / `kgkit kernels pull` for prior art. Add each with
+   (c) `solution-researcher` / `kgkit kernels pull` for prior art, (d) when runs are long or `gpu collect` reports
+   an idle or input-bound GPU, a speed fix from `compute-efficiency`: a faster loop buys more experiments. Add each with
    `kgkit backlog add "<idea>" --gain --prob --cost --evidence --source`.
 3. **Pick** the top idea by (gain × probability) / cost, favouring cheap high-information tests early
    and scaling runs late. Batch independent cheap experiments in parallel when hardware allows

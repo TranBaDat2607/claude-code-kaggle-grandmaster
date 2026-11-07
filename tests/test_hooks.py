@@ -503,3 +503,96 @@ def test_pre_asks_on_the_budget_for_a_script_submit_only(plugin_root, ws):
         hook(plugin_root, "post_tool.py", _post(cmd, "1 submissions remaining today.", ws))
     out = hook(plugin_root, "pre_tool.py", bash(cmd, ws))
     assert out["permissionDecision"] == "ask" and "2/2 submissions already logged" in out["permissionDecisionReason"]
+
+
+# ----------------------------------------------------------------------------- compute efficiency (#91)
+CE = "kaggle-grandmaster:compute-efficiency"
+
+
+def test_prompt_router_compute_in_plain_words(plugin_root, tmp_path_factory, tmp_path):
+    plain = tmp_path_factory.mktemp("plain6")
+
+    def ask(prompt, cwd=plain):
+        out = hook(plugin_root, "prompt_router.py", {"hook_event_name": "UserPromptSubmit", "prompt": prompt,
+                                                     "cwd": str(cwd), "session_id": uuid.uuid4().hex})
+        return out["additionalContext"] if out else ""
+
+    for prompt in ["My training on Kaggle is slow and the GPU utilisation is only 30%",
+                   "My Kaggle code competition notebook times out: inference takes 11 hours",
+                   "Fine-tuning DeBERTa for this Kaggle competition runs out of memory on the T4",
+                   "Kaggle: one epoch takes too long, how do I make it faster?",
+                   "How do I use both T4 GPUs on Kaggle?",
+                   "Kaggle: the submission notebook exceeded the runtime",
+                   "In a Kaggle code competition with a 9-hour limit my LLM needs about 20 hours"]:
+        assert CE in ask(prompt), prompt
+    # building a model loads the defaults as well, not only a speed question
+    assert CE in ask("Train a LightGBM baseline for this Kaggle playground")
+    S.CompetitionState(slug="knee", task="cv").save(tmp_path)
+    ctx = ask("write the training script for the baseline model", tmp_path)
+    assert CE in ctx and "kaggle-grandmaster:computer-vision" in ctx
+    # not Kaggle work and not in a workspace: silent
+    assert ask("my laptop is slow") == ""
+    assert ask("write a training script for my company's churn model") == ""
+    assert CE not in ask("Should I join this Kaggle competition, it has 2 million rows of data?")
+
+
+SLOW_TRAIN = """import timm, torch
+from torch.utils.data import DataLoader
+model = timm.create_model("resnet18")
+dl = DataLoader(ds, batch_size=32, shuffle=True)
+for x, y in dl:
+    loss = model(x.cuda()).sum()
+    loss.backward()
+"""
+
+
+def _write(plugin_root, ws, rel, text, sid, cwd=None, tool="Write"):
+    path = ws / rel
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+    ti = {"file_path": str(path), "content": text} if tool == "Write" else {"file_path": str(path),
+                                                                           "old_string": "a", "new_string": "b"}
+    return hook(plugin_root, "post_write.py", {"hook_event_name": "PostToolUse", "tool_name": tool, "tool_input": ti,
+                                               "cwd": str(cwd or ws), "session_id": sid})
+
+
+def test_post_write_gives_the_compute_defaults_once(plugin_root, ws):
+    sid = uuid.uuid4().hex
+    out = _write(plugin_root, ws, "src/train.py", SLOW_TRAIN, sid)
+    ctx = out["additionalContext"]
+    ref = (plugin_root / "skills" / "compute-efficiency" / "references" / "vision.md").as_posix()
+    assert out["hookEventName"] == "PostToolUse" and ref in ctx and Path(ref).is_file()
+    assert "src/train.py trains a vision model" in ctx and "channels_last" in ctx
+    assert "Slow patterns in src/train.py" in ctx and "line 4: DataLoader without workers" in ctx
+    assert "fp32" in ctx and "cudnn.benchmark" in ctx
+    # the same file again in this session: nothing new to say
+    assert _write(plugin_root, ws, "src/train.py", SLOW_TRAIN, sid, tool="Edit") is None
+    # a new slow pattern is reported, without repeating the defaults
+    ctx = _write(plugin_root, ws, "src/train.py", SLOW_TRAIN + "df = df.apply(f, axis=1)\n", sid)["additionalContext"]
+    assert "row-wise Python loop" in ctx and "Apply the compute defaults" not in ctx and "DataLoader" not in ctx
+    # another session hears it all again
+    assert "Apply the compute defaults" in _write(plugin_root, ws, "src/train.py", SLOW_TRAIN,
+                                                  uuid.uuid4().hex)["additionalContext"]
+
+
+def test_post_write_domains_and_silence(plugin_root, ws, tmp_path_factory):
+    sid = uuid.uuid4().hex
+    # a GBDT script: the tabular defaults; a clean script has no slow-pattern line
+    gbdt = "import xgboost as xgb\nm = xgb.XGBRegressor(tree_method='hist', device='cuda')\nm.fit(X, y)\n"
+    ctx = _write(plugin_root, ws, "src/train_gbdt2.py", gbdt, sid)["additionalContext"]
+    assert "trains a tabular model" in ctx and "tabular.md" in ctx and "Slow patterns" not in ctx
+    # domain from the workspace's task when the imports do not say (relative path, cwd in a subfolder)
+    S.CompetitionState(slug="demo", metric="auc", task="cv").save(ws)
+    # (relative path from a subfolder; the file is not on disk, so the written content is checked)
+    torch_only = "import torch\nnet = torch.nn.Linear(4, 1)\nloss = net(x).sum()\nloss.backward()\n"
+    (ws / "notebooks").mkdir()
+    out = hook(plugin_root, "post_write.py", {
+        "hook_event_name": "PostToolUse", "tool_name": "Write", "cwd": str(ws / "notebooks"), "session_id": sid,
+        "tool_input": {"file_path": "../src/net.py", "content": torch_only}})
+    ctx = out["additionalContext"]
+    assert "src/net.py trains a vision model" in ctx and "vision.md" in ctx and "line 4: the training loop runs in fp32" in ctx
+    # silent: not model code, not Python, outside a workspace
+    assert _write(plugin_root, ws, "src/utils.py", "def f(x):\n    return x + 1\n", sid) is None
+    assert _write(plugin_root, ws, "reports/notes.md", SLOW_TRAIN, sid) is None
+    outside = tmp_path_factory.mktemp("not_a_workspace")
+    assert _write(plugin_root, outside, "train.py", SLOW_TRAIN, sid) is None

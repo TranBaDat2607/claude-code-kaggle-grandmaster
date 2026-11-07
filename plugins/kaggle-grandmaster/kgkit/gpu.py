@@ -41,6 +41,7 @@ import zipfile
 import zlib
 from pathlib import Path, PurePosixPath
 
+from . import bench as B
 from . import evalset as E
 from . import kaggle_cli as KC
 from . import safety
@@ -2103,6 +2104,10 @@ def collect(root: str | Path | None, kernel: str, from_dir: str | Path | None = 
             raise SystemExit(f"kaggle kernels output failed:\n{r.stdout}{r.stderr}")
     else:
         out = Path(from_dir)
+    # bench records the session saved (`--bench`, `kgkit bench`): into the local history, with their speed-ups
+    bench_lines = B.merge(out / "reports" / "bench.jsonl", B.bench_path(root))
+    if bench_lines:
+        print("\n".join(bench_lines))
     rp = out / "kg_run.json"
     if not rp.is_file():
         return _collect_without_report(root, kernel, out, kstatus, from_dir is None, weights)

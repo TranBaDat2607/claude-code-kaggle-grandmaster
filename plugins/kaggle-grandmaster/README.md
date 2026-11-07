@@ -31,12 +31,13 @@ submissions and experiments, leaving your layout alone. After the deadline: `/ka
 work (README around the result, license, figures, write-up draft; it audits first and asks before anything goes
 public).
 
-- `skills/`: 21 knowledge playbooks (including `competition-strategy`: choosing competitions, the solo
-  gold, teaming and merging) + 18 `kg-*` slash commands
+- `skills/`: 22 knowledge playbooks (including `competition-strategy`: choosing competitions, the solo
+  gold, teaming and merging; and `compute-efficiency`: speed defaults per domain and hardware, from winning
+  solutions) + 18 `kg-*` slash commands
 - `agents/`: 9 specialist subagents
 - `hooks/`: session brief (accepted baseline, backlog top, GPU quota, competition data in git), prompt→skill router, submission +
   GPU-quota + upload guard (credentials never printed or uploaded, repeated files caught), submission /
-  GPU-run logger
+  GPU-run logger, compute defaults (and slow patterns) when a training or inference script is written
 - `hooks/monitor/`: the Kaggle pane (`/kaggle-monitor`), a mod: running kernels with live CPU/GPU/RAM/disk,
   submissions, GPU/TPU quota of every account, switching the session's Kaggle account
 - `kgkit/`: Python toolkit (`python -m kgkit --help`):
@@ -45,8 +46,10 @@ public).
     SE and the CV-LB gap it explains), `ledger add --pred` (score recomputed from predictions, compared
     with the baseline at once), `ledger decide / baseline / lineage / import`, `backlog`, `recheck` (does
     the gain survive a re-drawn fold split?)
-  - modelling: `features search` (thousands of generated features, batch-screened), `blend` with hill
-    climbing, multi-level and residual stacking, `--prune`
+  - modelling: `features search` (thousands of generated features, batch-screened, on the GPU with
+    `--model xgb --device cuda`), `blend` with hill climbing, multi-level and residual stacking, `--prune`
+  - speed: `bench` (wall time and GPU utilisation of any command, the speed-up of a change; the templates'
+    `--bench` separates the data loader from the GPU step), `speedcheck` (slow patterns in a script)
   - prior art: `pages` (the competition's pages as text), `kernels top / pull` (public scores on record,
     titles' self-reported scores checked; notebook review with the lines to read before running it + local
     script), `discussions sync / top / search / solutions / read`
@@ -64,7 +67,7 @@ public).
     by `adopt`; `init` adds `data/` to an existing `.gitignore`
 - `templates/`: tabular (GBDTs + linear / kNN / SVM / MLP), image and transformer training, offline inference
   kernel, a notebook cell that reports a session's resources to the pane, workspace CLAUDE.md
-- `evals/`: `claude plugin eval` suite (16 cases)
+- `evals/`: `claude plugin eval` suite (45 cases)
 
 ## Data and network access
 

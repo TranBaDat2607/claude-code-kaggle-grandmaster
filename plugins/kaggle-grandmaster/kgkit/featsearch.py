@@ -149,13 +149,49 @@ def _task(y: np.ndarray) -> str:
     return "regression"
 
 
-def _have_lgbm() -> bool:
+def _have(module: str) -> bool:
     try:
-        import lightgbm  # noqa: F401
-
+        __import__(module)
         return True
     except ImportError:
         return False
+
+
+def _have_lgbm() -> bool:
+    return _have("lightgbm")
+
+
+_LGBM_DEVICE: dict = {}
+
+
+def lightgbm_device_params(device: str) -> tuple:
+    """(params, note) for LightGBM on ``device``. On "cuda": the first GPU build that trains a tiny model,
+    ``device_type="cuda"`` (a source build) then ``"gpu"`` (OpenCL, in the PyPI wheel on Linux and Windows), with
+    max_bin=63 as LightGBM recommends for GPUs; else no parameters and a note saying it trains on the CPU."""
+    if device != "cuda":
+        return {}, ""
+    if device in _LGBM_DEVICE:
+        return _LGBM_DEVICE[device]
+    import lightgbm as lgb
+
+    rng = np.random.default_rng(0)
+    X, y = rng.normal(size=(200, 3)), rng.normal(size=200)
+    errors = []
+    res = None
+    for dt in ("cuda", "gpu"):
+        try:
+            lgb.train({"device_type": dt, "verbose": -1, "num_leaves": 4, "min_data_in_leaf": 5, "max_bin": 15},
+                      lgb.Dataset(X, y), num_boost_round=2)
+            res = ({"device_type": dt, "max_bin": 63}, f"LightGBM trains on the GPU (device_type={dt}, max_bin=63)")
+            break
+        except Exception as e:  # LightGBMError: device not compiled in, or no OpenCL device
+            first = str(e).strip().splitlines()[0][:100] if str(e).strip() else type(e).__name__
+            errors.append(f"{dt}: {first}")
+    if res is None:
+        res = ({}, "LightGBM has no working GPU build here (" + "; ".join(errors) + "), so it trains on the CPU. "
+                   "XGBoost (device='cuda') and CatBoost (task_type='GPU') train on the GPU from their pip wheels")
+    _LGBM_DEVICE[device] = res
+    return res
 
 
 def _to_metric_input(metric: M.Metric, task: str, p: np.ndarray) -> np.ndarray:
@@ -169,24 +205,44 @@ def _to_metric_input(metric: M.Metric, task: str, p: np.ndarray) -> np.ndarray:
 
 
 def cv_scores(X: pd.DataFrame, y: np.ndarray, folds: np.ndarray, metric: str, model: str = "auto",
-              fold_ids: Sequence[int] | None = None, seed: int = 0, n_estimators: int = 400) -> dict:
+              fold_ids: Sequence[int] | None = None, seed: int = 0, n_estimators: int = 400,
+              device: str = "cpu") -> dict:
     """Fast fixed-parameter GBDT on the frozen folds: per-fold scores, OOF and gain importances.
-    The parameters are deliberately fixed — the goal is a *relative* comparison of feature sets."""
+    The parameters are deliberately fixed — the goal is a *relative* comparison of feature sets.
+    ``device="cuda"``: XGBoost on the GPU (``model="auto"`` picks it when installed), LightGBM on its GPU build
+    when one works (see ``lightgbm_device_params``)."""
     m = M.get(metric)
     task = _task(y)
-    kind = ("lgbm" if _have_lgbm() else "hgb") if model == "auto" else model
+    if model == "auto":
+        kind = "xgb" if device == "cuda" and _have("xgboost") else ("lgbm" if _have_lgbm() else "hgb")
+    else:
+        kind = model
     fold_ids = list(fold_ids) if fold_ids is not None else sorted(set(folds[folds >= 0].tolist()))
     n_classes = len(np.unique(y)) if task == "multiclass" else 1
     oof = np.full((len(y), n_classes) if n_classes > 1 else len(y), np.nan)
     scores, imp = [], np.zeros(X.shape[1])
+    y_fit = y if task == "regression" else np.unique(y, return_inverse=True)[1]  # XGBoost wants labels 0..K-1
     for f in fold_ids:
         tr, va = np.flatnonzero((folds != f) & (folds >= 0)), np.flatnonzero(folds == f)
-        if kind == "lgbm":
+        if kind == "xgb":
+            import xgboost as xgb
+
+            cls = xgb.XGBRegressor if task == "regression" else xgb.XGBClassifier
+            mdl = cls(n_estimators=n_estimators, learning_rate=0.1, max_depth=6, subsample=0.8, colsample_bytree=0.8,
+                      tree_method="hist", device="cuda" if device == "cuda" else "cpu", early_stopping_rounds=50,
+                      random_state=seed, verbosity=0)
+            mdl.fit(X.iloc[tr], y_fit[tr], eval_set=[(X.iloc[va], y_fit[va])], verbose=False)
+            gain = mdl.get_booster().get_score(importance_type="total_gain")
+            imp += np.array([gain.get(c, 0.0) for c in X.columns])
+            if device == "cuda":
+                mdl.set_params(device="cpu")  # predict on the CPU data without a device-mismatch copy per call
+        elif kind == "lgbm":
             import lightgbm as lgb
 
             cls = lgb.LGBMRegressor if task == "regression" else lgb.LGBMClassifier
             mdl = cls(n_estimators=n_estimators, learning_rate=0.1, num_leaves=31, min_child_samples=20,
-                      colsample_bytree=0.8, subsample=0.8, subsample_freq=1, random_state=seed, verbose=-1)
+                      colsample_bytree=0.8, subsample=0.8, subsample_freq=1, random_state=seed, verbose=-1,
+                      **lightgbm_device_params(device)[0])
             import inspect
 
             # LightGBM >= 4.7 renamed eval_set to eval_X/eval_y (same shim as templates/train_gbdt.py)
@@ -210,7 +266,7 @@ def cv_scores(X: pd.DataFrame, y: np.ndarray, folds: np.ndarray, metric: str, mo
             p = p[:, 1] if task == "binary" else p
         oof[va] = p
         scores.append(m(y[va], _to_metric_input(m, task, p)))
-    has_imp = kind == "lgbm"
+    has_imp = kind in ("lgbm", "xgb")
     return {"scores": scores, "oof": oof, "importance": dict(zip(X.columns, imp)) if has_imp else None,
             "model": kind, "greater_is_better": m.greater_is_better}
 
@@ -234,7 +290,7 @@ def feature_search(train: pd.DataFrame, y, folds, cat_cols: Sequence[str], num_c
                    specs: Sequence[dict] | None = None, batch_size: int = 40, max_batches: int | None = None,
                    screen_folds: Sequence[int] | None = None, model: str = "auto", keep_frac: float = 0.5,
                    min_t: float = 1.0, time_budget_s: float | None = None, recheck_folds=None, seed: int = 0,
-                   verbose: bool = True, **gen_kw) -> dict:
+                   verbose: bool = True, device: str = "cpu", **gen_kw) -> dict:
     """Forward batch selection over candidate features. Returns kept specs, scores and history.
 
     A batch is accepted when its paired gain over the current set is positive, most screened folds
@@ -254,7 +310,7 @@ def feature_search(train: pd.DataFrame, y, folds, cat_cols: Sequence[str], num_c
     t0 = time.time()
 
     def run(X, fids=screen_folds, f=folds):
-        return cv_scores(X, y, f, metric, model=model, fold_ids=fids, seed=seed)
+        return cv_scores(X, y, f, metric, model=model, fold_ids=fids, seed=seed, device=device)
 
     cur = run(X_base)
     gib = cur["greater_is_better"]
@@ -307,8 +363,8 @@ def feature_search(train: pd.DataFrame, y, folds, cat_cols: Sequence[str], num_c
     if recheck_folds is not None and kept:
         rf = np.asarray(recheck_folds)
         Fk, _ = materialize(kept, train, None, y, rf)  # target encodings rebuilt on the recheck split
-        b = cv_scores(X_base, y, rf, metric, model=model, seed=seed)
-        a = cv_scores(pd.concat([X_base, Fk], axis=1), y, rf, metric, model=model, seed=seed)
+        b = cv_scores(X_base, y, rf, metric, model=model, seed=seed, device=device)
+        a = cv_scores(pd.concat([X_base, Fk], axis=1), y, rf, metric, model=model, seed=seed, device=device)
         res["recheck"] = compare_folds(a["scores"], b["scores"], gib)
     return res
 

@@ -21,7 +21,8 @@ Always check the rules about which pretrained models/APIs are allowed and model 
 
 ## 2. Encoder fine-tuning recipe (DeBERTa-v3)
 
-- max_len from token-length percentiles (cover 95–99%); dynamic padding, sort-by-length batching.
+- max_len from token-length percentiles (cover 95–99%); tokenise once; dynamic padding with length-bucketed
+  batches (the template's default), which removes most padding compute.
 - lr 1e-5–3e-5 (large: 1e-5), layer-wise LR decay 0.8–0.95, warmup 5–10%, cosine/linear decay,
   2–5 epochs, batch 8–32 (grad accumulation), weight decay 0.01, AMP, gradient clipping 1.0.
 - Pooling: mean pooling or attention pooling often > CLS; multi-sample dropout head;
@@ -43,6 +44,8 @@ Always check the rules about which pretrained models/APIs are allowed and model 
   on 2×T4 or with vLLM.
 - Knowledge distillation: large teacher (e.g. 70B) soft labels → smaller student that fits the
   inference budget; typically beats training the student on hard labels.
+- Memory and speed on 16 GB: QLoRA in fp16, gradient checkpointing, Unsloth (14B on 16 GB in Jigsaw 2025 1st). See
+  `compute-efficiency` (`references/text-and-llm.md`).
 - Synthetic data: generate extra labelled examples with a strong LLM (if rules allow); validate
   only on real data; deduplicate against test-like distributions to avoid optimistic CV.
 
@@ -75,8 +78,14 @@ GBDT over such features is a common winning pattern (e.g. essay scoring).
 
 ## 7. Inference efficiency (code competitions)
 
+Full checklist with winners' settings: `compute-efficiency` (`references/inference.md`).
+
 - Sort by length and batch dynamically; FP16; `torch.inference_mode()`; max_len per model.
 - Use both T4 GPUs (data parallel by splitting the test set across two processes).
-- Quantise LLMs (AWQ/GPTQ 4-bit) and use vLLM; cache tokenised inputs; avoid recomputation
-  across folds by sharing tokenisation.
+- Classification or multiple choice with an LLM: one forward pass reading the answer tokens' logits, not
+  `generate()` (Jigsaw 2025 1st).
+- Quantise LLMs to fit 2×T4: 8-bit GPTQ (LMSYS 1st) or W8A8 INT8 in LMDeploy (MAP 2025 1st) keep accuracy; AWQ int4
+  is faster but lost accuracy in AIMO 2 — measure on validation. vLLM with `dtype="half"` on T4, prefix caching.
+- Average fold LoRA adapters into one model instead of K inference passes (LMSYS 1st); share tokenisation
+  across models.
 - Measure the whole pipeline on a hidden-test-sized dummy input before the deadline.

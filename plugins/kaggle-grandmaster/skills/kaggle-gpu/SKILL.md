@@ -37,13 +37,15 @@ Unused quota expires at the weekly reset, so hours you don't spend are also lost
   fp16 tensor cores, no bf16); **`NvidiaTeslaP100`** = 1× P100 16 GB (sm_60, faster fp32/HBM, no tensor
   cores, no Triton → no `torch.compile`). The quota is charged per session-hour either way, so
   **T4×2 is the default**. One quota hour buys two GPUs, but only if both are busy. Choose P100 only for
-  fp32-bound or single-process jobs that cannot be split (verify by measuring step time). Kaggle answers a
+  fp32-bound or single-process jobs that cannot be split (verify by measuring step time). Kaggle's PyTorch of
+  November 2026 (2.11, CUDA 13) no longer ships `sm_60` kernels, so PyTorch jobs cannot use the P100 there: check
+  `torch.cuda.get_arch_list()` first. Kaggle answers a
   shape it does not take with a bare 400, e.g. `NvidiaTeslaT4Highmem`, which `kernels pull -m` can record for
   a past session. `kgkit gpu push` checks the shape before pushing (`--force` if Kaggle has added a new one).
 - **A kernel source of 1 MB or more is refused with a bare 400 too** (a script or a notebook, its outputs and
   pasted images included). Data goes in datasets, not in the source. `kgkit gpu build` warns and names the biggest
   parts of the script, and `kgkit gpu push` stops before sending one that big.
-- GPU sessions have few CPU cores (typically 4) and ~29 GB RAM. JPEG/DICOM decoding plus heavy CPU augmentation
+- GPU sessions have few CPU cores (typically 4) and ~30 GB RAM. JPEG/DICOM decoding plus heavy CPU augmentation
   starves the GPUs.
 - An interactive GPU session burns quota while it is open, even when idle. Batch runs (`kaggle kernels
   push`, "Save Version") stop charging when the script ends. CPU-only sessions don't touch the GPU quota.
@@ -196,15 +198,18 @@ python -m kgkit gpu build --name stack --hours 2 --accelerator none --input-layo
 | Finding | Fix |
 |---|---|
 | second T4 idle | ≥ 2 tasks per session (2 folds, or `--extra-job`), or DDP |
-| GPU util < 60 % | input-bound: pre-resize, uint8, GPU augmentation, fewer CPU transforms, `persistent_workers` |
+| GPU util < 60 % | input-bound: pre-resize, uint8, GPU augmentation, fewer CPU transforms, `persistent_workers`. Confirm with the script's `--bench` before the next push |
 | too short to diagnose | a smoke/dev run (< 20 min) is mostly start-up; judge throughput on a longer run |
 | deadline hit | `--resume-from`; next time raise `--hours` or lower epochs/res |
 | stopped by the `--hours` cap (`cancelled`, log ends at the cap) | `gpu collect <kernel>` for what it saved; re-push with a margin (~1.3-1.5x the runtime) and save the model before the long phase. Same cap again stops it at the same point |
 | pruned | discard or change the idea materially; don't re-run it unchanged |
 | fold failed | read the log tail; reproduce with `--smoke` locally before re-pushing |
 
-Throughput tuning on T4 (AMP, channels_last, compile, batch size, dataloaders, DDP vs fold-parallel)
-is covered in [references/throughput.md](references/throughput.md).
+Making each quota hour do more work (measuring input-bound vs compute-bound, AMP, channels_last, compile, data
+loaders, fold-parallel vs DDP, GBDTs and RAPIDS on the GPU, inference speed) is the `compute-efficiency` skill. With no
+local GPU, a short bench session (`gpu build --name bench --cmd "python src/train_image.py --bench" --hours 0.3`)
+shows whether a script is input-bound for minutes of quota; `gpu collect` adds its record to `reports/bench.jsonl`
+with the speed-up against the previous bench.
 
 ## 6. TPU v5e-8 when the GPU quota is gone
 

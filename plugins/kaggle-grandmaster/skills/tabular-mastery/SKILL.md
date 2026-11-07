@@ -65,8 +65,8 @@ prunes each kept batch to its most important members, and re-checks the final se
 independently seeded split. Hundreds of accept/reject decisions overfit the screening folds, so trust
 the recheck line, not the screen CV. Then load the kept specs in the training script
 (`kgkit.featsearch.materialize(load_specs(...), train, test, y, folds)`) and decide with the real model
-and `kgkit ledger compare`. On large data, run it on a GPU (RAPIDS cuDF / GPU GBDTs) or on a row
-subsample, and widen `--screen-folds` for the final confirmation.
+and `kgkit ledger compare`. On large data, screen on the GPU (`--model xgb --device cuda`, candidates built with
+cuDF) or on a row subsample, and widen `--screen-folds` for the final confirmation.
 
 **Feature selection:** permutation importance on OOF or null importance (shuffle target,
 compare importance distributions); drop features that hurt CV; adversarial-drifting features
@@ -101,9 +101,13 @@ that do not help CV. Forward selection by feature *groups* is cheaper than per f
   100-seed XGBoost bag beat its average single seed by ~0.003 MAP@3 in a Playground). Bagging
   `subsample`/`colsample` helps stability. Average seeds *within* a model before blending.
 - Full-data refit after the configuration is frozen (see `leaderboard-boosters`).
-- GPU: XGBoost `device="cuda"`, CatBoost `task_type="GPU"`, LightGBM GPU builds; RAPIDS cuDF/cuML
-  for fast feature engineering & kNN/SVR models on big data.
-- Large data: `reduce_mem_usage`, parquet, polars for feature engineering, float32.
+- GPU: XGBoost `device="cuda"`, CatBoost `task_type="GPU"`, LightGBM's GPU build (`train_gbdt.py --device cuda`
+  uses it when one works, else the CPU with a note). The GPU pays from about a million rows, many seeds or feature
+  search; below ~100k rows the CPU is as fast, and CPU sessions spend no GPU quota. RAPIDS (`cudf.pandas` for
+  groupby-heavy features, cuML for kNN/SVR/RF/linear models) needs a T4, not a P100, and Linux or WSL2. Bench one
+  fold both ways before moving a long job: `compute-efficiency` (`references/tabular.md`).
+- Large data: `reduce_mem_usage`, parquet, polars for feature engineering, float32; vectorise row loops
+  (`apply(axis=1)`, `iterrows`) first: they are slow on any hardware.
 
 ## 6. Targets & losses
 
@@ -120,19 +124,6 @@ gains, LB shake-ups of ±0.001 are common. Winning pattern: many diverse models 
 different FE, NNs, linear/kNN/SVR models on transformed features), *many* OOFs, hill climbing
 or ridge/logistic stacking over 20–100 OOFs, appending the original dataset, and selecting finals
 on CV. Keep everything on 5–10 identical folds.
-
-**The data-generation process is a lever of its own.** Late in a Playground most teams stack the same
-public OOF libraries, and rank inside that crowd is noise (`kgkit status`: CROWD). What moves a team out
-of it is a member the libraries lack, and the generator is the usual place to find one:
-- Fingerprint the generator. Compare train/test rows with the original dataset: value grids, rounding
-  and digit patterns, values the original never has, duplicated or near-copied rows, categories
-  that collapse. Each artefact is a feature, or a hint at the model that made the data.
-- Try a **class-conditional generative member**: model the feature distribution of each class and
-  score a row with Bayes' rule, `log P(x | y=1) - log P(x | y=0) + log prior odds`. It errs differently
-  from discriminative GBDTs and NNs, so it adds to a saturated stack. Fit it only on the training folds'
-  labelled rows, exactly like any OOF member. A label-free density model of the rows usually adds ~0.
-- It is expensive, and the evidence so far is one competition: screen it on one fold first, and give it
-  `--gpu-hours` in the backlog. `references/synthetic-generators.md` has that competition's example.
 
 **The data-generation process is a lever of its own.** Late in a Playground most teams stack the same
 public OOF libraries, and rank inside that crowd is noise (`kgkit status`: CROWD). What moves a team out

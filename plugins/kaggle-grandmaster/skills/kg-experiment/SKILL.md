@@ -37,7 +37,10 @@ Follow the experiment protocol (`grandmaster-playbook` §2):
    folds improving. Not "Δ > fold std": the fold std measures fold difficulty, which cancels in a
    paired comparison.
 3. Implement behind a flag/config in the existing script. Smoke test, then full run on frozen folds
-   with the baseline's seed(s). For long runs (> ~10 min) run in the background and keep working on
+   with the baseline's seed(s). When the change touches the input pipeline, the resolution / `max_len` or the
+   model size, run the script's `--bench` (or `python -m kgkit bench --run "<cmd>"`) after the smoke test, so the
+   cost in GPU time is known before the run. A pure speed change (AMP, compile, caching) is an experiment too:
+   keep it on its speed-up with the score unchanged (skill `compute-efficiency`). For long runs (> ~10 min) run in the background and keep working on
    analysis meanwhile; or delegate the whole run to the `experiment-runner` agent.
 4. Log to the ledger with OOF/test preds and `parent=<baseline id>` (notes: hypothesis).
 5. Decide with numbers:

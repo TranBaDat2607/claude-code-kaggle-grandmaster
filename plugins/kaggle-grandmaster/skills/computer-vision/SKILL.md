@@ -68,8 +68,10 @@ geography-grouped CV, temporal stacks.
 
 - Overfit one batch first; verify augmentations visually; check label ↔ image alignment.
 - Log train/val loss and metric per epoch; watch for metric peaking before loss.
-- Use `torch.compile`, channels_last, AMP, `persistent_workers`, DALI/decoding on GPU for speed;
-  pre-resize images to disk once.
+- Compute defaults (skill `compute-efficiency`, `references/vision.md`): decode once and cache uint8 images at the
+  training size (DICOM converted once), AMP, `channels_last`, `cudnn.benchmark`, workers = CPU cores ÷ processes,
+  augmentation on the GPU when the loader is the bottleneck, `torch.compile` for long runs (Linux, T4 or newer).
+  Check with `train_image.py --bench` before a long run: on Kaggle's 4 CPU cores most image runs start input-bound.
 - Gradient accumulation for large effective batch; gradient checkpointing for big backbones.
 - Keep a fixed validation transform; same pre-processing in inference kernels.
 
@@ -77,5 +79,7 @@ geography-grouped CV, temporal stacks.
 
 Budget = runtime_limit × safety 0.8. Measure per-image latency of each model on the target
 hardware (Kaggle T4×2 / P100 / L4). Trade-offs: fewer folds of a bigger model vs more folds of
-smaller ones; TTA only where OOF shows gain; FP16; TensorRT/ONNX when beneficial; run models in
-parallel on both GPUs. See `code-competitions`.
+smaller ones; TTA only where OOF shows gain (batched with the originals); FP16; preprocessing shared by all
+models; one process per GPU on both T4s. Exports with a measured gain: `torch.compile` (~2x in SenNet 1st),
+TensorRT engines built on a T4 (~2x over `torch.jit` in CryoET 1st). See `code-competitions` and
+`compute-efficiency` (`references/inference.md`).

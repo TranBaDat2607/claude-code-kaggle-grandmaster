@@ -11,6 +11,10 @@ session_id), and inside a workspace whose task is known, other domains' skills a
 deadline a prompt with no keyword hit loads kg-postmortem rather than the playbook; on the deadline's own day,
 while fewer finals are selected than allowed, every session hears once how many are (``finals.last_day_line``).
 
+A prompt about speed in plain words ("training is slow", "GPU idle", "speed up inference") loads compute-efficiency, and
+so does a prompt that builds a model (``BUILD``: writing a training or inference script, training or fine-tuning a
+model), with the workspace's domain skill: the compute defaults then shape the first script.
+
 A slash-only command (``disable-model-invocation``) cannot be loaded by Claude, so its route (HINTS) adds a line
 telling Claude to suggest the command to the user instead.
 
@@ -45,6 +49,14 @@ GATE = re.compile(
     re.IGNORECASE,
 )
 
+# building a model: writing a training or inference script, or training/fine-tuning a model. Loads the compute
+# defaults (and, in a workspace, its domain skill), so they shape the first script instead of a later speed-up.
+BUILD = (r"\b(write|build|implement|create|code|set ?up)\b.{0,30}\b(train(ing)?|inference|fine-?tun\w*)\b.{0,20}"
+         r"\b(script|loop|pipeline|code|kernel|notebook)\b|"
+         r"\b(train|fine-?tune|fit)\w*\s+(a|an|the|my|our)?\s*(new\s+)?(model|network|baseline|backbone|"
+         r"classifier|regressor|lightgbm|xgboost|catboost|deberta|llm|cnn)\b")
+BUILD_RX = re.compile(BUILD, re.IGNORECASE)
+
 ROUTES: list[tuple[str, str]] = [
     ("kg-adopt", r"\badopt\b|existing (repo|repository|project|code ?base|workspace|pipeline)|mid[- ]competition|"
                  r"(already|been) (working|competing) on|weeks? into (the|this|a) competition|"
@@ -66,6 +78,22 @@ ROUTES: list[tuple[str, str]] = [
                       r"final (rank|standing|result)s?\b"),
     ("code-competitions", r"code competition|internet (off|disabled)|offline|\bkernel\b|notebook submission|"
                           r"runtime limit|hidden test|\bwheels?\b"),
+    # speed and GPU efficiency in plain words, plus building a model: the compute defaults apply from the first script
+    ("compute-efficiency", r"\bslow(er|ly|s)?\b|speed(ing)?[- ]?up|\bspeed\b|\bfaster\b|\bquicker\b|\bthroughput\b|"
+                           r"\b(gpu|cuda)s?\b.{0,40}\b(idle|util\w*|usage|under-?used|waiting|starv\w*)|"
+                           r"\bidle\b.{0,20}\bgpus?\b|out of (gpu |cuda |host )?(memory|ram|vram)|\boom\b|"
+                           r"\b(takes?|took|taking) (too |so |very |about |around |over |more than |almost |nearly )?"
+                           r"(long|forever|ages|hours|days|\d+(\.\d+)? ?(hours?|hrs?|h|minutes?|mins?|days?)\b)|"
+                           r"too long to (train|run|finish)|"
+                           r"both (t4 ?)?(gpus|t4s)|second gpu|two gpus|multi-?gpu|\bddp\b|data[- ]parallel|"
+                           r"\bit/s\b|samples?/s|steps?/s|"
+                           r"\bcudf\b|\bcuml\b|\brapids\b|\bcupy\b|\bpolars\b|\bonnx\b|openvino|tensorrt|"
+                           r"torch\.?compile|channels[_ ]last|\bquanti[sz]|\bawq\b|\bgptq\b|\bint[48]\b|\bfp16\b|"
+                           r"\bbf16\b|inference (time|speed|latency)|(time|runtime|hour)[- ]?(limit|budget|cap)|"
+                           r"\btim(e|es|ed|ing)[- ]?outs?\b|\bexceed\w*\b.{0,20}\b(time|run ?time|limit|hours)\b|"
+                           r"input[- ]bound|compute[- ]bound|bottleneck|\bprofil(ing|er)\b|"
+                           r"profile (the |my |a )?(run|training|script|code|loop|kernel)|data ?loader|num_workers|"
+                           r"(fewer|less|save|saving|cut|waste\w*) (gpu[- ]?)?(hours|quota)|" + BUILD),
     ("tabular-mastery", r"lightgbm|\blgbm\b|xgboost|catboost|\bgbdt\b|tabular|feature engineering|playground|"
                         r"target encod|feature search|tabpfn|autogluon|groupby"),
     ("computer-vision", r"\bimages?\b|x-?ray|\bct\b|\bmri\b|segmentation|detection|\btimm\b|\byolo\b|convnext|"
@@ -151,6 +179,8 @@ def route(prompt: str, in_workspace: bool, task: str = "", ended: bool = False) 
         n = len(rx.findall(prompt))
         if n:
             hits.append((n, name))
+    if own and BUILD_RX.search(prompt) and own not in {name for _, name in hits}:
+        hits.append((1, own))  # building a model in a workspace: its domain skill carries the recipe and defaults
     # keep ROUTES priority order among the top hits (debugging/validation before domain skills)
     order = {name: i for i, (name, _) in enumerate(ROUTES)}
     top = sorted(hits, key=lambda t: (-t[0], order[t[1]]))[:3]

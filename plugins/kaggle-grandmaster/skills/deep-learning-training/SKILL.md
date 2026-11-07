@@ -18,14 +18,21 @@ description: Competition-grade deep learning training practice in PyTorch — sc
 
 ## Speed (more experiments per GPU-hour)
 
-- Profile first: is the GPU waiting on data? (`nvidia-smi` utilisation, step time with fake data).
-- Pre-resize/cache inputs (images to target res as JPEG/PNG/npy; tokenise once), `num_workers` =
-  CPU cores, `pin_memory`, `persistent_workers`, larger batches.
-- `torch.compile`, `channels_last` for CNNs, fused AdamW, SDPA/flash attention.
-- Gradient accumulation for large effective batch; gradient checkpointing to fit bigger models.
-- Kaggle 2×T4: use DDP (`torchrun --nproc_per_node 2` via `accelerate`) or run two folds in
-  parallel, one per GPU — the latter is simpler and nearly 2× throughput. No bf16 on T4/P100, and no
-  `torch.compile` on P100. Remote runs, quota and resume: skill `kaggle-gpu`.
+Every training loop starts with these defaults. Load the `compute-efficiency` skill when writing or changing a
+loop: it has the measurement, the per-domain how-to and what runs on which GPU.
+
+- **Measure first**: the templates' `--bench` times the data loader alone, the training step alone and the real
+  loop (`python -m kgkit bench --run "<cmd>"` for any script). Input-bound: fix the pipeline. Compute-bound: less
+  compute (AMP, compile, smaller inputs).
+- AMP (above), `channels_last` for CNNs, `cudnn.benchmark = True` for fixed input sizes, fused AdamW, SDPA attention.
+- Inputs cached once at training size (images as uint8 npy/PNG, text as token ids). `num_workers` = CPU cores ÷
+  processes (two folds on Kaggle's 4 cores: 2 each), `pin_memory`, `persistent_workers`; augmentation on the GPU when
+  the loader is the bottleneck.
+- `torch.compile` for runs over ~20 min on Linux with a T4 or newer (not P100, not native Windows).
+- Gradient accumulation for a large effective batch; gradient checkpointing only to fit a better model.
+- Kaggle 2×T4: run two folds in parallel, one per GPU (simpler, nearly 2× throughput), or DDP
+  (`torchrun --nproc_per_node 2`) for one big model. No bf16 on T4/P100. Remote runs, quota and resume: skill
+  `kaggle-gpu`.
 - Lower resolution / shorter max_len / subset of data for exploration; scale for finals.
 
 ## Debugging checklist (when the score is bad)

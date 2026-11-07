@@ -9,7 +9,8 @@ Copy to src/, edit CONFIG and add_features(), then:
     python src/train_gbdt.py --seeds 42 43 44         # seed averaging
     python src/train_gbdt.py --model linear --name lin_v1   # diverse baselines on the same folds:
     python src/train_gbdt.py --model mlp --name mlp_v1      #   linear | knn | svm | mlp
-    python src/train_gbdt.py --model xgb --device cuda      # GPU XGBoost / CatBoost (or KG_DEVICE=cuda)
+    python src/train_gbdt.py --model xgb --device cuda      # GPU XGBoost / CatBoost / LightGBM (or KG_DEVICE=cuda)
+    python -m kgkit bench --run "python src/train_gbdt.py --smoke" --run "python src/train_gbdt.py --smoke --device cuda"
 
 The experiment name defaults to "<model>_baseline" (e.g. xgb_baseline) when neither --name nor
 CONFIG["name"] is set.
@@ -54,7 +55,7 @@ CONFIG = dict(
     target=None,          # default: from .kaggle-gm/competition.json
     metric=None,          # default: from .kaggle-gm/competition.json
     model="lgbm",         # lgbm | xgb | cat | hgb | linear | knn | svm | mlp
-    device=os.environ.get("KG_DEVICE", "cpu"),  # cpu | cuda: GPU training for xgb and cat (others stay on CPU)
+    device=os.environ.get("KG_DEVICE", "cpu"),  # cpu | cuda: GPU training for xgb, cat and lgbm (GPU build)
     task="auto",          # auto | binary | multiclass | regression
     drop=[],              # columns never used as features
     log_target=False,     # train on log1p(y) (RMSLE-style targets)
@@ -65,6 +66,8 @@ CONFIG = dict(
 )
 
 DEFAULTS = {
+    # n_jobs=-1 uses every hardware thread. LightGBM is often faster with one thread per physical core
+    # (os.cpu_count() // 2 on hyper-threaded CPUs): compare with `python -m kgkit bench`.
     "lgbm": dict(learning_rate=0.03, n_estimators=20000, num_leaves=63, min_child_samples=40, subsample=0.8,
                  subsample_freq=1, colsample_bytree=0.6, reg_alpha=0.1, reg_lambda=1.0, verbose=-1, n_jobs=-1),
     "xgb": dict(learning_rate=0.03, n_estimators=20000, max_depth=6, min_child_weight=5, subsample=0.8,
@@ -83,8 +86,9 @@ DEFAULTS = {
                 early_stopping=True),
 }
 SKLEARN_KINDS = ("linear", "knn", "svm", "mlp")
-# --device cuda; merged before --params, so explicit params win. LightGBM's GPU build is a separate
-# compile and sklearn has no GPU path, so those stay on CPU.
+# --device cuda; merged before --params, so explicit params win. LightGBM uses its GPU build when one trains
+# (kgkit.featsearch.lightgbm_device_params: device_type cuda, then the OpenCL "gpu" build of the pip wheel), else
+# the CPU with a note. sklearn has no GPU path (cuML: `python -m cuml.accel src/train_gbdt.py`, Linux/WSL2).
 DEVICE_PARAMS = {"cuda": {"xgb": {"device": "cuda"}, "cat": {"task_type": "GPU"}}}
 
 
@@ -202,7 +206,8 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--name")
     ap.add_argument("--model", choices=list(DEFAULTS))
-    ap.add_argument("--device", choices=["cpu", "cuda"], help="cuda: train xgb/cat on the GPU (default: KG_DEVICE or cpu)")
+    ap.add_argument("--device", choices=["cpu", "cuda"],
+                    help="cuda: train xgb/cat (and lgbm with a GPU build) on the GPU (default: KG_DEVICE or cpu)")
     ap.add_argument("--seeds", type=int, nargs="+")
     ap.add_argument("--params", type=json.loads, help='JSON overrides, e.g. \'{"num_leaves": 127}\'')
     ap.add_argument("--notes")
@@ -216,7 +221,13 @@ def main():
     cfg["params"] = {**DEVICE_PARAMS.get(cfg["device"], {}).get(cfg["model"], {}), **cfg["params"]}
     if args.params:
         cfg["params"] = {**cfg["params"], **args.params}
-    if cfg["device"] != "cpu" and cfg["model"] not in DEVICE_PARAMS.get(cfg["device"], {}):
+    if cfg["device"] == "cuda" and cfg["model"] == "lgbm":
+        from kgkit.featsearch import lightgbm_device_params
+
+        dev, note = lightgbm_device_params("cuda")
+        print(f"note: {note}")
+        cfg["params"] = {**dev, **cfg["params"]}
+    elif cfg["device"] != "cpu" and cfg["model"] not in DEVICE_PARAMS.get(cfg["device"], {}):
         print(f"note: --device {cfg['device']} has no effect on {cfg['model']} (CPU only in this template)")
 
     st = S.load()

@@ -45,7 +45,9 @@ different windows.
 ## 5. Engineering
 
 Data is huge: use polars/cuDF, int32 ids, parquet, chunked processing per user shard, GPU
-co-visitation computation. Cache candidates & features per week.
+co-visitation computation. Cache candidates & features per week. Rankers: GPU XGBoost/CatBoost on millions of
+pairs. How-to and the hardware limits (cuDF needs a T4, not a P100; Linux or WSL2): `compute-efficiency`
+(`references/tabular.md`).
 
 ## 6. Search relevance / LTR with text
 
