@@ -300,11 +300,16 @@ def cmd_adopt(a):
         from . import audit as AU
 
         print()
-        print("\n".join(AU.report(AU.run(root, max_seconds=120))))
+        print("\n".join(AU.report(AU.run(root, max_seconds=120, log=_progress))))
         print()
     print("next: record past experiments in the ledger (`kgkit ledger import <name> <oof> --truth ... --folds ...` "
           "or `kgkit ledger add <name> <cv> <notes>`), mark the accepted one with `kgkit ledger decide <id> baseline`, "
           "then `kgkit status`")
+
+
+def _progress(line: str) -> None:
+    """A progress line on stderr, so a long command is visibly working and its report on stdout stays clean."""
+    print(line, file=sys.stderr, flush=True)
 
 
 def cmd_audit_repo(a):
@@ -313,7 +318,7 @@ def cmd_audit_repo(a):
     from . import audit as AU
 
     res = AU.run(a.dir, a.data, max_seconds=a.max_seconds, max_blob_mb=a.max_blob_mb, online=not a.offline,
-                 fix_gitignore=a.fix_gitignore)
+                 fix_gitignore=a.fix_gitignore, log=_progress)
     print("\n".join(AU.report(res)))
     sys.exit(1 if res["leaks"] else 0)
 
@@ -440,10 +445,12 @@ def cmd_final(a):
     if ended:
         text, picks = FN.outcome(st, recs, data)
         FN.save_standing(root, st, recs, data)  # for the session brief after the deadline
+        FN.save_board(root, st.slug, data, by="final")
     elif after:
         text, picks = [f"The deadline has passed, but Kaggle could not be asked for the outcome ({error})."], None
     else:
         text, picks = FN.report(st, recs, data, error, local=FN.lines(root, st, recs))
+        text += FN.tuned_lines(st, recs, probes=True)
     print("\n".join(text))
     if picks:
         if st.final_picks and st.final_picks != picks and not st.final_picks_confirmed:
@@ -486,7 +493,9 @@ def cmd_standing(a):
     print("\n".join(FN.standing_lines(data)))
     if root is not None and st is not None and st.slug == slug and FN.save_standing(
             root, st, Ledger(root).records(), data, by="standing"):
-        print("cached in .kaggle-gm/standing.json (the session brief repeats it after the deadline)")
+        FN.save_board(root, slug, data)
+        print("cached in .kaggle-gm/standing.json (the session brief repeats it after the deadline) and the scores in "
+              ".kaggle-gm/cache/leaderboard.json (the crowd check in the brief and `kgkit status` reads them)")
 
 
 def cmd_status(a):
@@ -551,13 +560,17 @@ def cmd_status(a):
         elif not st.holdout and n_dec >= 20:
             print(f"{n_dec} keep/discard decisions taken on the current folds: the CV is getting optimistic. "
                   "Re-check on a fresh fold seed: `kgkit recheck --seed 7 --run <old> --run <current> --exp <root> <baseline>`")
-        with_lb = [r for r in recs if r.get("lb_public") is not None]
-        if with_lb:
-            bl = sorted(with_lb, key=lambda r: r["lb_public"], reverse=st.greater_is_better)[0]
-            fitted = FN.not_fitted_note(recs, st)
-            print(f"best public LB: {bl['lb_public']:.5f} ({bl['id']}, CV {fmt_cv(bl)})"
-                  + (f"; {fitted}" if fitted else ""))
+        bl, fitted = FN.public_headline(recs, st)
+        if bl is not None or fitted is not None:
+            head = (f"best public LB: {bl['lb_public']:.5f} ({bl['id']}, CV {fmt_cv(bl)}"
+                    + (", public-tuned" if E.public_tuned(bl) else "") + ")" if bl is not None else
+                    "best public LB: none that is not public-LB fitted")
+            print(head + (f"; {FN.fitted_display_note(fitted)}" if fitted is not None else ""))
         for line in FN.lines(root, st, recs):  # the same lines as the session brief
+            print(line)
+        from . import progress as PG
+
+        for line in PG.lines(root, st, recs):  # plateau and crowd, as in the session brief
             print(line)
         agreement = led.cv_lb_summary() or led.noise_note()  # the noise line rides on the CV-LB line when there is one
         if agreement:
@@ -1886,7 +1899,7 @@ _LEDGER_ACTIONS = {
                                                "with public files)"),
                                   ("notes", "*", "free text")],
             "--parent --tag --variant --notes --pred --sub " + _PAIRED),
-    "tag": ("add tags to a record, or remove them (--remove): mark a logged file public-lb-fitted",
+    "tag": ("add tags to a record, or remove them (--remove): mark a logged file public-lb-fitted or public-tuned",
             [_EXP, ("tag", "+", "tags to add (or remove)")], "--remove"),
     "compare": ("paired comparison of two experiments (or artifacts/<name> folders of per-fold OOFs)",
                 [("new", None, "ledger id/name or artifacts folder"),
@@ -1986,12 +1999,15 @@ def build_parser() -> argparse.ArgumentParser:
                                    "(--fix-gitignore) and .kaggle-gm/audit.json.")
     s.add_argument("--dir", default=".")
     s.add_argument("--data", nargs="+", action="extend", default=[], metavar="PATH",
-                   help="competition files or folders to compare with (default: the untracked files in data/ and "
-                        "input/), e.g. train.csv kept outside the repo")
+                   help="the competition's files or folders to compare with, instead of the default: the untracked "
+                        "files at the top of data/ and input/ (or of their <slug>/), beside train/test files, or in "
+                        "the download zip; other files there (OOF libraries, outputs) are only checked for exact "
+                        "copies. E.g. train.csv test.csv kept outside the repo, or the original dataset")
     s.add_argument("--fix-gitignore", action="store_true",
                    help="add the data folders to .gitignore when git does not ignore them yet")
     s.add_argument("--offline", action="store_true", help="do not ask GitHub whether the remote is public")
-    s.add_argument("--max-seconds", type=float, default=300, help="time budget for reading git's history")
+    s.add_argument("--max-seconds", type=float, default=300,
+                   help="time budget for the whole audit; reading the competition's files gets at most half")
     s.add_argument("--max-blob-mb", type=float, default=50, help="larger blobs are only checked for exact copies")
     s.set_defaults(fn=cmd_audit_repo)
 

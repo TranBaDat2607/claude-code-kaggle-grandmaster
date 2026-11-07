@@ -17,6 +17,9 @@ allowed-tools:
   - 'Bash(PYTHONPATH="${CLAUDE_PLUGIN_ROOT}" python -m kgkit ledger *)'
   - 'Bash(python -m kgkit ledger *)'
   - 'PowerShell(python -m kgkit ledger *)'
+  - 'Bash(PYTHONPATH="${CLAUDE_PLUGIN_ROOT}" python -m kgkit standing *)'
+  - 'Bash(python -m kgkit standing *)'
+  - 'PowerShell(python -m kgkit standing *)'
   - 'Bash(kaggle competitions submissions *)'
   - 'PowerShell(kaggle competitions submissions *)'
 ---
@@ -42,5 +45,14 @@ PowerShell `$env:` assignment).
    decided (no `decision` in the ledger table) and offer to compare/decide them.
 5. If `status` warned about many decisions on the same folds, recommend the CV re-check
    (`grandmaster-playbook`, "Guarding against overfitting the CV itself").
+6. The public-LB line leads with the best score that is not public-LB fitted. Fitted files follow it,
+   "display only": never present one as the team's standing. If `status` prints **LB-FITTING** (most recent
+   submissions fit or probe the public LB while the honest track is flat), say so first: those files cannot
+   raise the private score.
+7. If `status` prints **PLATEAU** or **CROWD**, make `/kg-ideas` the first recommended action, aimed at what
+   the stack lacks (a new model family, data view or signal), with the GPU hours it names. Do not recommend
+   more members of an existing family, or public-LB fitting. If PLATEAU says no public board is cached, offer
+   `python -m kgkit standing`: it reads the whole board, which can take a few minutes, and
+   caches it for the crowd check.
 
 Present a compact dashboard and the top 3 recommended next actions with reasons.

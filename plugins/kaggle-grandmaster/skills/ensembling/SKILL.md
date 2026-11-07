@@ -91,6 +91,16 @@ score, you're overfitting the blend — use fewer models, simpler weights, or pl
   failed ones. A model that loses alone can still add to the blend.
 - Teammates' and public notebooks' predictions join through `kgkit ledger import` (CV recomputed on
   the shared folds); see `competition-strategy` for the merge protocol.
+- Audit public OOF files before stacking them. A notebook that early-stops (or picks its epoch, iteration count
+  or threshold) on the same fold it reports OOF predictions for has an optimistic OOF. A stacker then gives it
+  weight it has not earned (in one Playground, about +2e-4 of fake OOF gain). Read its training loop: an
+  `eval_set` or validation split that is also the predicted fold is the sign. Re-train such a member with
+  early stopping on an inner split, or keep it out of the stack.
+- Audit public OOF files before stacking them. A notebook that early-stops (or picks its epoch, iteration count
+  or threshold) on the same fold it reports OOF predictions for has an optimistic OOF. A stacker then gives it
+  weight it has not earned (in one Playground, about +2e-4 of fake OOF gain). Read its training loop: an
+  `eval_set` or validation split that is also the predicted fold is the sign. Re-train such a member with
+  early stopping on an inner split, or keep it out of the stack.
 - Keep the blend reproducible: the ledger entry records weights and member experiment ids.
 - For code competitions, account for inference time of every member; drop the members with the
   worst (Δscore / runtime) ratio first.
@@ -108,10 +118,15 @@ without OOF predictions. Such a blend cannot be cross-validated:
   blend itself is scored on the holdout, so log that score (better: `--pred` with its holdout predictions);
   `lb-blend` then only marks it as using public files, and its holdout score counts.
 - Its weights are a bet on the public LB, fitted on ~20-30 % of the test. Keep them few and round
-  (e.g. 0.5/0.3/0.2) rather than tuned to the 5th decimal by LB probing.
+  (e.g. 0.5/0.3/0.2) rather than tuned to the 5th decimal by LB probing. When its weights, members or
+  threshold *were* picked by comparing public scores, tag it `--tag public-tuned` (or `kgkit ledger tag <id>
+  public-tuned`). Its public score is then optimistic by selection, so it is not an honest hedge. In a
+  Playground with a large test, 13 such blends had public anti-correlated with private (-0.59), and each
+  public-tuned step lost on private. `kgkit final` lists untagged groups of blend variants that look probed.
 - A file that goes further and tilts the ranking toward an estimate of the public labels is *public-LB fitted*:
   log it with `--tag public-lb-fitted` (or `kgkit ledger tag <id> public-lb-fitted`). It can be a display entry
   but never a final pick, and Kaggle auto-selects the best public scores when nothing is selected, so
   `kgkit status` warns until finals are selected on the website.
 - Keep an honest CV-only candidate (your nested-validated stack) as one of the two finals
-  (`final-submission-selection`), and use the LB-only blend as the hedge, not the other way round.
+  (`final-submission-selection`), and use the LB-only blend as the hedge, not the other way round. A
+  public-tuned blend is not that hedge: prefer one whose weights were fixed before it was scored.

@@ -41,6 +41,11 @@ measured about 3x too small on a binary AUC task.
 - LB-only candidates (blends with public submission files, forks with no OOF; `LB-only` in the ledger)
   have no honest CV. They can be the hedge, never both picks: keep a CV-backed candidate as pick 1.
   Their weights were chosen on the public LB, so expect them to lose some of their public edge on private.
+- **Public-tuned** candidates (tag `public-tuned`: weights, members or a threshold picked by comparing public
+  scores, as in LB probing) are not a hedge. Their public edge is selection, and on a large-test synthetic
+  competition it is noise at best. When one is proposed as a final, show the CV-only alternative next to it
+  (`kgkit status` names it). Hedge instead with a file that differs in its risk profile and whose choices were
+  fixed before it was scored.
 - Files fitted to the public labels (tilted toward an estimate of them, built from publicly shared scored files;
   tag them `public-lb-fitted`, `kgkit ledger tag <id> public-lb-fitted`) are display entries: not pick 1, and
   unlike an LB-only blend not even the hedge. Their public edge is mostly fit (reported for a Playground

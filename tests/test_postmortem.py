@@ -331,6 +331,50 @@ def test_predictiveness_ranks_the_signals_and_the_ways_of_picking(tmp_path, monk
     assert pub["rho"] > 0.9 and f"{pub['rho']:+.2f}" in lines["every scored submission"]
 
 
+def test_predictiveness_shows_what_fitting_cost_and_the_rank_of_each_pick(tmp_path, monkeypatch, capsys, fake_kaggle):
+    """#87: the fitted files left out of the correlations get a row of their own, and each way of picking gets the
+    private rank it would have given, on the private board `kgkit final` cached."""
+    _ended_ws(tmp_path)
+    fake_kaggle()
+    monkeypatch.chdir(tmp_path)
+    cli.main(["ledger", "sync-lb"])
+    capsys.readouterr()
+    cli.main(["ledger", "predictiveness", "--top", "3"])
+    out = capsys.readouterr().out
+    assert "no private leaderboard cached, so no rank if picked: `python -m kgkit final`" in out
+    cli.main(["final"])
+    out = capsys.readouterr().out
+    board = FN.load_board(tmp_path, "demo")
+    assert board["private"] and len(board["scores"]) == 1500 and board["ranks"] == [120] and board["by"] == "final"
+    assert "  Private scores within 10 units (0.001) of the team's, teams per score:" in out
+    assert "    0.943      7 team(s)  ranks 117-123  <- the team" in out
+    assert "    0.949      7 team(s)  ranks 75-81  silver cut-off (rank 75)" in out
+    cli.main(["ledger", "predictiveness", "--top", "3"])
+    out = capsys.readouterr().out
+    lines = {l.split(":")[0].strip(): " ".join(l.split()) for l in out.splitlines() if l.startswith("  ")}
+    assert lines["best CV"] == "best CV: private 0.94300; rank 117-123 (tie) if picked"
+    assert lines["best public, fitted included"].endswith("if picked; Kaggle's rule when nothing is selected")
+    assert lines["best possible"] == "best possible: private 0.94300; rank 117-123 (tie) if picked (0005_a17, 0006_a20)"
+    fitted = next(l for l in out.splitlines() if l.startswith("Public-LB-fitted submissions (1, left out above)"))
+    assert "public minus private +0.02700" in fitted and "0007_tilt (public 0.95700), scored private 0.93000" in fitted
+    assert "rank 207-214 (tie) had it been a final" in fitted and "no private leaderboard cached" not in out
+
+
+def test_predictiveness_reports_public_tuned_submissions_apart(tmp_path, monkeypatch, capsys, fake_kaggle):
+    """#86: where public stopped predicting private is visible when the public-tuned files have rows of their own."""
+    led = _ended_ws(tmp_path)
+    for i in ("0004", "0005", "0006"):
+        led.tag(i, "public-tuned")
+    fake_kaggle()
+    monkeypatch.chdir(tmp_path)
+    cli.main(["ledger", "sync-lb"])
+    capsys.readouterr()
+    cli.main(["ledger", "predictiveness", "--top", "3"])
+    out = capsys.readouterr().out
+    rows = {l.split("  ")[2].strip(): l.split() for l in out.splitlines() if l.startswith("    of those")}
+    assert rows["of those, public-tuned"][3] == "3" and rows["of those, not public-tuned"][4] == "5"
+
+
 def test_predictiveness_figures_or_why_not(tmp_path, monkeypatch, capsys, fake_kaggle):
     _ended_ws(tmp_path, validation="holdout+lb")
     fake_kaggle()

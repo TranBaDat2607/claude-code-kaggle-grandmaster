@@ -31,7 +31,9 @@ Follow the `final-submission-selection` skill.
    id, CV ± std, honest blend CV, public LB, risk elements, correlation with the top candidate.
    Records tagged `public-lb-fitted` (files tilted toward an estimate of the public labels; `kgkit status`
    marks them `[public-LB fitted]`) go in their own group, "display only": never pick 1, pick 2 or the hedge.
-   A file that is fitted but not tagged yet: `python -m kgkit ledger tag <id> public-lb-fitted`.
+   A file that is fitted but not tagged yet: `python -m kgkit ledger tag <id> public-lb-fitted`. Blends whose
+   weights or members were picked by comparing public scores get `public-tuned` (`kgkit final` lists groups of
+   blend variants that look probed): mark them `[public-tuned]` in the table.
 2. Estimate public-LB noise per pair of candidates (`python -m kgkit ledger compare <a> <b> --public-n <rows>`:
    paired SE of their LB gap; not the SE of one score, see `cv-lb-debugging`) and the CV-LB correlation.
    LB-only records (blends with public files) are left out of that correlation; in a `holdout+lb` workspace
@@ -42,7 +44,8 @@ Follow the `final-submission-selection` skill.
    from simulated labels; say it is an estimate, and `--ref <id>` calibrates it on a record that has OOF.
 3. Recommend pick 1 (best honest CV) and pick 2 (credible hedge on a different risk axis), with a
    short argument for each and what scenario each protects against. An LB-only blend can only be the hedge;
-   a public-LB-fitted file cannot be either.
+   a public-LB-fitted file cannot be either. A public-tuned file is not a hedge: if one is proposed, put the
+   CV-chosen alternative next to it.
 4. Robustness checks: reproduce the chosen files from code (or confirm the kernel versions ran on
    the hidden test with runtime margin); validate files.
 5. Run `python -m kgkit final`: it asks Kaggle which submissions are selected. With none selected, Kaggle

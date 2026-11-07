@@ -37,6 +37,12 @@ Focus: `$ARGUMENTS`
 
 1. Read what was already tried: `python -m kgkit ledger list -n 50` and `python -m kgkit backlog list --all`
    (done/dropped ideas with their results; don't re-propose a failed idea unless the evidence changed).
+   Check `python -m kgkit status` for a **PLATEAU** or **CROWD** line. Either one means the stack is saturated:
+   the last experiments added ~0, or many teams sit within noise of your score. Then rank first an idea that
+   brings what the stack, the public notebooks and the public datasets lack: a new model family, a new data view
+   (a representation, another granularity, the data-generation process), or a new signal. Give more members of a
+   family already in the stack gain 1, whatever their CV in isolation. Spend the GPU quota left before the
+   deadline on that kind of idea first.
 2. In parallel: `error-analyst` agent on the accepted baseline (`kgkit ledger baseline`). It needs
    per-row predictions with labels: OOF in a K-fold workspace; in a `holdout+lb` workspace (`kgkit status`
    shows the validation mode) give it the holdout predictions of each leg instead, and say how many rows

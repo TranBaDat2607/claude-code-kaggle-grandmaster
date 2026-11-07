@@ -43,11 +43,16 @@ workspace docs: the endgame often left them wrong.
 2. `python -m kgkit final`: the outcome. It shows the finals, or the pool Kaggle picked from when nothing was
    selected, with their private scores and which of them the team score matches. It also shows the team's
    private and public rank, the medal zone (computed from Kaggle's table, not read from the site: say so), how
-   many teams share our shown score and whether a medal cut-off falls inside that tie, and the best private score
-   of any submission. Was our final pick our best private? If not, by how much?
+   many teams share our shown score and whether a medal cut-off falls inside that tie, the teams per score within
+   10 display units of ours with the cut-offs marked, and the best private score of any submission. It caches the
+   private board for step 3. Was our final pick our best private? If not, by how much? When a crowd of teams sits
+   within a unit or two of us and a cut-off falls inside it, say that the medal there was a coin flip.
 3. `python -m kgkit ledger predictiveness --plot reports/figures`: which signal predicted private, over every
-   submission and among the strongest, each with n and a 95% interval. Also the private score each way of picking
-   the finals would have given, and the public-to-private drop. Read a correlation together with its interval: a
+   submission and among the strongest, each with n and a 95% interval. Also the private score and private rank
+   each way of picking the finals would have given (best CV, best public, best public with fitted files, ours,
+   best possible), the public-to-private drop, and a row for the public-LB-fitted files: how far they fell, and the
+   rank the best of them by public would have got as a final. If the team fitted the public LB, that rank is the
+   cost of fitting: report it. Read a correlation together with its interval: a
    gap between two signals is a finding only when it is large next to the intervals. Over the whole competition
    any signal looks good, because early gains are large; the top-k rows are the ones that matter. Then: which
    risky components helped or hurt, and how big was the shake-up for us and at the top of the LB

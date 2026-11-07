@@ -301,3 +301,79 @@ def test_passages_compare_words_not_ids():
     assert AU.passages(s) == ["the anterior cruciate ligament is intact without any sign of a tear today"]
     assert AU.passages(s.upper().replace(" ", "  ")) == AU.passages(json.dumps(s)[1:-1]) == AU.passages(s)
     assert AU.safe_url("https://u:tok@github.com/me/knee") == "https://github.com/me/knee"
+
+
+def test_derived_files_in_data_are_not_the_reference(comp):
+    """UAT #90: data/ held 39 GB of public OOF libraries and LB-fitting matrices beside 100 MB of competition files,
+    and the audit read all of them for 39+ minutes. Only the competition's files are read; the rest is only looked
+    for as exact copies."""
+    root, rows = comp
+    (root / ".gitignore").write_text("data/\n.kaggle-gm/audit.json\n")
+    ext = root / "data" / "ext" / "lib"
+    ext.mkdir(parents=True)
+    oof = [[str(i), f"model{i % 7}", f"0.{i:04d}", "public notebook output"] for i in range(200)]
+    _csv(ext / "oof_lgbm.csv", ["row", "model", "pred", "source"], oof)
+    _csv(root / "mine.csv", ["row", "model", "pred", "source"], oof[:50])  # rows of a public file, not of the data
+    (root / "copy_of_oof.csv").write_bytes((ext / "oof_lgbm.csv").read_bytes())
+    commit(root)
+    logged = []
+    res = AU.run(root, online=False, log=logged.append)
+    roles = {x["path"]: x["role"] for x in res["references"]}
+    assert roles["data/train.csv"] == "competition" and roles["data/ext/lib/oof_lgbm.csv"] == "other"
+    assert not any(x["path"] == "mine.csv" for x in res["findings"])
+    assert "an exact copy of data/ext/lib/oof_lgbm.csv" in _finding(res, "copy_of_oof.csv")["why"]
+    out = "\n".join(AU.report(res))
+    assert "1 other file(s) in the data folders" in out and "data/ext/lib" in out and "--data <files>" in out
+    assert "compared with 3 competition file(s)" in out
+    assert any("indexing 3 competition file(s)" in x for x in logged)
+    assert any("blob(s) of git history" in x for x in logged)
+
+
+def test_files_beside_the_competition_files_or_in_its_zip_count(comp):
+    """Nested layouts: data/raw/ beside train.csv, or a folder the download zip lists."""
+    import zipfile
+
+    root, rows = comp
+    (root / ".gitignore").write_text("data/\n.kaggle-gm/audit.json\n")
+    raw = root / "data" / "raw"
+    raw.mkdir()
+    shutil.move(root / "data" / "train.csv", raw / "train.csv")
+    stores = [[f"store-{i}", f"city number {i}", f"cluster {i % 5}"] for i in range(40)]
+    _csv(raw / "stores.csv", ["store", "city", "cluster"], stores)
+    meta = root / "data" / "extra" / "meta"
+    meta.mkdir(parents=True)
+    _csv(meta / "studies.csv", ["site", "scanner", "field"], [[f"site number {i}", f"scanner model {i}", "3 tesla"] for i in range(40)])
+    with zipfile.ZipFile(root / "data" / "knee.zip", "w") as z:
+        z.writestr("extra/meta/studies.csv", "")
+    _csv(root / "stores_copy.csv", ["store", "city", "cluster"], stores[:10])
+    _csv(root / "studies_copy.csv", ["site", "scanner", "field"], [[f"site number {i}", f"scanner model {i}", "3 tesla"]
+                                                                   for i in range(10)])
+    commit(root)
+    res = AU.run(root, online=False)
+    roles = {x["path"]: x["role"] for x in res["references"]}
+    assert roles["data/raw/stores.csv"] == roles["data/extra/meta/studies.csv"] == "competition"
+    assert _finding(res, "stores_copy.csv")["severity"] == "leak"
+    assert _finding(res, "studies_copy.csv")["severity"] == "leak"
+
+
+def test_data_replaces_the_default_reference(comp):
+    root, rows = comp
+    _gold(root, rows)
+    commit(root)
+    only = root.parent / "train.csv"
+    _csv(only, ["StudyInstanceUID", "Report", *LABELS], rows)
+    res = AU.run(root, [str(only)], online=False)
+    assert [x["path"] for x in res["references"]] == [only.resolve().as_posix()]
+    assert _finding(res, "data/gold.csv")["severity"] == "leak"
+
+
+def test_reading_the_reference_stops_at_its_time_budget(comp):
+    root, rows = comp
+    top = AU.toplevel(root)
+    st = S.load(root)
+    ref, notes = AU.reference(top, top, st, set(), deadline=0)  # already late: nothing is read
+    assert not ref.tables and any("time budget: 3 of 3 competition file(s)" in n for n in notes)
+    assert {f["path"] for f in ref.files} >= {"data/train.csv", "data/test.csv"}  # still exact-copy candidates
+    (root / "train_copy.csv").write_bytes((root / "data" / "train.csv").read_bytes())
+    size = (root / "train_copy.csv").stat().st_size
+    assert ref.copy_of(size, AU.blob_id(root / "train_copy.csv"), "sha1") == "data/train.csv"
