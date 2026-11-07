@@ -76,7 +76,6 @@ test('session start declares /kaggle-monitor before anything else can fail', asy
     return { value: { command: e.name } }
   })
   on('session.start', (_, e) => ({ cwd: e.cwd }))
-  on('ui.status', () => ({ value: undefined }))
   await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
   expect(registered).toEqual(['kaggle-monitor'])
 })
@@ -88,7 +87,6 @@ test('session start in a competition workspace does not open the pane by itself'
   const firstTick = new Promise<void>(resolve => (ticked = resolve))
   on('command.register', (_, e) => ({ value: { command: e.name } }))
   on('session.start', (_, e) => ({ cwd: e.cwd }))
-  on('ui.status', () => ({ value: undefined }))
   on('ui.open', (_, e) => {
     opened.push(e.id)
     return { value: { isPlaced: true } }
@@ -100,6 +98,7 @@ test('session start in a competition workspace does not open the pane by itself'
   on('env.get', () => ({ value: undefined }))
   on('store.get', () => ({ value: undefined }))
   on('clock.now', () => ({ value: Date.UTC(2026, 10, 7) }))
+  on('clock.every', () => new Promise(() => {})) // the polling timer never fires here
   on('process.run', () => {
     throw new Error('no processes in this test')
   })
@@ -115,6 +114,39 @@ test('session start in a competition workspace does not open the pane by itself'
   await firstTick // the start runs on after it answers; its last step is a first look at the panes
   expect(isCompetitionRead).toBe(true)
   expect(opened).toEqual([]) // the pane waits for /kaggle-monitor
+})
+
+test('session start with an account writes nothing to the status line: the pane shows it', async ($, on) => {
+  const statuses: (string | undefined)[] = []
+  let ticked = () => {}
+  const firstTick = new Promise<void>(resolve => (ticked = resolve))
+  on('command.register', (_, e) => ({ value: { command: e.name } }))
+  on('session.start', (_, e) => ({ cwd: e.cwd }))
+  on('ui.status', (_, e) => {
+    statuses.push(e.text)
+    return { value: undefined }
+  })
+  on('ui.panes', () => {
+    ticked()
+    return { value: [] }
+  })
+  on('env.get', (_, e) => ({ value: e.name === 'HOME' ? '/home/u' : undefined }))
+  on('env.set', () => ({ value: {} }))
+  on('store.get', (_, e) => ({ value: e.key === 'active' ? 'main' : undefined }))
+  on('store.set', () => ({ value: undefined }))
+  on('clock.now', () => ({ value: Date.UTC(2026, 10, 7) }))
+  on('clock.every', () => new Promise(() => {})) // the polling timer never fires here
+  on('process.run', () => {
+    throw new Error('no processes in this test')
+  })
+  on('fs.exists', (_, e) => ({ value: e.path === '/home/u/.kaggle/access_token' }))
+  on('fs.read', (_, e) => {
+    if (e.path === '/ws/.kaggle-gm/competition.json') return { value: JSON.stringify({ slug: 'playground-s6e11' }) }
+    throw new Error(`ENOENT: ${e.path}`)
+  })
+  await $.session.start({ cwd: '/ws', surface: 'terminal', isInteractive: true })
+  await firstTick // the start runs on after it answers; its last step is a first look at the panes
+  expect(statuses.filter(t => t !== undefined)).toEqual([])
 })
 
 test('a [kgmon] line reads as the Kaggle session\'s resources', async () => {
