@@ -162,16 +162,6 @@ async function say($: EngineInterface, text: string, isError = false) {
   await update($, noteA, () => ({ text, isError }))
 }
 
-async function statusLine($: EngineInterface) {
-  const a = activeAccount()
-  if (!a) {
-    $.ui.status(accounts.length ? 'Kaggle: no account chosen' : undefined)
-    return
-  }
-  const q = (await read($, quotasA))[a.alias]?.value?.find(r => r.resource === 'GPU')
-  $.ui.status(`Kaggle ${a.alias}${q ? ` · GPU ${h1(q.remainingH)}h left` : ''}`)
-}
-
 async function reloadAccounts($: EngineInterface) {
   if (!P) return
   reg = await loadRegistry($, P)
@@ -197,7 +187,6 @@ async function useAccount($: EngineInterface, alias: string, quiet = false): Pro
   isSwitched = true
   await $.store.set('active', alias)
   await publishAccounts($)
-  await statusLine($)
   last.delete(`subs`)
   last.delete(`quota:${alias}`)
   if (!quiet) {
@@ -234,7 +223,6 @@ async function pollQuota($: EngineInterface, a: Account) {
     ...all,
     [a.alias]: typeof r === 'string' ? { ...all[a.alias], error: r, isLoading: false } : { value: r, fetchedAt: now },
   }))
-  if (a.alias === active) await statusLine($)
 }
 
 /** Follows a running kernel's live log: its `[kgmon]` lines are the session's resources. */
@@ -373,7 +361,7 @@ async function pollSubs($: EngineInterface) {
 async function kaggleJobs($: EngineInterface, now: number, isShown: boolean) {
   if (!cli) return
   for (const a of accounts) {
-    if ((isShown || a.alias === active) && due(`quota:${a.alias}`, QUOTA_MS, now)) void job($, `quota:${a.alias}`, () => pollQuota($, a))
+    if (isShown && due(`quota:${a.alias}`, QUOTA_MS, now)) void job($, `quota:${a.alias}`, () => pollQuota($, a))
     const ks = (await read($, kernelsA))[a.alias]?.value ?? []
     const isLive = ks.some(k => LIVE.has(k.status))
     if ((isShown || isLive) && due(`kernels:${a.alias}`, isLive ? KERNELS_BUSY_MS : KERNELS_IDLE_MS, now)) {
@@ -549,7 +537,6 @@ async function removeAccount($: EngineInterface, alias: string) {
       await $.env.set('KAGGLE_API_TOKEN', undefined)
       await $.env.set('KAGGLE_USERNAME', undefined)
       await $.store.delete('active')
-      await statusLine($)
     }
   }
   await say($, `Removed ${alias}. Its token file ${a ? tilde(a.tokenPath, P) : ''} was left in place; delete it if you no longer need it.`)
@@ -588,7 +575,6 @@ async function init($: EngineInterface, cwd: string) {
     const envToken = await $.env.get('KAGGLE_API_TOKEN')
     active = accounts.find(a => a.tokenPath === envToken)?.alias ?? accounts.find(a => a.tokenPath === P?.defaultToken)?.alias
     await publishAccounts($)
-    await statusLine($)
   }
   // The pane opens only on /kaggle-monitor: opened here it came back in every new session.
   $.clock.every(TICK_MS, () => void tick($))
@@ -607,9 +593,7 @@ export const register: Register = on => {
       description: 'Kaggle pane: local processes, kernels, submissions, GPU/TPU quotas and accounts',
       argumentHint: '[activity|quota|accounts|use <alias>|refresh]',
     })
-    $.ui.status('Kaggle: starting...')
     void init($, e.cwd).catch(async err => {
-      $.ui.status('Kaggle: start failed (see /kaggle-monitor)')
       $.ui.log(`kaggle-monitor: start failed: ${String(err)}`, { to: 'debug' })
       await say($, `The monitor could not start: ${String(err)}`, true)
     })
