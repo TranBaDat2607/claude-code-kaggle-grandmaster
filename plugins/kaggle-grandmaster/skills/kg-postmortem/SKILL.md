@@ -73,7 +73,10 @@ workspace docs: the endgame often left them wrong.
    - Update the notes in the workspace `CLAUDE.md`: the competition is over, the result, and a pointer to the
      post-mortem.
    - Correct any claim that `kgkit final` contradicts.
-8. Showing the work is the next step, and it is the user's to start: README rebuilt around the result, license,
-   figures, public notebook and weights, a Kaggle write-up. Tell them to run `/kg-showcase`. It audits the repo
+8. Showing the work is the next step, and it is the user's to start: the repo made public with two ways in,
+   `solution/` (the final pipeline and the commands that reproduce it) and `journey/` (how the ideas developed,
+   phase by phase, from the ledger, dead ends included, with links to the code each experiment ran), the README
+   rebuilt around the result, license, figures, public notebook and weights, a Kaggle write-up. Tell them to run
+   `/kg-showcase`. It audits the repo
    (competition data in git, and whether the remote is public) and asks before anything goes public. Make
    nothing public from here.

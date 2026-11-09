@@ -1,8 +1,10 @@
 # README for a finished competition
 
 The first screen answers three questions: what the competition was, how it went, and what is the author's own work.
-Fill it from the commands' output (`kgkit final`, `kgkit ledger predictiveness`, `kgkit ledger list`) and from
-`reports/postmortem.md`. Leave out a section that has nothing true to say. Long tables go to `docs/results.md`.
+Then it sends each reader on: the final solution (`solution/README.md`) for the result, the journey
+(`journey/README.md`) for how it developed. Fill it from the commands' output (`kgkit final`, `kgkit ledger
+predictiveness`, `kgkit ledger list`) and from `reports/postmortem.md`. Leave out a section that has nothing true to
+say. Long tables go to `docs/results.md`; the full reproduction steps live in `solution/README.md`.
 
 Winners' repositories keep the README short and put the narrative in the write-up: a link to it, the hardware, the
 steps to run, the license. A portfolio README for any rank adds the result and the honest split between own and
@@ -27,6 +29,9 @@ checked; ties at the shown decimals, if they matter.>
 **The problem.** <Two or three sentences: what made it hard.>
 
 ![<What the figure shows, e.g. "Private score of every submission, rising from 0.80 to 0.94">](docs/figures/private_over_time.png)
+
+**Two ways in.** [The final solution](solution/README.md): the pipeline and the commands that reproduce it.
+[How it developed](journey/README.md): every phase, what worked, the dead ends, and the code each experiment ran.
 
 ## My work and other people's work
 
@@ -54,15 +59,19 @@ checked; ties at the shown decimals, if they matter.>
 
 ## Repo guide
 
-<The main files and folders, one line each, starting with where to read first.>
+| Path | What |
+|---|---|
+| [`solution/`](solution/README.md) | Start here for the result: the final pipeline and how to reproduce it |
+| [`journey/`](journey/README.md) | How it developed, phase by phase; [`journey/experiments.md`](journey/experiments.md): every experiment |
+| `src/` | <the pipeline: what is where> |
+| `studies/` | <analyses that decided something, one folder each> |
+| <other folders> | <one line each> |
 
 ## Reproduce
 
-- Hardware and time: <GPU / CPU, RAM, training time, inference time>
-- Environment: <environment.yml or requirements.txt, and the command that installs it>
-- Data: accept the competition's rules, then `kaggle competitions download -c <slug>`. The competition data is
-  not in this repository.
-- Steps, in order, as commands: <prepare data> → <train> → <predict>
+<Hardware and total time in one line.> The steps, as commands, are in [`solution/README.md`](solution/README.md).
+The competition data is not in this repository: accept the competition's rules, then
+`kaggle competitions download -c <slug>`.
 
 ## Credit
 
