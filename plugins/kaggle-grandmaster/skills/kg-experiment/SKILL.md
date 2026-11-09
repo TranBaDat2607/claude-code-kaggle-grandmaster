@@ -36,7 +36,8 @@ Follow the experiment protocol (`grandmaster-playbook` §2):
    paired gain ≥ ~2 standard errors of the per-fold differences (or of the OOF bootstrap) with most
    folds improving. Not "Δ > fold std": the fold std measures fold difficulty, which cancels in a
    paired comparison.
-3. Implement behind a flag/config in the existing script. Smoke test, then full run on frozen folds
+3. Implement behind a flag/config in the existing script, never in a copy of it (`train_v2.py`): the record keeps
+   the command it ran, so the flag says what changed. A quick probe that is not the experiment goes in `work/`. Smoke test, then full run on frozen folds
    with the baseline's seed(s). When the change touches the input pipeline, the resolution / `max_len` or the
    model size, run the script's `--bench` (or `python -m kgkit bench --run "<cmd>"`) after the smoke test, so the
    cost in GPU time is known before the run. A pure speed change (AMP, compile, caching) is an experiment too:
@@ -53,5 +54,7 @@ Follow the experiment protocol (`grandmaster-playbook` §2):
    changes too small to matter; a flagged huge jump → `validation-auditor` before accepting.
 6. Record it: `python -m kgkit ledger decide <new> keep|discard|inconclusive "<gain, folds k/K>"
    --parent <baseline>`; KEEP makes it the new baseline. `python -m kgkit backlog set <n> --status done
-   --exp <new> --result "<decision + gain>"`. Add one line of learning to the CLAUDE.md notes. Commit code.
-7. Suggest the next experiment based on what was learned.
+   --exp <new> --result "<decision + gain>"`. Add one line of learning to the CLAUDE.md notes. Commit code. A sweep of runs is decided at once: `python -m
+   kgkit ledger decide 12..20 discard "<why>"`.
+7. Suggest the next experiment based on what was learned. When it changes direction (a new model family, new data,
+   ensembling, the final week), name the new phase first: `python -m kgkit ledger phase "<name>"`.

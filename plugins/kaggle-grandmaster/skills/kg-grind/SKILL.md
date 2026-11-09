@@ -38,7 +38,9 @@ baseline beyond the paired noise, which `kgkit status` reports. The loop never f
 - **Never submit to Kaggle** unless the user explicitly authorised autonomous submissions in this
   request; prepare and validate submission files instead.
 - Never modify `data/` or the frozen folds; never delete ledger entries, backlog items or artefacts.
-- Commit code before each long run; one hypothesis per experiment; everything logged and decided.
+- Commit code at natural points (each record keeps the exact code it ran from either way); one hypothesis per
+  experiment, behind a flag of the existing script, never a copy of it; everything logged and decided (a sweep at
+  once: `kgkit ledger decide 12..20 discard "<why>"`); probes and logs in `work/`.
 - Stop early and report if: a comparison is flagged as a suspicious jump (run `validation-auditor`
   first), repeated crashes, disk/GPU memory issues, or the budget is spent.
 
@@ -51,7 +53,8 @@ baseline beyond the paired noise, which `kgkit status` reports. The loop never f
    an idle or input-bound GPU, a speed fix from `compute-efficiency`: a faster loop buys more experiments. Add each with
    `kgkit backlog add "<idea>" --gain --prob --cost --evidence --source`.
 3. **Pick** the top idea by (gain × probability) / cost, favouring cheap high-information tests early
-   and scaling runs late. Batch independent cheap experiments in parallel when hardware allows
+   and scaling runs late. When it starts a new direction (a model family, new data, ensembling), name the phase
+   first: `python -m kgkit ledger phase "<name>"`. Batch independent cheap experiments in parallel when hardware allows
    (e.g. two GPUs → two `experiment-runner` agents). Without a local GPU, run GPU experiments
    through `/kg-gpu` (1-fold screens, two per Kaggle session, with pruning). Pushing spends the
    user's weekly quota, so it needs their authorisation for this loop.

@@ -155,6 +155,11 @@ plugin's `templates/` folder.
 4. Use the daily submissions deliberately: to verify CV-LB agreement on *different kinds*
    of changes, not to hill-climb the public LB.
 5. End the day by updating the notes in CLAUDE.md: learnings, next experiments.
+6. Keep the repo readable, since it goes public when the competition ends (`/kg-showcase` writes `solution/`
+   and `journey/` from it): a variant is a flag of its script, not a copy; probes and logs go in `work/`
+   (ignored), an analysis that decides something in `studies/<name>/`; name the phase when the direction
+   changes (`kgkit ledger phase "<name>"`) and decide every record (`kgkit ledger decide 12..20 discard "<why>"`).
+   Each record keeps the command it ran and its exact code (`refs/kg/<id>` when the tree had changes).
 
 ## 6. Anti-patterns that lose medals
 
