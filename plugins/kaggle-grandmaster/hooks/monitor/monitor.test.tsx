@@ -480,30 +480,42 @@ test('a log reader that hears nothing for 15 min is replaced; Refresh replaces e
     await ui.unmount()
     return found?.text
   }
+  const warnings = async () => {
+    const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+    const found = await ui.findAll({ type: 'Text' })
+    await ui.unmount()
+    return found.filter(t => t.props.color === 'warning').map(t => t.text)
+  }
+  // when the kernel's log last had a new line, as the pane holds it
+  const heard = () => (held.get('live') as { value?: Record<string, { heardAt?: number }> } | undefined)?.value?.['u/train']?.heardAt
 
   await $.session.start({ cwd: '/ws', surface: 'terminal', isInteractive: true })
   await until('a first reader', () => readers.length === 1)
   expect(readers[0]?.argv.join(' ')).toBe('/opt/kaggle kernels logs -f u/train')
+  await until('the first line heard', () => heard() !== undefined)
+  const heardFirst = heard()
 
   // a minute on: quiet for a minute is no reason to reconnect
   await tick(60_000)
   await until('a poll', () => (held.get('kernels') as { value?: { main?: { fetchedAt?: number } } })?.value?.main?.fetchedAt === now)
   expect(readers.length).toBe(1)
 
-  // the card says how long the log has been silent
+  // a quiet log is no warning: a slow step can print nothing for a long time
   now += 2 * 3600_000
-  expect(await card(/Log silent for 2h01/)).toBeDefined()
+  expect(await card(/step 60/)).toBeDefined()
+  expect(await warnings()).toEqual([])
 
   // past 15 min without a byte: the next poll ends the reader and starts another, which replays the log
   await tick(60_000)
   await until('a second reader', () => readers.length === 2)
   await until('the first reader ended', () => readers[0]!.isEnded)
   expect(live()).toBe(1)
-  // its replay is the same log: still silent since the last new line
+  // its replay is the same log: nothing new was heard
   await until('the replay read', () => readers[1]!.isRead)
-  expect(await card(/Log silent for 2h02/)).toBeDefined()
+  expect(heard()).toBe(heardFirst)
+  expect(await warnings()).toEqual([])
 
-  // Refresh replaces every reader at once; this one's replay has a line more, so the log is no longer silent
+  // Refresh replaces every reader at once; this one's replay has a line more, heard now
   log += '{"epoch": 0.29, "step": 380, "of": 1314}\n'
   await $.command.run({
     command: 'kaggle-monitor',
@@ -516,7 +528,7 @@ test('a log reader that hears nothing for 15 min is replaced; Refresh replaces e
   expect(live()).toBe(1)
   await until('the new line read', () => readers[2]!.isRead)
   expect(await card(/step 380/)).toBeDefined()
-  expect(await card(/Log silent/)).toBeUndefined()
+  expect(heard()).toBe(now)
 
   // the session's end ends the last one
   await $.session.end({ reason: 'other', sessionId: 's1', resume: { id: 's1' } })
