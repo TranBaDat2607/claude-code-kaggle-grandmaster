@@ -1012,8 +1012,9 @@ export const register: Register = on => {
           if (P) parts.push(progressText(P))
           if (silentS !== undefined) parts.push(`log silent ${age(silentS)}`)
           const newest = L?.tail?.[L.tail.length - 1] ?? L?.lastLine
+          // Closed or open, a running card keeps its border: the cards stay apart when several are folded.
           return (
-            <Box key={`live-${k.ref}`} flexDirection="column">
+            <Box key={`live-${k.ref}`} flexDirection="column" borderStyle="round" borderColor={RUNNING_BLUE} paddingX={1}>
               <Box flexDirection="row" columnGap={1}>
                 <Box flexShrink={0}>{title}</Box>
                 <Text dimColor wrap="truncate">

@@ -268,6 +268,8 @@ test('a running kernel opens to its history, progress and log, and closes to one
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
   // one running kernel: open
   expect(await ui.find({ type: 'Button', text: /▾ RUNNING u2\/train-a/ })).toBeDefined()
+  const border = { borderStyle: 'round', borderColor: '#5fafff' }
+  expect((await ui.find({ key: 'live-u2/train-a' }))?.props).toMatchObject(border)
   for (const text of [/30m of 12h/, /step 820\/858 · epoch 1\.9$/, /53% now · avg 47% · 4 cores/, /7\.1 \/ 30\.0 GB · peak 8\.0/,
     /0% now · avg 40% · 6\.6 \/ 15\.0 GB, peak 9\.1 · T4/, /step 818 loss/]) {
     expect((await ui.find({ type: 'Text', text }))?.text).toMatch(text)
@@ -279,6 +281,8 @@ test('a running kernel opens to its history, progress and log, and closes to one
   // closed: the newest log line stays, the older ones go
   expect((await ui.find({ type: 'Text', text: /└ \[train\] step 820 loss 0\.0854/ }))?.text).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /step 818 loss/ })).toBeUndefined()
+  // closed, the card keeps its border
+  expect((await ui.find({ key: 'live-u2/train-a' }))?.props).toMatchObject(border)
   await ui.unmount()
 })
 
