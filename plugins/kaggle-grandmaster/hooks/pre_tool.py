@@ -13,6 +13,9 @@
    that cat saves, a commit message) is not read for submits.
 4. Before each GPU or TPU `kaggle kernels push` in the command: asks for confirmation when the cached
    weekly quota of that accelerator (minus kernels still running) is exhausted or smaller than the -t cap.
+5. Before each `kaggle kernels push` the command runs (not one quoted in a message): adds the hardware monitor
+   (templates/kaggle_monitor_cell.py) to the kernel's .py or .ipynb unless the file mentions kgmon already, so the
+   /kaggle-monitor pane shows the session's CPU, RAM, disk and GPUs. Claude is told what changed (additionalContext).
 Relative paths (-p, -f) are read from where the command's own `cd` steps put the shell at that point.
 Valid submissions produce no output, so the normal permission flow is unchanged.
 """
@@ -26,6 +29,25 @@ try:
     import _common as C
 except Exception:  # pragma: no cover - fail open
     sys.exit(0)
+
+CONTEXT: list[str] = []  # notes for Claude, sent with whatever this run outputs
+EMITTED: list[bool] = []  # a hook prints one JSON object: set once it is out
+
+
+def decide(**fields) -> None:
+    """Emit the PreToolUse output (a decision, or none), with the notes gathered so far."""
+    EMITTED.append(True)
+    if CONTEXT:
+        fields["additionalContext"] = "\n".join("kaggle-grandmaster: " + n for n in CONTEXT)
+    C.emit("PreToolUse", **fields)
+
+
+def add_monitors(payload: dict, cmd: str) -> None:
+    try:
+        import _kgmon
+        CONTEXT.extend(_kgmon.add_monitors(payload, cmd))
+    except Exception:  # a monitor must never stop a push
+        pass
 
 CRED_FILE = r"(?:kaggle\.json|\.kaggle[/\\](?:access_token(?:\.txt)?|credentials\.json))"
 CRED_ENV = r"\$?(?:env:)?KAGGLE_(?:KEY|API_TOKEN)\b"
@@ -119,7 +141,7 @@ def upload_guard(payload: dict, up: dict) -> bool:
     if not found:
         return False
     shown = [C.SF.clean(f) for f in found[:20]] + ([f"... and {len(found) - 20} more"] if len(found) > 20 else [])
-    C.emit("PreToolUse", permissionDecision="deny",
+    decide(permissionDecision="deny",
            permissionDecisionReason="kaggle-grandmaster: this upload would send credential-like files or links to "
                                     "files outside the folder (the Kaggle CLI uploads everything in it except "
                                     ".git, .cache and .huggingface):\n- " + "\n- ".join(shown) +
@@ -150,13 +172,13 @@ def gpu_push_guard(payload: dict, push: dict) -> bool:
             + f", resets {q.get('refresh_at')})")
     kernel = target[1].get("id") or target[0].name
     if avail <= 0.05:
-        C.emit("PreToolUse", permissionDecision="ask",
+        decide(permissionDecision="ask",
                permissionDecisionReason=f"kaggle-grandmaster: the weekly Kaggle {res} quota looks exhausted: "
                                         f"{avail:.2f}h plannable after running kernels{when}. Push {kernel} anyway? "
                                         "(`python -m kgkit gpu quota` re-checks runs that already finished)")
         return True
     if cap is not None and cap > avail:
-        C.emit("PreToolUse", permissionDecision="ask",
+        decide(permissionDecision="ask",
                permissionDecisionReason=f"kaggle-grandmaster: {kernel} is capped at {cap:.2f}h but only "
                                         f"{avail:.2f}h of {res} quota is plannable{when}. Push anyway?")
         return True
@@ -199,9 +221,18 @@ def main() -> None:
 
     reason = secret_reason(cmd)
     if reason:
-        C.emit("PreToolUse", permissionDecision="deny", permissionDecisionReason="kaggle-grandmaster: " + reason)
+        decide(permissionDecision="deny", permissionDecisionReason="kaggle-grandmaster: " + reason)
         return
 
+    add_monitors(payload, cmd)
+    try:
+        checks(payload, cmd)
+    finally:
+        if CONTEXT and not EMITTED:
+            decide()
+
+
+def checks(payload: dict, cmd: str) -> None:
     # One command can chain an upload, a push and a submit: check each until one emits a decision.
     up = C.parse_upload(cmd)
     if up is not None and upload_guard(payload, up):
@@ -227,7 +258,7 @@ def main() -> None:
             out += [tag + x for x in found]
 
     if problems:
-        C.emit("PreToolUse", permissionDecision="deny",
+        decide(permissionDecision="deny",
                permissionDecisionReason="kaggle-grandmaster blocked an invalid submission (it would waste a daily slot):\n- "
                                         + "\n- ".join(problems + notes))
         return
@@ -245,7 +276,7 @@ def main() -> None:
             asks.append(f"after the last submit Kaggle reported {left} submission{'' if left == 1 else 's'} left "
                         f"today for the team{more} (teammates' and website submissions count too)")
     if asks:
-        C.emit("PreToolUse", permissionDecision="ask",
+        decide(permissionDecision="ask",
                permissionDecisionReason="kaggle-grandmaster: " + "; ".join(asks) + ". Submit anyway?")
         return
     # otherwise: no output → normal permission flow

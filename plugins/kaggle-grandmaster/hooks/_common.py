@@ -26,7 +26,8 @@ from kgkit.state import (server_remaining_today, submission_records, submissions
                          submissions_today, today_utc)
 
 SUBMIT_RE = re.compile(r"kaggle(?:\.exe)?\s+(?:competitions|c)\s+submit\b(.*)", re.IGNORECASE | re.DOTALL)
-PUSH_RE = re.compile(r"kaggle(?:\.exe)?\s+kernels\s+(?:push|update)\b(.*)", re.IGNORECASE | re.DOTALL)
+# A quoted program path counts too: & "C:\Program Files\Python\Scripts\kaggle.exe" kernels push
+PUSH_RE = re.compile(r"kaggle(?:\.exe)?['\"]?\s+kernels\s+(?:push|update)\b(.*)", re.IGNORECASE | re.DOTALL)
 # Commands that upload a whole folder (Kaggle CLI 2.2.4; `d`, `m`, `i`/`v` and `v` are its aliases).
 UPLOAD_RE = re.compile(r"kaggle(?:\.exe)?\s+(?:(?:datasets|d)\s+(?:create|version)"
                        r"|(?:models|m)\s+(?:instances|i|variations|v)\s+(?:(?:versions|v)\s+)?create)\b(.*)",

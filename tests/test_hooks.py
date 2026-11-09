@@ -1,6 +1,7 @@
 """Drive the hooks the way Claude Code does: JSON on stdin through hooks/run.sh."""
 
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -596,3 +597,110 @@ def test_post_write_domains_and_silence(plugin_root, ws, tmp_path_factory):
     assert _write(plugin_root, ws, "reports/notes.md", SLOW_TRAIN, sid) is None
     outside = tmp_path_factory.mktemp("not_a_workspace")
     assert _write(plugin_root, outside, "train.py", SLOW_TRAIN, sid) is None
+
+
+def _kernel(ws, name, code, code_file="k.py", **meta):
+    kdir = ws / "kernels" / name
+    kdir.mkdir(parents=True)
+    (kdir / "kernel-metadata.json").write_text(json.dumps({"id": f"me/{name}", "code_file": code_file, **meta}))
+    (kdir / code_file).write_bytes(code.encode("utf-8") if isinstance(code, str) else code)
+    return kdir / code_file
+
+
+def _kgmon_lines(out):
+    return [l for l in out.splitlines() if l.startswith("[kgmon] ")]
+
+
+def test_push_adds_the_monitor_to_a_script(plugin_root, ws, tmp_path_factory):
+    """Every kernel Claude pushes reports its hardware to /kaggle-monitor: the cell goes after the shebang, docstring
+    and __future__ import, once, and keeps working when the script rebinds `time` later."""
+    code = '#!/usr/bin/env python3\n"""Train."""\nfrom __future__ import annotations\nfrom time import time\nprint("ran", time())\n'
+    f = _kernel(ws, "s", code)
+    out = hook(plugin_root, "pre_tool.py", bash("KAGGLE_API_TOKEN=$HOME/.kaggle/t kaggle kernels push -p kernels/s", ws))
+    assert "permissionDecision" not in out and "added the hardware monitor" in out["additionalContext"]
+    lines = f.read_text(encoding="utf-8").split("\n")
+    assert lines[:3] == code.split("\n")[:3] and lines[3].startswith("# >>> kaggle-grandmaster hardware monitor")
+    assert lines[-3:] == ["from time import time", 'print("ran", time())', ""]
+    work = tmp_path_factory.mktemp("work")
+    r = subprocess.run([sys.executable, str(f)], env={**os.environ, "KAGGLE_WORKING": str(work)},
+                       capture_output=True, text=True, timeout=60)
+    assert r.returncode == 0, r.stderr
+    assert len(_kgmon_lines(r.stdout)) == 1 and "ran " in r.stdout
+    before = f.read_bytes()
+    assert hook(plugin_root, "pre_tool.py", bash("kaggle kernels push -p kernels/s", ws)) is None  # once only
+    assert f.read_bytes() == before
+
+
+def test_push_adds_the_monitor_as_the_first_notebook_cell(plugin_root, ws):
+    nb = {"metadata": {}, "nbformat": 4, "nbformat_minor": 5,
+          "cells": [{"cell_type": "code", "id": "c1", "metadata": {}, "outputs": [], "execution_count": None,
+                     "source": ["print(1)"]}]}
+    f = _kernel(ws, "n", json.dumps(nb, separators=(",", ":")), code_file="n.ipynb", kernel_type="notebook")
+    g = _kernel(ws, "m", json.dumps(nb, indent=1) + "\n", code_file="m.ipynb")
+    out = hook(plugin_root, "pre_tool.py", bash("cd kernels && kaggle kernels push -p n && kaggle kernels push -p m", ws))
+    assert out["additionalContext"].count("added the hardware monitor") == 2
+    got = json.loads(f.read_text(encoding="utf-8"))
+    assert [c.get("id") for c in got["cells"]][1:] == ["c1"] and got["cells"][0]["id"].startswith("kgmon-")
+    assert "start_kgmon()" in "".join(got["cells"][0]["source"])
+    assert "\n" not in f.read_text(encoding="utf-8")  # Kaggle's compact JSON stays compact
+    assert g.read_text(encoding="utf-8").startswith('{\n "metadata"') and g.read_text(encoding="utf-8").endswith("}\n")
+
+
+def test_push_monitor_left_out(plugin_root, ws):
+    """Text that only mentions a push, code that reports already or opts out, and non-Python kernels are untouched."""
+    files = [_kernel(ws, "a", "print(1)\n"),
+             _kernel(ws, "b", "# kgmon: off\nprint(1)\n"),
+             _kernel(ws, "c", "x <- 1\n", code_file="c.R", language="r")]
+    before = [f.read_bytes() for f in files]
+    for cmd in ['git commit -m "kaggle kernels push -p kernels/a"', "grep -rn 'kaggle kernels push -p kernels/a' .",
+                "echo kaggle kernels push -p kernels/a", "kaggle kernels push --help",
+                "kaggle kernels push -p kernels/b", "kaggle kernels push -p kernels/c"]:
+        assert hook(plugin_root, "pre_tool.py", bash(cmd, ws)) is None, cmd
+    assert [f.read_bytes() for f in files] == before
+
+
+def test_push_monitor_windows_forms(plugin_root, ws):
+    """PowerShell with a quoted kaggle.exe path, CRLF line ends and a BOM: all kept."""
+    f = _kernel(ws, "w", b"\xef\xbb\xbfimport os\r\nprint(os.name)\r\n")
+    payload = {"hook_event_name": "PreToolUse", "tool_name": "PowerShell", "cwd": str(ws),
+               "tool_input": {"command": '& "C:\\Program Files\\Py\\Scripts\\kaggle.exe" kernels push -p kernels\\w'}}
+    assert "added the hardware monitor" in hook(plugin_root, "pre_tool.py", payload)["additionalContext"]
+    data = f.read_bytes()
+    assert data.startswith(b"\xef\xbb\xbf# >>> kaggle-grandmaster") and data.endswith(b"import os\r\nprint(os.name)\r\n")
+    assert b"\n" not in data.replace(b"\r\n", b"")
+
+
+def test_push_monitor_note_rides_with_the_quota_ask(plugin_root, ws):
+    _gpu_kernel(ws, quota_h=2.0)
+    (ws / "kernels" / "x-train" / "x.py").write_text("print(1)\n")
+    out = hook(plugin_root, "pre_tool.py", bash("kaggle kernels push -p kernels/x-train -t 21600", ws))
+    assert out["permissionDecision"] == "ask" and "added the hardware monitor" in out["additionalContext"]
+
+
+def test_monitor_cell_stays_quiet_in_spawned_workers(plugin_root, tmp_path):
+    """multiprocessing's spawn re-imports the script as __mp_main__: the cell must not start a monitor there."""
+    cell = plugin_root / "templates" / "kaggle_monitor_cell.py"
+    code = f"import runpy; runpy.run_path({str(cell)!r}, run_name='__mp_main__')"
+    r = subprocess.run([sys.executable, "-c", code], env={**os.environ, "KAGGLE_WORKING": str(tmp_path)},
+                       capture_output=True, text=True, timeout=60)
+    assert r.returncode == 0, r.stderr
+    assert _kgmon_lines(r.stdout) == []
+
+
+@pytest.mark.parametrize("cmd,runs", [
+    ("kaggle kernels push -p k", True),
+    ("conda run -n kg kaggle kernels push -p k", True),
+    ("timeout 600 /opt/conda/bin/kaggle kernels push -p k", True),
+    ("out=$(kaggle kernels push -p k 2>&1)", True),
+    ('bash -c "cd A && kaggle kernels push -p ."', True),
+    ('powershell -Command "kaggle kernels push -p ."', True),
+    ("if [ -d k ]; then kaggle kernels push -p k; fi", True),
+    ('git commit -m "kaggle kernels push -p k"', False),
+    ("echo kaggle kernels push -p k", False),
+    ("git log --grep kaggle kernels push", False),
+    ("python -c \"print('kaggle kernels push')\"", False),
+])
+def test_push_monitor_only_for_real_calls(plugin_root, cmd, runs):
+    sys.path.insert(0, str(plugin_root / "hooks"))
+    import _kgmon as K
+    assert K.is_call(cmd, cmd.index("kaggle")) is runs

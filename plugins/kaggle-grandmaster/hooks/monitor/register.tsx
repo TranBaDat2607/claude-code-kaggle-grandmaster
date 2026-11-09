@@ -860,8 +860,9 @@ export const register: Register = on => {
               </Text>
             ) : L?.heardAt ? (
               <Text dimColor wrap="wrap">
-                Its log has no resource readings. Kernels pushed with kgkit gpu push print them; for any other notebook,
-                paste kaggle-grandmaster's templates/kaggle_monitor_cell.py as its first cell.
+                Its log has no resource readings. Kernels pushed by Claude (kgkit gpu push, or kaggle kernels push)
+                print them; for a kernel pushed another way, paste kaggle-grandmaster's templates/kaggle_monitor_cell.py
+                as its first cell.
               </Text>
             ) : (
               <Text dimColor>Connecting to its live log...</Text>

@@ -1,5 +1,5 @@
 {
-  "description": "kaggle-grandmaster: competition context at session start, Kaggle prompt -> skill routing, submission validation/budget guard, credential protection, submission logging, compute defaults when model code is written; a Kaggle pane (/kaggle-monitor): running kernels with live CPU/GPU/RAM/disk, submissions, GPU/TPU quota per account, account switching",
+  "description": "kaggle-grandmaster: competition context at session start, Kaggle prompt -> skill routing, submission validation/budget guard, credential protection, hardware monitor added to pushed kernels, submission logging, compute defaults when model code is written; a Kaggle pane (/kaggle-monitor): running kernels with live CPU/GPU/RAM/disk, submissions, GPU/TPU quota per account, account switching",
   "hooks": {
     "SessionStart": [
       {
