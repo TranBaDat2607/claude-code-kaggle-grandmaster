@@ -593,9 +593,13 @@ def _ignored(base: Path, d: str) -> bool:
     return any(line.strip() in pats for line in lines)
 
 
-def ensure_ignored(base, dirs) -> list[str]:
-    """Add each folder of ``dirs`` (relative to ``base``) that git does not ignore to ``base/.gitignore`` and return
-    the patterns added. Files under them that git already tracks stay tracked (``git rm --cached`` untracks one)."""
+DATA_IGNORE_COMMENT = "# Competition data: Kaggle's rules forbid publishing it, copies and subsets included"
+
+
+def ensure_ignored(base, dirs, comment: str = DATA_IGNORE_COMMENT) -> list[str]:
+    """Add each folder of ``dirs`` (relative to ``base``) that git does not ignore to ``base/.gitignore`` (under the
+    ``comment`` line) and return the patterns added. Files under them that git already tracks stay tracked
+    (``git rm --cached`` untracks one)."""
     base = Path(base)
     added = [f"/{d.strip('/')}/" for d in dirs if not _ignored(base, d.strip("/"))]
     if not added:
@@ -605,8 +609,7 @@ def ensure_ignored(base, dirs) -> list[str]:
     nl = "\r\n" if b"\r\n" in raw else "\n"
     lead = nl if raw and not raw.endswith(b"\n") else ""
     with open(gi, "a", encoding="utf-8", newline="") as f:
-        f.write(lead + nl.join(["# Competition data: Kaggle's rules forbid publishing it, copies and subsets included",
-                                *added]) + nl)
+        f.write(lead + nl.join([comment, *added]) + nl)
     return added
 
 

@@ -14,8 +14,10 @@ You run exactly one experiment with scientific discipline.
    KEEP, not necessarily the best CV) and its code path.
 2. State the hypothesis and the single change. Use the accepted baseline as the comparison unless
    the delegating request names another.
-3. Implement the change behind a flag/config in the existing training script (don't fork a copy
-   unless necessary). Commit code before a long run if the workspace is a git repo.
+3. Implement the change behind a flag/config in the existing training script, never in a copy of it
+   (`train_v2.py`): the record keeps the command it ran, so the flag says what changed. Probes and logs go in
+   `work/`. The record also keeps the exact code it ran from (a snapshot under `refs/kg/` when the tree has
+   uncommitted changes), so commit at natural points rather than before every run.
 4. Smoke-test on a tiny subset (1 fold, few iterations/epochs) to catch crashes quickly. Then check the script
    against the compute defaults: `PYTHONPATH="$KGKIT_HOME" python -m kgkit speedcheck <script>` names slow
    patterns and the domain's reference (`$KGKIT_HOME/skills/compute-efficiency/references/`). When the change

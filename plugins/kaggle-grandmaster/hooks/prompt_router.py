@@ -129,8 +129,10 @@ HINTS: list[tuple[str, str, str]] = [
      r"publish (my|our|the) (solution|work|code|notebook|weights|repo)|(my|our) (kaggle )?write-?up|"
      r"write (a|my|our|the) (kaggle )?(solution )?write-?up|"
      r"(update|polish|tidy|clean up|rebuild) ((my|our|the) )?(repo|repository|readme|project)\b",
-     "To show the work after the competition (README rebuilt around the result, own work separated from public "
-     "work, license, figures, a public notebook and weights, a Kaggle write-up draft), suggest the user run "
+     "To show the work after the competition (two ways in: solution/, the final pipeline and the commands that "
+     "reproduce it, and journey/, how the ideas developed phase by phase, written from the ledger with links to the "
+     "code each experiment ran; README rebuilt around the result, own work separated from public work, license, "
+     "figures, a public notebook and weights, a Kaggle write-up draft), suggest the user run "
      "`/kg-showcase`, a slash command: it audits the repo first and asks before each public step. Make nothing "
      "public from here."),
     ("kaggle-monitor",

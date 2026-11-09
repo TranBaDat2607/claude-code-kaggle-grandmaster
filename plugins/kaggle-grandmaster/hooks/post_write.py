@@ -1,5 +1,6 @@
 """PostToolUse (Write|Edit): when model code is written in a competition workspace, put the compute defaults in front
-of Claude.
+of Claude; when a new script is a copy of one beside it (``train_v2.py`` next to ``train.py``), say that a variant
+belongs behind a flag of the script it varies (``kgkit.layout``), once per file and session.
 
 A skill loads when the model decides to load it; this hook makes the compute-efficiency guidance arrive whenever a
 training or inference script is written, by the main session or by a subagent (which may have no Skill tool, so
@@ -23,6 +24,7 @@ from pathlib import Path
 
 try:
     import _common as C
+    from kgkit import layout as LY
     from kgkit import speedcheck as SC
 except Exception:  # pragma: no cover - fail open
     sys.exit(0)
@@ -111,10 +113,25 @@ def main() -> None:
     task_domain = {"cv": "vision", "nlp": "text", "llm": "llm", "tabular": "tabular", "timeseries": "tabular",
                    "audio": "audio"}.get(task)
     note, keys = note_for(path, text, rel, seen, task_domain)
-    if not note:
-        return
-    _remember(state_file, seen | keys)
-    C.emit("PostToolUse", additionalContext=f"[kaggle-grandmaster] {note}")
+    if note:
+        _remember(state_file, seen | keys)
+    variant = variant_note(payload, path, rel)
+    notes = [n for n in (variant, note) if n]
+    if notes:
+        C.emit("PostToolUse", additionalContext="[kaggle-grandmaster] " + " ".join(notes))
+
+
+def variant_note(payload: dict, path: Path, rel: str) -> str:
+    """A note when Write made a copy of a script beside it, once per file and session."""
+    if payload.get("tool_name") != "Write":
+        return ""
+    base = LY.variant_of(path)
+    if base is None or not C.once(payload, f"variant:{rel}", "layout"):
+        return ""
+    return (f"{rel} looks like a copy of {base.name}. A variant belongs behind a flag (or a config file) of "
+            f"{base.name}, so the ledger record's command says what changed and the repo stays readable when it goes "
+            "public; a one-off probe goes in work/ (ignored by git). Keep the copy only if it is a new pipeline, and "
+            "then give it a name that says what it is.")
 
 
 if __name__ == "__main__":

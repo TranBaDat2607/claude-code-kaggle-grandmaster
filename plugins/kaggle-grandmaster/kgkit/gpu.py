@@ -9,7 +9,7 @@ so every accelerator-hour can be traced to the experiment it bought::
     python -m kgkit gpu quota                                   # live GPU + TPU quota, reset countdown
     python -m kgkit gpu build --name cnx384 --hours 6 \\
         --cmd "python src/train_image.py --name cnx384 --img-size 384 --folds {fold}"
-    python -m kgkit gpu push kernels/cnx384-train               # asks nothing; check quota first
+    python -m kgkit gpu push .kaggle-gm/build/cnx384-train      # asks nothing; check quota first
     python -m kgkit gpu push kernels/my-notebook --hours 1      # any kernel folder (kernel-metadata.json)
     python -m kgkit gpu wait <user>/cnx384-train                # poll until done (run in background)
     python -m kgkit gpu collect <user>/cnx384-train             # outputs -> ledger + GPU-hour log
@@ -45,6 +45,7 @@ from . import bench as B
 from . import evalset as E
 from . import kaggle_cli as KC
 from . import safety
+from . import snapshot as SN
 from . import state as S
 
 # The runner is part of the package, not of the plugin around it: `kgkit vendor` copies only the package, and a copy
@@ -89,7 +90,7 @@ BUNDLE_EXCLUDE_DIRS = {"__pycache__", ".git", ".ipynb_checkpoints", "wandb", ".v
 # kgkit modules a remote run never imports: they look at the local git repository and GitHub, or at the private
 # leaderboard after the deadline. Left out of the bundle, which counts toward Kaggle's source limit
 # (SOURCE_MAX_BYTES); `kgkit vendor` copies still have them.
-BUNDLE_KGKIT_LOCAL_ONLY = {"audit.py", "predictiveness.py"}
+BUNDLE_KGKIT_LOCAL_ONLY = {"audit.py", "predictiveness.py", "journey.py", "layout.py"}
 BUNDLE_EXCLUDE_SUFFIXES = {".pyc", ".pt", ".pth", ".bin", ".ckpt", ".safetensors", ".npy", ".npz", ".pkl",
                            ".parquet", ".feather", ".zip", ".png", ".jpg", ".jpeg", ".dcm"}
 # Kaggle refuses a kernel source of 1 MB or more with a bare 400 Bad Request from SaveKernel (its editor says it "must
@@ -803,17 +804,6 @@ def refresh_runs(root: str | Path) -> dict[str, str]:
 
 
 # ----------------------------------------------------------------------------- build
-def _git(root: Path) -> tuple[str | None, bool | None]:
-    try:
-        c = subprocess.run(["git", "rev-parse", "--short", "HEAD"], cwd=root, capture_output=True, text=True,
-                           timeout=5).stdout.strip()
-        d = bool(subprocess.run(["git", "status", "--porcelain"], cwd=root, capture_output=True, text=True,
-                                timeout=5).stdout.strip())
-        return (c or None, d if c else None)
-    except (OSError, subprocess.SubprocessError):
-        return None, None
-
-
 def _add_tree(z: zipfile.ZipFile, src: Path, arc: str, base: Path | None = None, skip=frozenset()) -> int:
     """Add ``src`` under ``arc``, except the paths in ``skip`` (relative to ``src``). Credential-like files, and
     anything whose real path leaves ``base`` (through a link at any level, ``src`` included), never go in: the bundle
@@ -1167,7 +1157,9 @@ def build_kernel(root: str | Path | None, name: str, cmd: str, hours: float, fol
                  prune_min_frac: float = 0.3, slug: str | None = None, out_dir: str | Path | None = None,
                  public: bool = False, extra_jobs: list[tuple[str, str]] = (), input_layout: str = "flat",
                  split_from: str | None = None) -> Path:
-    """Write ``kernels/<slug>/`` (kernel-metadata.json + generated runner script + kg-train.json).
+    """Write ``.kaggle-gm/build/<slug>/`` (kernel-metadata.json + generated runner script + kg-train.json): a build
+    output, ignored by git (``state.STATE_IGNORES``), since the script embeds the code as base64. What the run is
+    (command, jobs, inputs, the snapshot of the code) is in kg-train.json, the GPU-run log and the ledger records.
 
     ``extra_jobs`` ((name, cmd) pairs) share the session: e.g. two 1-fold screens of different ideas
     run side by side on the two T4s instead of leaving one GPU idle. ``datasets`` / ``kernels`` are linked
@@ -1237,8 +1229,9 @@ def build_kernel(root: str | Path | None, name: str, cmd: str, hours: float, fol
     if len(kslug) < 5:
         kslug = _slug(f"{kslug}-train")
     resume_src = list(resume_from)
-    commit, dirty = _git(root)
     built = _iso(_now())
+    code = SN.git_info(root, f"build/{kslug}-{re.sub(r'[^0-9TZ]', '', built)}")  # the code the bundle is made of
+    commit, dirty = code["git_commit"], code["git_dirty"]
     split, split_members = None, {}
     if split_from:
         split = {"file": SPLIT_FILE, "from": split_from, "bytes": len(split_data),
@@ -1250,7 +1243,8 @@ def build_kernel(root: str | Path | None, name: str, cmd: str, hours: float, fol
         "hours": hours, "accelerator": accelerator, "pip": list(pip), "wheel_sources": list(wheel_sources),
         "sources": [{"ref": st.slug, "kind": "competition", "dest": "data"}, *sources], "input_layout": input_layout,
         "resume_sources": resume_src, "prune": prune,
-        "git_commit": commit, "git_dirty": dirty, "build_id": f"{kslug}@{built}",
+        "git_commit": commit, "git_dirty": dirty, "git_snapshot": code.get("git_snapshot"),
+        "build_id": f"{kslug}@{built}",
         "allow_cpu": accelerator == "none", "resource": res, "tpu_chips": TPU_CHIPS.get(accelerator, 0),
         "split": split,
     }
@@ -1259,7 +1253,8 @@ def build_kernel(root: str | Path | None, name: str, cmd: str, hours: float, fol
     script = script.replace("__KG_PAYLOAD_B64__", base64.b64encode(payload).decode(), 1)
     size = len(script.encode("utf-8"))
 
-    kdir = Path(out_dir) if out_dir else root / "kernels" / kslug
+    kdir = Path(out_dir) if out_dir else root / S.STATE_DIR / "build" / kslug
+    S.ensure_state_ignores(root)
     kdir.mkdir(parents=True, exist_ok=True)
     code_file = f"{kslug.replace('-', '_')}.py"
     (kdir / code_file).write_text(script, encoding="utf-8")
@@ -1858,6 +1853,10 @@ def import_ledger(root: Path, out: Path, report: dict, kernel: str, version: int
                 rec["submission"] = f"subs/{new_id}.csv"
             else:
                 rec["submission"] = None
+        if report.get("git_snapshot"):
+            rec["git_snapshot"] = report["git_snapshot"]
+        else:
+            rec.pop("git_snapshot", None)
         rec.update(id=new_id, git_commit=report.get("git_commit"), git_dirty=report.get("git_dirty"),
                    **{used_key: gpu_h},
                    remote={"key": key, "kernel": kernel, "version": version, "remote_id": old_id,

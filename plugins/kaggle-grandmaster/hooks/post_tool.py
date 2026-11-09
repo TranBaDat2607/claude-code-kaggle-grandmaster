@@ -23,6 +23,7 @@ from pathlib import Path
 
 try:
     import _common as C
+    from kgkit import layout as LY
 except Exception:  # pragma: no cover - fail open
     sys.exit(0)
 
@@ -404,6 +405,19 @@ def unlogged_submit_note(payload: dict, subs: list[dict]) -> str | None:
             "or in a script it runs (and let it print Kaggle's reply) to have it logged with its file hash.")
 
 
+def log_place_note(payload: dict, cmd: str) -> str | None:
+    """Logs written next to the code or the reports, once per session: they go in work/ (ignored by git)."""
+    root = C.workspace(payload)
+    if root is None:
+        return None
+    paths = LY.log_targets(cmd)
+    if not paths or not C.once(payload, "log-place", "layout"):
+        return None
+    return (f"[kaggle-grandmaster] This command writes {', '.join(paths[:3])}: logs go in work/ (ignored by git), "
+            "e.g. `> work/logs/<name>.log`. Committed next to the code they make the repo unreadable when it goes "
+            "public; the numbers that matter belong in the ledger (notes, decision) or a study's README.")
+
+
 def main() -> None:
     payload = C.read_input()
     cmd = C.command_of(payload)
@@ -411,7 +425,7 @@ def main() -> None:
     pushes = C.parse_pushes(cmd)
     subs = C.parse_submits(cmd) or C.script_submits(payload, cmd, ran=True)
     notes = [silent_failure_note(payload), *push_reply_notes(payload, pushes), *log_gpu_pushes(payload, pushes),
-             *log_submissions(payload, subs), unlogged_submit_note(payload, subs)]
+             *log_submissions(payload, subs), unlogged_submit_note(payload, subs), log_place_note(payload, cmd)]
     notes = [n for n in notes if n]
     if notes:
         C.emit("PostToolUse", additionalContext="\n\n".join(notes))

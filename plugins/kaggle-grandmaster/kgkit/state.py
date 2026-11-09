@@ -54,6 +54,9 @@ class CompetitionState:
     eval_groups: str = ""
     public_lb_n: int | None = None    # rows in the public LB split: projects noise to the LB's sample size
     rope: float | None = None         # gains within +/- rope are "practically equivalent"
+    # What the work is about now ("stacking public OOFs", "final week"): every new ledger record carries it, and the
+    # journey of the finished competition is told phase by phase (`kgkit ledger phase`, `kgkit ledger journey`).
+    phase: str = ""
     notes: list[str] = field(default_factory=list)
 
     @property
@@ -65,7 +68,31 @@ class CompetitionState:
         d.mkdir(parents=True, exist_ok=True)
         p = d / STATE_FILE
         p.write_text(json.dumps(asdict(self), indent=2), encoding="utf-8")
+        ensure_state_ignores(root)
         return p
+
+
+# Generated inside .kaggle-gm/ and never committed (the ledger, backlog and logs there are): what `kgkit gpu collect`
+# downloads from a remote run (its artifacts, per-fold logs) and the kernel folders `kgkit gpu build` writes (the
+# code is embedded in them as base64).
+STATE_IGNORES = ("remote/", "build/")
+
+
+def ensure_state_ignores(root: str | Path) -> list[str]:
+    """Make ``.kaggle-gm/.gitignore`` name :data:`STATE_IGNORES`, keeping what it has. Returns the lines added.
+    Never raises."""
+    p = Path(root) / STATE_DIR / ".gitignore"
+    try:
+        text = p.read_text(encoding="utf-8") if p.is_file() else ""
+        have = {line.strip().strip("/") for line in text.splitlines()}
+        add = [x for x in STATE_IGNORES if x.strip("/") not in have]
+        if add:
+            head = "" if text else "# written by kgkit: generated here, never committed\n"
+            sep = "\n" if text and not text.endswith("\n") else ""
+            p.write_text(text + sep + head + "".join(f"{x}\n" for x in add), encoding="utf-8")
+        return add
+    except OSError:
+        return []
 
 
 def cache_dir(root: str | Path) -> Path:

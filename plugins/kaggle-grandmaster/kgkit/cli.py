@@ -11,7 +11,8 @@ Commands
   adv         adversarial validation (train vs test)
   score       score a prediction column against a truth column with a registered metric
   metrics     list registered metrics
-  ledger      list | best | show | lb | add | tag | compare | noise | decide | baseline | lineage | import
+  ledger      list | best | show | lb | add | tag | compare | noise | decide | baseline | lineage | import | phase |
+              journey
   final       which submissions Kaggle has selected as finals, and whether auto-selection would pick a fitted file
   standing    rank, team count, medal cut-offs and ties on the leaderboard Kaggle shows (private after the end)
   backlog     add | list | set | render | fidelity  — the ranked idea backlog (human vs GPU hours)
@@ -202,6 +203,11 @@ def _state_from_args(a):
     return st
 
 
+# The workspace layout `kgkit init` creates (templates/CLAUDE.competition.md says what goes where). work/ is ignored by
+# git: probes, logs and downloads, so the repository stays readable when the competition ends and goes public.
+WORKSPACE_DIRS = ("data", "src", "notebooks", "artifacts", "subs", "reports", "kernels", "studies", "work")
+
+
 def cmd_init(a):
     from . import state as S
 
@@ -210,18 +216,21 @@ def cmd_init(a):
     if (root / S.STATE_DIR / S.STATE_FILE).exists() and not a.force:
         raise SystemExit(f"{root / S.STATE_DIR / S.STATE_FILE} exists (use --force to overwrite)")
     st.save(root)
-    for d in ["data", "src", "notebooks", "artifacts", "subs", "reports", "kernels"]:
+    for d in WORKSPACE_DIRS:
         (root / d).mkdir(exist_ok=True)
     gi = root / ".gitignore"
     if not gi.exists():
-        gi.write_text("data/\nartifacts/\nsubs/*.csv\n*.npy\n*.pkl\n*.pt\n*.pth\n*.ckpt\n*.safetensors\nkaggle.json\n"
-                      "__pycache__/\n.ipynb_checkpoints/\nwandb/\n", encoding="utf-8")
+        gi.write_text("data/\nartifacts/\nsubs/*.csv\nwork/\n*.npy\n*.pkl\n*.pt\n*.pth\n*.ckpt\n*.safetensors\n"
+                      "kaggle.json\n__pycache__/\n.ipynb_checkpoints/\nwandb/\n", encoding="utf-8")
     else:  # a repo's own .gitignore often names the downloaded files only; a file made from them would be committed
         from . import audit as AU
 
         added = AU.ensure_ignored(root, ["data"])
         if added:
             print(f"added {', '.join(added)} to .gitignore: competition data (copies and subsets too) stays out of git")
+        added = AU.ensure_ignored(root, ["work"], comment="# Scratch: probes, logs, downloads (kgkit init)")
+        if added:
+            print(f"added {', '.join(added)} to .gitignore: scratch work (probes, logs, downloads) stays out of git")
     tmpl = _plugin_file("templates/CLAUDE.competition.md")
     cm = root / "CLAUDE.md"
     if not cm.exists() and tmpl is None:
@@ -575,6 +584,10 @@ def cmd_status(a):
         agreement = led.cv_lb_summary() or led.noise_note()  # the noise line rides on the CV-LB line when there is one
         if agreement:
             print(agreement)
+        from . import layout as LY
+
+        for line in LY.journey_lines(st, recs):  # phase and undecided records, as in the session brief
+            print(line)
         print()
         print(led.table(a.n))
     from .backlog import Backlog
@@ -582,6 +595,11 @@ def cmd_status(a):
     top = Backlog(root).ranked()[:3]
     if top:
         print("\ntop of the backlog: " + "; ".join(f"#{i['id']} {i['idea'][:60]}" for i in top))
+    from . import layout as LY
+
+    layout = LY.brief_line(root)
+    if layout:
+        print("\n" + layout)
 
 
 def cmd_folds(a):
@@ -735,12 +753,22 @@ def cmd_ledger(a):
         print(f"{r['id']}: tags {', '.join(r['tags']) or '(none)'}" + _fitted_note(r))
     elif a.action == "decide":
         try:
-            r = led.decide(a.args[0], a.args[1], " ".join(a.args[2:]), parent=a.parent)
+            ids = led.ids(a.args[0])
+            done = [led.decide(i, a.args[1], " ".join(a.args[2:]), parent=a.parent) for i in ids]
+        except KeyError as e:
+            raise SystemExit(str(e.args[0]) if e.args else str(e))
         except ValueError as e:
             raise SystemExit(str(e))
-        print(f"{r['id']}: {r['decision']}" + (f" (vs {r['parent']})" if r.get("parent") else ""))
-        if r["decision"] in ("keep", "baseline"):
-            print(f"accepted baseline is now {r['id']} (CV {fmt_cv(r)})")
+        for r in done:
+            print(f"{r['id']}: {r['decision']}" + (f" (vs {r['parent']})" if r.get("parent") else ""))
+        if done and done[-1]["decision"] in ("keep", "baseline"):
+            print(f"accepted baseline is now {done[-1]['id']} (CV {fmt_cv(done[-1])})")
+    elif a.action == "phase":
+        _ledger_phase(led, a)
+    elif a.action == "journey":
+        from . import journey as J
+
+        J.main(led, a)
     elif a.action == "baseline":
         r = led.baseline()
         if r is None:
@@ -771,6 +799,45 @@ def cmd_ledger(a):
                              cv=a.cv, notes=a.notes or "", source=a.source)
         print(f"logged {r['id']}: CV {r['cv']:.5f}" + (f" +/- {E.fmt_se(r['cv_std'])}" if r.get("cv_std") else "")
               + f" [{a.source}]")
+
+
+def _ledger_phase(led, a) -> None:
+    """`ledger phase [<name>] [--records IDS]`: name the phase new records belong to, put existing records in one, or
+    list the phases the ledger has."""
+    from . import state as S
+
+    st = S.load(led.root)
+    if st is None:
+        raise SystemExit("not inside a kaggle-grandmaster workspace (no .kaggle-gm/competition.json)")
+    name = " ".join(a.args).strip()
+    if a.records:
+        if not name:
+            raise SystemExit('--records needs the phase: `kgkit ledger phase "<name>" --records 12..20`')
+        try:
+            ids = led.ids(a.records)
+        except KeyError as e:
+            raise SystemExit(str(e.args[0]) if e.args else str(e))
+        n = led.set_phase(ids, name)
+        print(f"put {n} record(s) in phase {name!r}: " + (", ".join(ids) if len(ids) <= 6 else f"{ids[0]} .. {ids[-1]}"))
+        return
+    if name:
+        before = st.phase
+        st.phase = name
+        st.save(led.root)
+        print(f"phase is now {name!r}" + (f" (was {before!r})" if before and before != name else "")
+              + ": every record logged from now on carries it")
+        return
+    phases = led.phases()
+    if not phases:
+        print("(ledger is empty)")
+    for p in phases:
+        when = f"{str(p['first'] or '')[:10]} .. {str(p['last'] or '')[:10]}"
+        print(f"  {p['name'] or '(no phase)':44s} {p['n']:4d} record(s)  {when}")
+    if st.phase:
+        print(f"current phase: {st.phase!r}")
+    else:
+        print('no current phase: name what the work is about now, `kgkit ledger phase "<name>"` (records without one '
+              'are grouped as "(no phase)" in the journey; `--records` puts past ones in a phase)')
 
 
 def _shown(v: float, row: dict) -> str:
@@ -1893,6 +1960,11 @@ _LEDGER_OPTIONS = [
     ("--dry-run", dict(action="store_true", help="sync-lb: show what would change and write nothing")),
     ("--top", dict(type=int, default=10, help="predictiveness: k for the k strongest records by public score and "
                                               "by CV (default 10)")),
+    ("--records", dict(help="phase: put these existing records in the phase: an id, a list 3,7,9 or a range 12..20")),
+    ("--out", dict(default="journey/experiments.md", help="journey: the file to write (default "
+                                                          "journey/experiments.md)")),
+    ("--repo-url", dict(help="journey: web address of the repository the code links open (default: the GitHub "
+                             "remote, https://github.com/<owner>/<repo>)")),
     ("--plot", dict(metavar="DIR", help="predictiveness: also write public_vs_private.png, private_over_time.png and "
                                         "cv_vs_private.png to DIR (needs matplotlib)")),
 ]
@@ -1921,9 +1993,14 @@ _LEDGER_ACTIONS = {
                  ("baseline", "?", "default: the accepted baseline")], _PAIRED + " --ref"),
     "noise": ("noise of one absolute score: bounds its CV-LB gap, not a difference between two models",
               [_EXP], "--truth --groups --boot --method --public-n --metric"),
-    "decide": ("record the decision on a compared experiment",
-               [_EXP, ("baseline|keep|discard|inconclusive", None, "the decision"), ("note", "*", "why")],
+    "decide": ("record the decision on a compared experiment (or on several: a sweep decided at once)",
+               [("exp_id", None, "ledger id or name, a list 3,7,9 or a range 12..20"),
+                ("baseline|keep|discard|inconclusive", None, "the decision"), ("note", "*", "why")],
                "--parent"),
+    "phase": ("name the phase new records belong to (no name: list the phases), or put past records in one",
+              [("name", "*", "the phase, e.g. stacking public OOFs")], "--records"),
+    "journey": ("write journey/experiments.md: every record by phase, its parent, change, scores, decision and a "
+                "link to the code it ran from, and the lineage as a Mermaid graph", [], "--out --repo-url"),
     "baseline": ("the accepted baseline (the highest CV while nothing is accepted)", [], ""),
     "lineage": ("the chain of decisions behind a record, for reverse ablation",
                 [("exp_id", "?", "default: the accepted baseline")], ""),

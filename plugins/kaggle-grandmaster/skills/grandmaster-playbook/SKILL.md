@@ -131,7 +131,7 @@ The plugin ships `kgkit` (Python, numpy/pandas/sklearn/scipy). Locate it via the
 `KGKIT_HOME` environment variable (set by the plugin's SessionStart hook) — otherwise it is
 the `kgkit/` folder inside the plugin root. Run it as
 `PYTHONPATH="$KGKIT_HOME" python -m kgkit <cmd>` (the installed version). To let training scripts
-`from kgkit import ...`, copy it into the project with `PYTHONPATH="$KGKIT_HOME" python -m kgkit vendor src/`:
+`from kgkit import ...`, copy it into the project with `PYTHONPATH="$KGKIT_HOME" python -m kgkit vendor third_party/`:
 a snapshot that a plugin update leaves as it is (commands run from it run its version). Vendor again to
 update it — the session brief says when its version is not the plugin's — knowing that later experiments
 then run the new code.
@@ -155,6 +155,11 @@ plugin's `templates/` folder.
 4. Use the daily submissions deliberately: to verify CV-LB agreement on *different kinds*
    of changes, not to hill-climb the public LB.
 5. End the day by updating the notes in CLAUDE.md: learnings, next experiments.
+6. Keep the repo readable, since it goes public when the competition ends (`/kg-showcase` writes `solution/`
+   and `journey/` from it): a variant is a flag of its script, not a copy; probes and logs go in `work/`
+   (ignored), an analysis that decides something in `studies/<name>/`; name the phase when the direction
+   changes (`kgkit ledger phase "<name>"`) and decide every record (`kgkit ledger decide 12..20 discard "<why>"`).
+   Each record keeps the command it ran and its exact code (`refs/kg/<id>` when the tree had changes).
 
 ## 6. Anti-patterns that lose medals
 

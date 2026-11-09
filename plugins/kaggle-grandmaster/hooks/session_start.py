@@ -23,6 +23,10 @@ try:
     from kgkit import audit as AU  # imported here only: the tool hooks never need it
 except Exception:  # pragma: no cover - the brief works without its audit lines
     AU = None
+try:
+    from kgkit import layout as LY
+except Exception:  # pragma: no cover - the brief works without its layout line
+    LY = None
 
 KGKIT_HOME = C.PLUGIN_ROOT.as_posix()
 VERSION_RE = re.compile(r"""^__version__\s*=\s*["']([^"']+)["']""", re.MULTILINE)
@@ -57,7 +61,7 @@ def _own_cv(r: dict, holdout: bool = False) -> bool:
 
 
 def vendored_note(root: Path) -> str:
-    """Copies of kgkit in the workspace or a folder of it (`kgkit vendor src`) whose version is not the plugin's:
+    """Copies of kgkit in the workspace or a folder of it (`kgkit vendor third_party`) whose version is not the plugin's:
     scripts that import one, and `python -m kgkit` run from one, run that version, which a plugin update leaves as
     it was."""
     found = []
@@ -110,6 +114,14 @@ def ledger_line(st, recs: list[dict]) -> str:
     return s + "."
 
 
+def journey_lines(st, recs: list[dict]) -> list[str]:
+    return LY.journey_lines(st, recs) if LY is not None else []
+
+
+def layout_line(root: Path) -> str:
+    return LY.brief_line(root) if LY is not None else ""
+
+
 def ended(st) -> bool:
     days = C.S.deadline_days(st)
     return days is not None and days < 0
@@ -124,6 +136,9 @@ def ended_brief(root: Path, st, lines: list[str]) -> str:
     recs = C.ledger_records(root)
     if recs:
         lines.append(ledger_line(st, recs))
+    layout = layout_line(root)  # before the repo goes public
+    if layout:
+        lines.append(layout)
     return "\n".join(lines)
 
 
@@ -169,6 +184,7 @@ def brief(root: Path) -> str:
             note = (r.get("notes") or "").replace("\n", " ")[:80]
             cv = f"{r['cv']:.5f}" if isinstance(r.get("cv"), (int, float)) else "?"
             lines.append(f"  - {r['id']}: CV {cv} {('— ' + note) if note else ''}")
+        lines.extend(journey_lines(st, recs))
     else:
         lines.append("Ledger is empty — next step is usually " + ("/kg-baseline (log holdout scores with `kgkit ledger "
                      "add`)." if holdout else "/kg-cv then /kg-baseline."))
@@ -189,6 +205,9 @@ def brief(root: Path) -> str:
         vendored = ""
     if vendored:
         lines.append(vendored)
+    layout = layout_line(root)
+    if layout:
+        lines.append(layout)
     return "\n".join(lines)
 
 
