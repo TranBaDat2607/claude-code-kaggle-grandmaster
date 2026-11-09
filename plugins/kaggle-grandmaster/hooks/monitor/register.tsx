@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import type { AccountView, CliInfo, Fetched, Kernel, KernelLive, Machine, Note, Proc, QuotaRow, Scope, Submissions, Tab } from '../../types'
+import type { AccountView, Cards, CliInfo, Fetched, Kernel, KernelLive, Machine, Note, Proc, QuotaRow, Scope, Submissions, Tab } from '../../types'
 import {
   type Account,
   type Cli,
@@ -29,6 +29,7 @@ import {
   writeToken,
 } from './kaggle'
 import { lastLine } from './describe'
+import { LiveTracker, spark } from './live'
 import { type Platform, type Prev, machine as machineOf, nextPrev, platformOf, readGpus, readRaw, readTails, rows } from './probe'
 
 const PANE = 'kaggle-monitor'
@@ -60,7 +61,8 @@ const subsA = atom({ plugin: 'kaggle-grandmaster', key: 'submissions' } as const
 const cliA = atom({ plugin: 'kaggle-grandmaster', key: 'cli' } as const, {} as CliInfo, { shape: 'cli-1' })
 const noteA = atom({ plugin: 'kaggle-grandmaster', key: 'note' } as const, null as Note | null, { shape: 'note-1' })
 const confirmA = atom({ plugin: 'kaggle-grandmaster', key: 'confirmRemove' } as const, '')
-const liveA = atom({ plugin: 'kaggle-grandmaster', key: 'live' } as const, {} as Record<string, KernelLive>, { shape: 'live-1' })
+const liveA = atom({ plugin: 'kaggle-grandmaster', key: 'live' } as const, {} as Record<string, KernelLive>, { shape: 'live-2' })
+const cardsA = atom({ plugin: 'kaggle-grandmaster', key: 'cards' } as const, { open: {} } as Cards)
 const showLocalA = atom({ plugin: 'kaggle-grandmaster', key: 'showLocal' } as const, false)
 
 // ---------------------------------------------------------------- formatting
@@ -236,6 +238,7 @@ async function follow($: EngineInterface, a: Account, ref: string) {
   let errText = ''
   let reading: Reading | undefined
   let line: string | undefined
+  const tracker = new LiveTracker()
   let isDirty = false
   let isScheduled = false
   let wroteAt = 0
@@ -258,6 +261,10 @@ async function follow($: EngineInterface, a: Account, ref: string) {
         heardAt: now,
         ...(r ? { ...r, readAt: now } : {}),
         ...(l ? { lastLine: l } : {}),
+        tail: tracker.tail,
+        hist: tracker.history(),
+        stats: tracker.stats(),
+        progress: tracker.progress,
       },
     }))
   }
@@ -271,17 +278,22 @@ async function follow($: EngineInterface, a: Account, ref: string) {
       buf += chunk.text
       const lines = buf.split(/\r?\n/)
       buf = lines.pop() ?? ''
+      const now = await $.clock.now()
       for (const one of lines) {
         const r = parseKgmon(one)
-        if (r) reading = r
-        else {
+        if (r) {
+          reading = r
+          tracker.reading(r)
+        } else {
           const text = lastLine(one, 200)
-          if (text) line = text
+          if (text) {
+            line = text
+            tracker.line(text)
+          }
         }
         isDirty = true
       }
       // The server replays the whole log on connect: write at most once a second, the latest only.
-      const now = await $.clock.now()
       if (isDirty && now - wroteAt >= FLUSH_MS) await flush()
       else if (isDirty && !isScheduled) {
         isScheduled = true
@@ -306,6 +318,12 @@ async function follow($: EngineInterface, a: Account, ref: string) {
       error: code !== 0 || (!all[ref]?.heardAt && errText) ? failure('', errText, code) : undefined,
     },
   }))
+}
+
+/** Opens or closes running-kernel cards, and keeps the choice for the next session. */
+async function setCards($: EngineInterface, fn: (c: Cards) => Cards) {
+  await update($, cardsA, fn)
+  await $.store.set('cards', await read($, cardsA)).catch(() => undefined)
 }
 
 function unfollow(ref: string) {
@@ -333,6 +351,12 @@ async function pollKernels($: EngineInterface, a: Account) {
     seenKernel.set(k.ref, k.status)
     if (k.status === 'RUNNING') void follow($, a, k.ref)
     else unfollow(k.ref)
+  }
+  // A card opened or closed by hand is forgotten once its kernel ends.
+  const ended = r.filter(k => k.status !== 'RUNNING').map(k => k.ref)
+  const handOpened = (await read($, cardsA)).open
+  if (ended.some(ref => ref in handOpened)) {
+    await setCards($, c => ({ ...c, open: Object.fromEntries(Object.entries(c.open).filter(([ref]) => !ended.includes(ref))) }))
   }
   // Readings of this account's kernels that no longer run are dropped.
   const running = new Set(r.filter(k => k.status === 'RUNNING').map(k => k.ref))
@@ -568,6 +592,11 @@ async function init($: EngineInterface, cwd: string) {
     competition = undefined
   }
   await reloadAccounts($)
+  const cards = (await $.store.get('cards')) as Partial<Cards> | undefined
+  if (cards && typeof cards === 'object' && cards.open && typeof cards.open === 'object') {
+    const all = cards.all === 'open' || cards.all === 'closed' ? cards.all : undefined
+    await update($, cardsA, () => ({ ...(all ? { all } : {}), open: cards.open as Record<string, boolean> }))
+  }
   const stored = await $.store.get('active')
   if (typeof stored === 'string' && accounts.some(a => a.alias === stored)) {
     await useAccount($, stored, true)
@@ -816,36 +845,103 @@ export const register: Register = on => {
         </Box>
       )
 
+      const sparkRow = (key: string, label: string, values: (number | undefined)[], color: string | undefined, text: string) => (
+        <Box key={key} flexDirection="row" columnGap={1}>
+          <Box width={5} flexShrink={0}>
+            <Text>{label}</Text>
+          </Box>
+          {width >= 60 ? <Text color={color}>{spark(values, meterW)}</Text> : null}
+          <Text wrap="truncate">{text}</Text>
+        </Box>
+      )
+      const count = (x: number) => (Number.isInteger(x) ? String(x) : x.toFixed(1))
+      const progressText = (p: NonNullable<KernelLive['progress']>) =>
+        `${p.label} ${count(p.done)}/${count(p.total)}` +
+        (p.epoch !== undefined ? ` · epoch ${p.epoch.toFixed(1)}` : '')
+      const pct = (x: number | undefined) => (x === undefined ? '-' : `${Math.round(x)}%`)
+      const gpuName = (g: [number, number, number, number, string]) => (g[4] ? ` · ${g[4].replace(/^Tesla\s+/i, '')}` : '')
+
+      const cards = await read($, cardsA)
+      const nRunning = running.length
+      const isOpen = (c: Cards, ref: string) => c.open[ref] ?? (c.all ? c.all === 'open' : nRunning <= 1)
+      const allOpen = running.every(x => isOpen(cards, x.k.ref))
+
       const liveCard = ({ alias, k }: { alias: string; k: Kernel }) => {
         const L = lives[k.ref]
         const hasReading = L?.readAt !== undefined
         const isStale = hasReading && now - (L?.readAt ?? 0) > STALE_MS
         const runFor = L?.t !== undefined ? age(L.t) : age((now - (utc(k.lastRunTime) ?? now)) / 1000)
-        const sameDisk = L?.tmp && L.disk && L.tmp[1] === L.disk[1]
+        // Kaggle ends a CPU or GPU session at 12 h; a TPU one (no GPUs either) at 9 h, so the limit is said for GPUs.
+        const limit = L?.gpus?.length ? ' of 12h' : ''
+        const open = isOpen(cards, k.ref)
+        const toggle = () => void setCards($, c => ({ ...c, open: { ...c.open, [k.ref]: !isOpen(c, k.ref) } }))
+        const title = (
+          <Button key={`card-${k.ref}`} plain onPress={toggle}>
+            {open ? '▾ ' : '▸ '}
+            <Text color={RUNNING_BLUE} bold>
+              RUNNING
+            </Text>{' '}
+            <Text bold>{k.ref}</Text>
+            <Text dimColor>
+              {' '}
+              · {alias} · {runFor}
+              {limit}
+            </Text>
+          </Button>
+        )
+        const P = L?.progress
+
+        if (!open) {
+          const parts: string[] = []
+          if (hasReading && L) {
+            if (L.cpu !== undefined) parts.push(`CPU ${pct(L.cpu)}`)
+            if (L.ram) parts.push(`RAM ${gb(L.ram[0])}/${gb(L.ram[1])} GB`)
+            if (L.gpus?.length) parts.push(`GPU ${L.gpus.map(g => `${g[1]}%`).join(' ')}`)
+          }
+          if (P) parts.push(progressText(P))
+          const newest = L?.tail?.[L.tail.length - 1] ?? L?.lastLine
+          return (
+            <Box key={`live-${k.ref}`} flexDirection="column">
+              <Box flexDirection="row" columnGap={1}>
+                <Box flexShrink={0}>{title}</Box>
+                <Text dimColor wrap="truncate">
+                  {parts.length ? `· ${parts.join(' · ')}` : L?.heardAt ? '· no readings' : '· connecting...'}
+                </Text>
+              </Box>
+              {newest ? (
+                <Text dimColor wrap="truncate">
+                  {'  └ '}
+                  {newest}
+                </Text>
+              ) : null}
+            </Box>
+          )
+        }
+
+        const H = L?.hist ?? []
+        const St = L?.stats
         return (
           <Box key={`live-${k.ref}`} flexDirection="column" borderStyle="round" borderColor={RUNNING_BLUE} paddingX={1}>
-            <Text wrap="truncate">
-              <Text color={RUNNING_BLUE} bold>
-                RUNNING
-              </Text>{' '}
-              <Text bold>{k.ref}</Text>
-              <Text dimColor>
-                {' '}
-                · {alias} · {runFor}
-              </Text>
-            </Text>
+            {title}
+            {P ? meter('prog', 'Prog', P.done / P.total, progressText(P), RUNNING_BLUE) : null}
             {hasReading && L ? (
               <Box flexDirection="column">
                 {L.cpu !== undefined
-                  ? meter('cpu', 'CPU', L.cpu / 100, `${Math.round(L.cpu)}%${L.cores ? ` of ${L.cores} cores` : ''}`)
+                  ? sparkRow('cpu', 'CPU', H.map(x => (x.cpu === undefined ? undefined : x.cpu / 100)), tone(L.cpu / 100),
+                      `${pct(L.cpu)} now · avg ${pct(St?.cpuAvg)}${L.cores ? ` · ${L.cores} cores` : ''}`)
                   : null}
-                {L.ram ? meter('ram', 'RAM', L.ram[0] / L.ram[1], `${gb(L.ram[0])} / ${gb(L.ram[1])} GB`) : null}
-                {(L.gpus ?? []).map(g =>
-                  meter(`gpu${g[0]}`, `GPU${g[0]}`, g[1] / 100, `${g[1]}% · ${gb(g[2])} / ${gb(g[3])} GB${g[4] ? ` · ${g[4].replace(/^Tesla\s+/i, '')}` : ''}`, g[1] < 30 ? 'warning' : 'success'),
+                {L.ram
+                  ? sparkRow('ram', 'RAM', H.map(x => (x.ram === undefined ? undefined : x.ram / L.ram![1])), tone(L.ram[0] / L.ram[1]),
+                      `${gb(L.ram[0])} / ${gb(L.ram[1])} GB${St?.ramPeak !== undefined ? ` · peak ${gb(St.ramPeak)}` : ''}`)
+                  : null}
+                {(L.gpus ?? []).map((g, i) =>
+                  sparkRow(`gpu${g[0]}`, `GPU${g[0]}`, H.map(x => (x.gpu?.[i] === undefined ? undefined : x.gpu[i]! / 100)),
+                    g[1] < 30 ? 'warning' : 'success',
+                    `${g[1]}% now · avg ${pct(St?.gpuAvg?.[i])} · ${gb(g[2])} / ${gb(g[3])} GB` +
+                      `${St?.gmemPeak?.[i] !== undefined ? `, peak ${gb(St.gmemPeak[i]!)}` : ''}${gpuName(g)}`),
                 )}
                 {L.gpus && L.gpus.length === 0 ? <Text dimColor>No GPU in this session.</Text> : null}
                 {L.disk ? meter('disk', 'Disk', L.disk[0] / L.disk[1], `${gb(L.disk[0])} / ${gb(L.disk[1])} GB  /kaggle/working`) : null}
-                {L.tmp && !sameDisk ? meter('tmp', 'Tmp', L.tmp[0] / L.tmp[1], `${gb(L.tmp[0])} / ${gb(L.tmp[1])} GB  scratch`) : null}
                 {L.doing?.length ? (
                   <Text wrap="truncate">
                     <Text dimColor>Doing </Text>
@@ -860,18 +956,23 @@ export const register: Register = on => {
               </Text>
             ) : L?.heardAt ? (
               <Text dimColor wrap="wrap">
-                Its log has no resource readings. Kernels pushed with kgkit gpu push print them; for any other notebook,
-                paste kaggle-grandmaster's templates/kaggle_monitor_cell.py as its first cell.
+                Its log has no resource readings. Kernels pushed by Claude (kgkit gpu push, or kaggle kernels push)
+                print them; for a kernel pushed another way, paste kaggle-grandmaster's templates/kaggle_monitor_cell.py
+                as its first cell.
               </Text>
             ) : (
               <Text dimColor>Connecting to its live log...</Text>
             )}
-            {L?.lastLine ? (
-              <Text dimColor wrap="truncate">
-                {'└ '}
-                {L.lastLine}
-              </Text>
-            ) : null}
+            {(L?.tail ?? (L?.lastLine ? [L.lastLine] : [])).map((t, i) => (
+              <Box key={`log-${i}`} flexDirection="row" columnGap={1}>
+                <Box width={5} flexShrink={0}>
+                  <Text dimColor>{i === 0 ? 'Log' : ''}</Text>
+                </Box>
+                <Text dimColor wrap="truncate">
+                  {t}
+                </Text>
+              </Box>
+            ))}
           </Box>
         )
       }
@@ -879,13 +980,24 @@ export const register: Register = on => {
       return (
         <Box flexDirection="column" rowGap={1}>
           <Box flexDirection="column" rowGap={1}>
-            <Text bold>Running on Kaggle ({running.length})</Text>
+            <Box flexDirection="row" columnGap={1}>
+              <Text bold>Running on Kaggle ({running.length})</Text>
+              {running.length ? (
+                <Button
+                  key="cards-all"
+                  hotkey="u"
+                  label={allOpen ? 'Hide all' : 'Show all'}
+                  dimColor
+                  onPress={() => void setCards($, () => ({ all: allOpen ? 'closed' : 'open', open: {} }))}
+                />
+              ) : null}
+            </Box>
             {running.length === 0 ? (
               <Text dimColor>
                 {cli ? (Object.keys(kernels).length ? 'No kernel is running on any account.' : 'Reading your kernels...') : 'Waiting for the Kaggle CLI.'}
               </Text>
             ) : null}
-            {running.map(liveCard)}
+            <Box flexDirection="column">{running.map(liveCard)}</Box>
           </Box>
           <Box flexDirection="column">
             <Text bold>Other kernels, last 24 h</Text>

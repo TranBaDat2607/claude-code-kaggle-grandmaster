@@ -4,7 +4,9 @@ Paste this as the first cell (or the top of the script). Every KG_MONITOR_S seco
 `[kgmon] {...}` line to the session log: CPU, RAM, disk and each GPU of the session, and what the code says it
 is doing. The kaggle-monitor pane in Claude Code follows a running kernel's log (`kaggle kernels logs -f`) and
 draws the latest line; Kaggle's API reports no session resources of its own. Kernels pushed with
-`kgkit gpu push` print these lines already.
+`kgkit gpu push` print these lines already, and when Claude Code runs `kaggle kernels push` the plugin's hook adds
+this block to the kernel's .py or .ipynb itself. A code file that mentions kgmon anywhere is left alone, so a
+`# kgmon: off` comment keeps it out.
 
 Say what the code is doing, and the pane shows it beside the readings:
 
@@ -14,17 +16,18 @@ Standard library only. Prints ASCII only. Only batch runs (Save Version / `kaggl
 API can stream; an interactive editor session has none.
 """
 
-import json
-import os
-import shutil
-import subprocess
-import sys
-import threading
-import time
+# Private names, so code that later rebinds `time`, `json` or `os` (from time import time) does not break it.
+import json as _kgmon_json
+import os as _kgmon_os
+import shutil as _kgmon_shutil
+import subprocess as _kgmon_subprocess
+import sys as _kgmon_sys
+import threading as _kgmon_threading
+import time as _kgmon_time
 
-KGMON_T0 = time.time()
+KGMON_T0 = _kgmon_time.time()
 _KGMON_DOING = []
-_KGMON_STOP = threading.Event()
+_KGMON_STOP = _kgmon_threading.Event()
 
 
 def kgmon_doing(text=None):
@@ -55,9 +58,9 @@ def _kgmon_cores():
     if len(quota) == 2 and quota[0].isdigit() and int(quota[1] or 0) > 0:
         return max(1.0, int(quota[0]) / int(quota[1]))
     try:
-        return float(len(os.sched_getaffinity(0)))
+        return float(len(_kgmon_os.sched_getaffinity(0)))
     except (AttributeError, OSError):
-        return float(os.cpu_count() or 1)
+        return float(_kgmon_os.cpu_count() or 1)
 
 
 def _kgmon_ram_mb():
@@ -78,7 +81,7 @@ def _kgmon_ram_mb():
 
 def _kgmon_disk_mb(path):
     try:
-        du = shutil.disk_usage(path)
+        du = _kgmon_shutil.disk_usage(path)
         return [du.used // 2 ** 20, du.total // 2 ** 20]
     except OSError:
         return None
@@ -86,9 +89,9 @@ def _kgmon_disk_mb(path):
 
 def _kgmon_gpus():
     try:
-        out = subprocess.run(["nvidia-smi", "--query-gpu=index,utilization.gpu,memory.used,memory.total,name",
+        out = _kgmon_subprocess.run(["nvidia-smi", "--query-gpu=index,utilization.gpu,memory.used,memory.total,name",
                               "--format=csv,noheader,nounits"], capture_output=True, text=True, timeout=20).stdout
-    except (OSError, subprocess.SubprocessError):
+    except (OSError, _kgmon_subprocess.SubprocessError):
         return None
     rows = []
     for line in out.splitlines():
@@ -103,14 +106,14 @@ def _kgmon_gpus():
 
 
 def _kgmon_snapshot(prev):
-    now, cpu_us = time.time(), _kgmon_cpu_us()
+    now, cpu_us = _kgmon_time.time(), _kgmon_cpu_us()
     snap = {"v": 1, "t": int(now - KGMON_T0), "cores": round(_kgmon_cores(), 1)}
     if cpu_us is not None and prev and prev[1] is not None and now > prev[0]:
         snap["cpu"] = round(100.0 * (cpu_us - prev[1]) / 1e6 / (now - prev[0]) / snap["cores"], 1)
     ram = _kgmon_ram_mb()
     if ram:
         snap["ram"] = ram
-    disk = _kgmon_disk_mb(os.environ.get("KAGGLE_WORKING", "/kaggle/working"))
+    disk = _kgmon_disk_mb(_kgmon_os.environ.get("KAGGLE_WORKING", "/kaggle/working"))
     if disk:
         snap["disk"] = disk
     tmp = _kgmon_disk_mb("/tmp")
@@ -125,13 +128,13 @@ def _kgmon_snapshot(prev):
 
 
 def _kgmon_print(snap):
-    sys.stdout.write("[kgmon] " + json.dumps(snap, separators=(",", ":")) + "\n")
-    sys.stdout.flush()
+    _kgmon_sys.stdout.write("[kgmon] " + _kgmon_json.dumps(snap, separators=(",", ":")) + "\n")
+    _kgmon_sys.stdout.flush()
 
 
 def start_kgmon(interval=None):
     """Prints a reading now, then every `interval` seconds from a background thread; 0 turns it off."""
-    interval = float(os.environ.get("KG_MONITOR_S", "30") if interval is None else interval)
+    interval = float(_kgmon_os.environ.get("KG_MONITOR_S", "30") if interval is None else interval)
     if interval <= 0:
         return None
     snap, prev = _kgmon_snapshot(None)
@@ -145,9 +148,10 @@ def start_kgmon(interval=None):
             except Exception:  # a reading must never stop the code it reports on
                 pass
 
-    t = threading.Thread(target=loop, name="kgmon", daemon=True)
+    t = _kgmon_threading.Thread(target=loop, name="kgmon", daemon=True)
     t.start()
     return t
 
 
-start_kgmon()
+if __name__ == "__main__":  # not again in worker processes that re-import the script (spawn)
+    start_kgmon()
