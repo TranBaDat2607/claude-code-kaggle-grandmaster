@@ -43,6 +43,11 @@ const TICK_MS = 3000
 const QUOTA_MS = 10 * 60_000
 const KERNELS_BUSY_MS = 60_000
 const KERNELS_IDLE_MS = 5 * 60_000
+/**
+ * A log reader that has heard nothing for this long is replaced. After a network drop the CLI can wait on a dead
+ * socket for good (no read timeout, no keepalive); a new reader gets the whole log replayed, so nothing is lost.
+ */
+const SILENT_MS = 15 * 60_000
 const SUBS_PENDING_MS = 20_000
 const SUBS_IDLE_MS = 5 * 60_000
 const ALIAS_RE = /^[A-Za-z0-9_-]{1,32}$/
@@ -156,8 +161,12 @@ const busy = new Set<string>()
 const last = new Map<string, number>()
 const seenKernel = new Map<string, string>()
 const seenSub = new Map<string, string>()
-/** One `kaggle kernels logs -f` per running kernel, by ref. */
-const followers = new Map<string, ReturnType<EngineInterface['process']['spawn']>>()
+/** A `kaggle kernels logs -f` child; `heardAt` is when it started or last wrote, `isLetGo` set once it is ended. */
+type Follower = { stream: ReturnType<EngineInterface['process']['spawn']>; heardAt: number; isLetGo: boolean }
+/** One log reader per running kernel, by ref. */
+const followers = new Map<string, Follower>()
+/** The most log any reader of a kernel has had, in characters: a reconnect's replay up to here is nothing new. */
+const logSeen = new Map<string, number>()
 const FLUSH_MS = 1000
 const STALE_MS = 120_000
 
@@ -248,8 +257,11 @@ async function pollQuota($: EngineInterface, a: Account) {
 async function follow($: EngineInterface, a: Account, ref: string) {
   if (!cli || followers.has(ref)) return
   const gen = followGen
+  const startedAt = await $.clock.now()
+  if (followers.has(ref) || gen !== followGen) return // another poll started one while the clock answered
   const stream = $.process.spawn({ argv: [...cli.argv, 'kernels', 'logs', '-f', ref], env: accountEnv(a) })
-  followers.set(ref, stream)
+  const me: Follower = { stream, heardAt: startedAt, isLetGo: false }
+  followers.set(ref, me)
   await update($, liveA, all => ({ ...all, [ref]: { ...all[ref], ref, alias: a.alias, isFollowing: true, error: undefined } }))
 
   let buf = ''
@@ -260,15 +272,20 @@ async function follow($: EngineInterface, a: Account, ref: string) {
   let isDirty = false
   let isScheduled = false
   let wroteAt = 0
+  let got = 0
+  let isNews = false
   const flush = async () => {
     isScheduled = false
-    if (!isDirty || gen !== followGen) return
+    // A reader that was ended (its kernel stopped, or it was replaced) writes nothing more: the card is its successor's.
+    if (!isDirty || gen !== followGen || me.isLetGo) return
     isDirty = false
     const now = await $.clock.now()
     wroteAt = now
     const r = reading
     const l = line
+    const isFresh = isNews
     reading = undefined
+    isNews = false
     await update($, liveA, all => ({
       ...all,
       [ref]: {
@@ -276,7 +293,8 @@ async function follow($: EngineInterface, a: Account, ref: string) {
         ref,
         alias: a.alias,
         isFollowing: followers.has(ref),
-        heardAt: now,
+        // when the log last grew, not when a reconnect replayed it
+        heardAt: isFresh || all[ref]?.heardAt === undefined ? now : all[ref].heardAt,
         ...(r ? { ...r, readAt: now } : {}),
         ...(l ? { lastLine: l } : {}),
         tail: tracker.tail,
@@ -289,14 +307,20 @@ async function follow($: EngineInterface, a: Account, ref: string) {
 
   try {
     for await (const chunk of stream) {
+      const now = await $.clock.now()
+      me.heardAt = now
       if (chunk.stream === 'stderr') {
         errText = (errText + chunk.text).slice(-2000)
         continue
       }
+      got += chunk.text.length
+      if (got > (logSeen.get(ref) ?? 0)) {
+        logSeen.set(ref, got)
+        isNews = true
+      }
       buf += chunk.text
       const lines = buf.split(/\r?\n/)
       buf = lines.pop() ?? ''
-      const now = await $.clock.now()
       for (const one of lines) {
         const r = parseKgmon(one)
         if (r) {
@@ -321,10 +345,10 @@ async function follow($: EngineInterface, a: Account, ref: string) {
   } catch (err) {
     errText = errText || String(err)
   } finally {
-    if (followers.get(ref) === stream) followers.delete(ref)
+    if (followers.get(ref) === me) followers.delete(ref)
   }
-  // Stopped with its session: what it would write now lands in the next session's pane.
-  if (gen !== followGen) return
+  // Stopped with its session (what it would write now lands in the next session's pane), or ended on purpose.
+  if (gen !== followGen || me.isLetGo) return
   await flush()
   const ended = await stream.result.catch(() => undefined)
   const code = ended?.code ?? 0
@@ -346,10 +370,13 @@ async function setCards($: EngineInterface, fn: (c: Cards) => Cards) {
   await $.store.set('cards', await read($, cardsA)).catch(() => undefined)
 }
 
+/** Ends a kernel's log reader. Ending the stream kills the child, also one blocked on a dead connection. */
 function unfollow(ref: string) {
-  const s = followers.get(ref)
-  if (s) void s.return(undefined as never).catch(() => undefined)
+  const f = followers.get(ref)
+  if (!f) return
+  f.isLetGo = true
   followers.delete(ref)
+  void f.stream.return(undefined as never).catch(() => undefined)
 }
 
 /** Stops what a session started: the poll and every kernel log reader (their `kaggle` children too). */
@@ -381,8 +408,17 @@ async function pollKernels($: EngineInterface, a: Account) {
       last.delete(`quota:${a.alias}`)
     }
     seenKernel.set(k.ref, k.status)
-    if (k.status === 'RUNNING') void follow($, a, k.ref)
-    else unfollow(k.ref)
+    if (k.status !== 'RUNNING') {
+      unfollow(k.ref)
+      logSeen.delete(k.ref)
+      continue
+    }
+    const f = followers.get(k.ref)
+    if (f && now - f.heardAt >= SILENT_MS) {
+      $.ui.log(`kaggle-monitor: ${k.ref}: no log for ${age((now - f.heardAt) / 1000)}, reconnecting`, { to: 'debug' })
+      unfollow(k.ref)
+    }
+    void follow($, a, k.ref)
   }
   // A card opened or closed by hand is forgotten once its kernel ends.
   const ended = r.filter(k => k.status !== 'RUNNING').map(k => k.ref)
@@ -608,6 +644,8 @@ async function setCliPath($: EngineInterface, text: string) {
 
 async function refreshAll($: EngineInterface) {
   last.clear()
+  // A reader may wait on a connection that died: new ones replay the log and catch up.
+  for (const ref of [...followers.keys()]) unfollow(ref)
   await say($, 'Refreshing from Kaggle...')
   const now = await $.clock.now()
   await kaggleJobs($, now, true)
@@ -940,7 +978,9 @@ export const register: Register = on => {
       const liveCard = ({ alias, k }: { alias: string; k: Kernel }) => {
         const L = lives[k.ref]
         const hasReading = L?.readAt !== undefined
-        const isStale = hasReading && now - (L?.readAt ?? 0) > STALE_MS
+        // The log, readings or not: a reader on a dead connection hears nothing, and reconnects after SILENT_MS.
+        const silentS = L?.heardAt !== undefined && now - L.heardAt > STALE_MS ? (now - L.heardAt) / 1000 : undefined
+        const isStale = hasReading && silentS === undefined && now - (L?.readAt ?? 0) > STALE_MS
         const runFor = L?.t !== undefined ? age(L.t) : age((now - (utc(k.lastRunTime) ?? now)) / 1000)
         // Kaggle ends a CPU or GPU session at 12 h; a TPU one (no GPUs either) at 9 h, so the limit is said for GPUs.
         const limit = L?.gpus?.length ? ' of 12h' : ''
@@ -970,6 +1010,7 @@ export const register: Register = on => {
             if (L.gpus?.length) parts.push(`GPU ${L.gpus.map(g => `${g[1]}%`).join(' ')}`)
           }
           if (P) parts.push(progressText(P))
+          if (silentS !== undefined) parts.push(`log silent ${age(silentS)}`)
           const newest = L?.tail?.[L.tail.length - 1] ?? L?.lastLine
           return (
             <Box key={`live-${k.ref}`} flexDirection="column">
@@ -1034,6 +1075,12 @@ export const register: Register = on => {
             ) : (
               <Text dimColor>Connecting to its live log...</Text>
             )}
+            {silentS !== undefined ? (
+              <Text color="warning" wrap="wrap">
+                Log silent for {age(silentS)}. After {age(SILENT_MS / 1000)} without a line the pane reconnects; Refresh
+                reconnects now.
+              </Text>
+            ) : null}
             {(L?.tail ?? (L?.lastLine ? [L.lastLine] : [])).map((t, i) => (
               <Box key={`log-${i}`} flexDirection="row" columnGap={1}>
                 <Box width={5} flexShrink={0}>

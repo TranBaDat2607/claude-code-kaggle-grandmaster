@@ -5,6 +5,10 @@ import { parseKgmon, parseQuota, status, utc } from './kaggle'
 import { HISTORY_MAX, LiveTracker, parseProgress, spark } from './live'
 import { etime, parseGpus } from './probe'
 
+// The test kit's runtime has timers; its type library does not name them.
+const sleep = (ms: number) =>
+  new Promise<void>(resolve => (globalThis as unknown as { setTimeout: (fn: () => void, ms: number) => void }).setTimeout(resolve, ms))
+
 const PANE = {
   plugin: 'kaggle-grandmaster',
   component: 'Pane',
@@ -394,9 +398,123 @@ test('a session change with no SessionStart after it: /kaggle-monitor sets the p
   })
   await $.session.start({ cwd: '/ws', surface: 'terminal', isInteractive: true })
   await $.session.end({ reason: 'logout', sessionId: 's1', resume: { id: 's1' } })
-  await $.command.run({ command: 'kaggle-monitor', args: '' })
+  await $.command.run({ command: 'kaggle-monitor', args: '', origin: { kind: 'composer' }, presentation: { isFullscreen: false, columns: 100 } })
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
   expect((await ui.find({ type: 'Text', text: /^(main|no Kaggle account)$/ }))?.text).toBe('main')
   await ui.unmount()
   expect(polls).toBe(2)
+})
+
+test('a log reader that hears nothing for 15 min is replaced; Refresh replaces every reader', async ($, on) => {
+  let now = Date.UTC(2026, 10, 9, 12)
+  const held = new Map<string, unknown>()
+  // Each `kaggle kernels logs -f`: the server's replay of `log`, then nothing at all, as on a connection that died unheard.
+  const readers: { argv: readonly string[]; isRead: boolean; isEnded: boolean }[] = []
+  let log = '{"epoch": 0.091, "step": 60, "of": 1314}\n'
+  let fire = () => {}
+  const until = async (what: string, ok: () => boolean | Promise<boolean>) => {
+    for (let i = 0; i < 2000; i++) {
+      if (await ok()) return
+      await sleep(1)
+    }
+    throw new Error(`never: ${what}`)
+  }
+  const tick = async (ms: number) => {
+    now += ms
+    fire()
+  }
+  on('state.get', (_, e) => ({ value: held.has(e.key) ? { value: held.get(e.key), version: 1 } : { value: undefined, version: 0 } }))
+  on('state.set', (_, e) => {
+    held.set(e.key, e.value)
+    return { value: { isSet: true, version: 1 } }
+  })
+  on('command.register', (_, e) => ({ value: { command: e.name } }))
+  on('command.run', () => ({ text: '' }))
+  on('session.start', (_, e) => ({ cwd: e.cwd }))
+  on('session.end', (_, e) => ({ sessionId: e.sessionId }))
+  on('ui.panes', () => ({ value: [{ id: 'kaggle-monitor', title: 'Kaggle', isShown: true, isFocused: false, isPlaced: true }] }))
+  on('ui.log', () => ({ value: undefined }))
+  on('ui.toast', () => ({ value: undefined }))
+  on('env.get', (_, e) => ({ value: e.name === 'HOME' ? '/home/u' : undefined }))
+  on('env.set', () => ({ value: {} }))
+  on('store.get', (_, e) => ({ value: e.key === 'active' ? 'main' : e.key === 'cli' ? ['/opt/kaggle'] : undefined }))
+  on('store.set', () => ({ value: undefined }))
+  on('clock.now', () => ({ value: now }))
+  on('clock.after', () => ({ value: undefined }))
+  on('clock.every', () => new Promise(resolve => (fire = () => resolve({ value: undefined }))))
+  on('fs.exists', (_, e) => ({ value: e.path === '/home/u/.kaggle/access_token' || e.path === '/opt/kaggle' }))
+  on('fs.read', (_, e) => {
+    throw new Error(`ENOENT: ${e.path}`)
+  })
+  on('process.run', (_, e) => {
+    const cmd = e.argv.join(' ')
+    const ran = (stdout: string) => ({ value: { exitCode: 0, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } })
+    if (cmd.startsWith('/opt/kaggle kernels list')) {
+      return ran(JSON.stringify([{ ref: 'u/train', title: 'train', lastRunTime: '2026-11-09T11:00:00' }]))
+    }
+    if (cmd === '/opt/kaggle kernels status u/train') {
+      return ran('u/train has status "KernelWorkerStatus.RUNNING"\n')
+    }
+    throw new Error('no such process in this test')
+  })
+  on('process.spawn', async function* (_, e, next) {
+    const me = { argv: e.argv, isRead: false, isEnded: false }
+    readers.push(me)
+    try {
+      yield { stream: 'stdout' as const, text: log }
+      me.isRead = true // the pane asks for more only once it has handled the replay
+      await new Promise(resolve => next.signal.addEventListener('abort', () => resolve(undefined), { once: true }))
+    } finally {
+      me.isEnded = true
+    }
+    return { value: { code: null, signal: 'SIGTERM' } }
+  })
+  const live = () => readers.filter(r => !r.isEnded).length
+  const card = async (text: RegExp) => {
+    const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+    const found = await ui.find({ type: 'Text', text })
+    await ui.unmount()
+    return found?.text
+  }
+
+  await $.session.start({ cwd: '/ws', surface: 'terminal', isInteractive: true })
+  await until('a first reader', () => readers.length === 1)
+  expect(readers[0]?.argv.join(' ')).toBe('/opt/kaggle kernels logs -f u/train')
+
+  // a minute on: quiet for a minute is no reason to reconnect
+  await tick(60_000)
+  await until('a poll', () => (held.get('kernels') as { value?: { main?: { fetchedAt?: number } } })?.value?.main?.fetchedAt === now)
+  expect(readers.length).toBe(1)
+
+  // the card says how long the log has been silent
+  now += 2 * 3600_000
+  expect(await card(/Log silent for 2h01/)).toBeDefined()
+
+  // past 15 min without a byte: the next poll ends the reader and starts another, which replays the log
+  await tick(60_000)
+  await until('a second reader', () => readers.length === 2)
+  await until('the first reader ended', () => readers[0]!.isEnded)
+  expect(live()).toBe(1)
+  // its replay is the same log: still silent since the last new line
+  await until('the replay read', () => readers[1]!.isRead)
+  expect(await card(/Log silent for 2h02/)).toBeDefined()
+
+  // Refresh replaces every reader at once; this one's replay has a line more, so the log is no longer silent
+  log += '{"epoch": 0.29, "step": 380, "of": 1314}\n'
+  await $.command.run({
+    command: 'kaggle-monitor',
+    args: 'refresh',
+    origin: { kind: 'composer' },
+    presentation: { isFullscreen: false, columns: 100 },
+  })
+  await until('a third reader', () => readers.length === 3)
+  await until('the second reader ended', () => readers[1]!.isEnded)
+  expect(live()).toBe(1)
+  await until('the new line read', () => readers[2]!.isRead)
+  expect(await card(/step 380/)).toBeDefined()
+  expect(await card(/Log silent/)).toBeUndefined()
+
+  // the session's end ends the last one
+  await $.session.end({ reason: 'other', sessionId: 's1', resume: { id: 's1' } })
+  await until('every reader ended', () => live() === 0)
 })
