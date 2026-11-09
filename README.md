@@ -25,6 +25,9 @@ validation, frozen CV folds and a baseline.
   and any command that would print your Kaggle key, and ask before a repeated file or one over today's budget.
 - **Experiments, not guesses.** One change per run, logged to a ledger, compared fold by fold with the accepted
   baseline, then kept or discarded.
+- **A repo worth making public.** Every experiment keeps its phase, its command and the exact code it ran from.
+  When the competition ends, `/kg-showcase` gives the repo two ways in: `solution/` for readers who want the
+  result, and `journey/` for readers who want to see how the ideas developed, dead ends included.
 - **Free GPUs from Kaggle.** `/kg-gpu` runs your local training script on Kaggle's GPUs and TPUs. It keeps both T4s
   busy, resumes runs that time out, stops losing ideas early and budgets your weekly quota.
 - **Your Kaggle runs, beside the chat.** `/kaggle-monitor` shows each running kernel's live CPU, GPU, RAM and
