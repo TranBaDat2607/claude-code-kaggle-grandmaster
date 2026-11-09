@@ -978,9 +978,9 @@ export const register: Register = on => {
       const liveCard = ({ alias, k }: { alias: string; k: Kernel }) => {
         const L = lives[k.ref]
         const hasReading = L?.readAt !== undefined
-        // The log, readings or not: a reader on a dead connection hears nothing, and reconnects after SILENT_MS.
-        const silentS = L?.heardAt !== undefined && now - L.heardAt > STALE_MS ? (now - L.heardAt) / 1000 : undefined
-        const isStale = hasReading && silentS === undefined && now - (L?.readAt ?? 0) > STALE_MS
+        // A quiet log says nothing: a slow step can print nothing for many minutes, and a reader on a dead connection
+        // reconnects by itself after SILENT_MS. Readings come on a timer (KG_MONITOR_S), so a gap in them is one.
+        const isStale = hasReading && now - (L?.readAt ?? 0) > STALE_MS
         const runFor = L?.t !== undefined ? age(L.t) : age((now - (utc(k.lastRunTime) ?? now)) / 1000)
         // Kaggle ends a CPU or GPU session at 12 h; a TPU one (no GPUs either) at 9 h, so the limit is said for GPUs.
         const limit = L?.gpus?.length ? ' of 12h' : ''
@@ -1010,7 +1010,6 @@ export const register: Register = on => {
             if (L.gpus?.length) parts.push(`GPU ${L.gpus.map(g => `${g[1]}%`).join(' ')}`)
           }
           if (P) parts.push(progressText(P))
-          if (silentS !== undefined) parts.push(`log silent ${age(silentS)}`)
           const newest = L?.tail?.[L.tail.length - 1] ?? L?.lastLine
           // Closed or open, a running card keeps its border: the cards stay apart when several are folded.
           return (
@@ -1076,12 +1075,6 @@ export const register: Register = on => {
             ) : (
               <Text dimColor>Connecting to its live log...</Text>
             )}
-            {silentS !== undefined ? (
-              <Text color="warning" wrap="wrap">
-                Log silent for {age(silentS)}. After {age(SILENT_MS / 1000)} without a line the pane reconnects; Refresh
-                reconnects now.
-              </Text>
-            ) : null}
             {(L?.tail ?? (L?.lastLine ? [L.lastLine] : [])).map((t, i) => (
               <Box key={`log-${i}`} flexDirection="row" columnGap={1}>
                 <Box width={5} flexShrink={0}>
