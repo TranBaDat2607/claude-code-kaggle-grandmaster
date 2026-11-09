@@ -1915,7 +1915,7 @@ def test_a_split_too_big_to_pack_is_linked_from_a_dataset_and_checked(tmp_path, 
     tm = json.loads((_build_split(root) / "kg-train.json").read_text())
     out = capsys.readouterr().out
     assert tm["script_kb"] > 1000 and "WARNING: the kernel script is 1." in out
-    assert "Its biggest parts: the fold split 1." in out and ", kgkit/ 2" in out
+    assert "Its biggest parts: the fold split 1." in out and re.search(r", kgkit/ \d{3} KB", out)
     assert ("Its column(s) 'id' go in as text ('id' is not the column of data/train.csv row for row: written in "
             "data/train.csv's row order with its values, it would be read from there in the session instead). Or put "
             "data/folds.csv in a private dataset (`kaggle datasets create`) and build with --split-from "

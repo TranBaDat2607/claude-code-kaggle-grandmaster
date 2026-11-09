@@ -803,7 +803,7 @@ def main():
         "elapsed_s": round(time.time() - T0, 1), "budget_h": cfg["hours"],
         "deadline_hit": any(s.get("status") in ("timeout", "killed", "not-started") for s in all_status),
         "gpu_util": sampler.summary(), "ledger": ledger, "git_commit": cfg.get("git_commit"),
-        "git_dirty": cfg.get("git_dirty"), "build_id": cfg.get("build_id"),
+        "git_dirty": cfg.get("git_dirty"), "git_snapshot": cfg.get("git_snapshot"), "build_id": cfg.get("build_id"),
         "input_layout": cfg.get("input_layout"), "inputs": inputs,
     }
     (OUT / "kg_run.json").write_text(json.dumps(report, indent=1), encoding="utf-8")

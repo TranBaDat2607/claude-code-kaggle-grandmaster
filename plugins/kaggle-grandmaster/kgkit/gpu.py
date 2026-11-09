@@ -45,6 +45,7 @@ from . import bench as B
 from . import evalset as E
 from . import kaggle_cli as KC
 from . import safety
+from . import snapshot as SN
 from . import state as S
 
 # The runner is part of the package, not of the plugin around it: `kgkit vendor` copies only the package, and a copy
@@ -803,17 +804,6 @@ def refresh_runs(root: str | Path) -> dict[str, str]:
 
 
 # ----------------------------------------------------------------------------- build
-def _git(root: Path) -> tuple[str | None, bool | None]:
-    try:
-        c = subprocess.run(["git", "rev-parse", "--short", "HEAD"], cwd=root, capture_output=True, text=True,
-                           timeout=5).stdout.strip()
-        d = bool(subprocess.run(["git", "status", "--porcelain"], cwd=root, capture_output=True, text=True,
-                                timeout=5).stdout.strip())
-        return (c or None, d if c else None)
-    except (OSError, subprocess.SubprocessError):
-        return None, None
-
-
 def _add_tree(z: zipfile.ZipFile, src: Path, arc: str, base: Path | None = None, skip=frozenset()) -> int:
     """Add ``src`` under ``arc``, except the paths in ``skip`` (relative to ``src``). Credential-like files, and
     anything whose real path leaves ``base`` (through a link at any level, ``src`` included), never go in: the bundle
@@ -1237,8 +1227,9 @@ def build_kernel(root: str | Path | None, name: str, cmd: str, hours: float, fol
     if len(kslug) < 5:
         kslug = _slug(f"{kslug}-train")
     resume_src = list(resume_from)
-    commit, dirty = _git(root)
     built = _iso(_now())
+    code = SN.git_info(root, f"build/{kslug}-{re.sub(r'[^0-9TZ]', '', built)}")  # the code the bundle is made of
+    commit, dirty = code["git_commit"], code["git_dirty"]
     split, split_members = None, {}
     if split_from:
         split = {"file": SPLIT_FILE, "from": split_from, "bytes": len(split_data),
@@ -1250,7 +1241,8 @@ def build_kernel(root: str | Path | None, name: str, cmd: str, hours: float, fol
         "hours": hours, "accelerator": accelerator, "pip": list(pip), "wheel_sources": list(wheel_sources),
         "sources": [{"ref": st.slug, "kind": "competition", "dest": "data"}, *sources], "input_layout": input_layout,
         "resume_sources": resume_src, "prune": prune,
-        "git_commit": commit, "git_dirty": dirty, "build_id": f"{kslug}@{built}",
+        "git_commit": commit, "git_dirty": dirty, "git_snapshot": code.get("git_snapshot"),
+        "build_id": f"{kslug}@{built}",
         "allow_cpu": accelerator == "none", "resource": res, "tpu_chips": TPU_CHIPS.get(accelerator, 0),
         "split": split,
     }
@@ -1858,6 +1850,10 @@ def import_ledger(root: Path, out: Path, report: dict, kernel: str, version: int
                 rec["submission"] = f"subs/{new_id}.csv"
             else:
                 rec["submission"] = None
+        if report.get("git_snapshot"):
+            rec["git_snapshot"] = report["git_snapshot"]
+        else:
+            rec.pop("git_snapshot", None)
         rec.update(id=new_id, git_commit=report.get("git_commit"), git_dirty=report.get("git_dirty"),
                    **{used_key: gpu_h},
                    remote={"key": key, "kernel": kernel, "version": version, "remote_id": old_id,

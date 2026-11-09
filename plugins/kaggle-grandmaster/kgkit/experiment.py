@@ -20,6 +20,11 @@ or a leaky run never silently becomes the thing every new idea is measured again
     python -m kgkit ledger compare 0012 0009 --truth data/train.csv:target
     python -m kgkit ledger decide 0012 keep "focal loss, +0.0021, 5/5 folds"
 
+Each record also says where its code is: ``git_commit`` and, when the workspace's code differed from that commit,
+``git_snapshot`` (a commit of the code as it ran, kept under ``refs/kg/<id>``: :mod:`kgkit.snapshot`), the command
+that ran it (``cmd``) and the ``phase`` of the competition it belongs to (``kgkit ledger phase``), so that the
+journey of a finished competition can be written from the ledger (``kgkit ledger journey``).
+
 Only the ledger (not the artefacts) should be committed to git.
 """
 
@@ -29,7 +34,8 @@ import json
 import os
 import random
 import re
-import subprocess
+import shlex
+import sys
 import time
 from pathlib import Path
 from typing import Any, Sequence
@@ -37,6 +43,7 @@ from typing import Any, Sequence
 import numpy as np
 
 from . import evalset as E
+from . import snapshot as SN
 from . import state as S
 
 
@@ -56,15 +63,31 @@ def seed_everything(seed: int = 42, deterministic_torch: bool = False) -> None:
         pass
 
 
-def _git_info(cwd: Path) -> dict[str, Any]:
+def _git_info(cwd: Path, name: str | None = None) -> dict[str, Any]:
+    """``git_commit``, ``git_dirty`` and, for a tree with changes, ``git_snapshot`` (:func:`kgkit.snapshot.git_info`).
+    ``KG_NO_SNAPSHOT=1`` turns the snapshot off."""
+    return SN.git_info(cwd, None if os.environ.get("KG_NO_SNAPSHOT") else name)
+
+
+def _command(root: Path) -> str | None:
+    """The command line that is running, as it could be typed again from the workspace: ``python <script> <args>``.
+    None inside kgkit's own CLI (a record logged by hand: its command says nothing about how the result was made) and
+    in a notebook kernel."""
+    argv = list(sys.argv or ())
+    if not argv or argv[0] in ("", "-c", "-"):  # python -c / stdin: no script to run again
+        return None
+    script = Path(argv[0])
+    if (script.name == "__main__.py" and script.parent.name == "kgkit") or "ipykernel" in script.name:
+        return None
     try:
-        commit = subprocess.run(["git", "rev-parse", "--short", "HEAD"], cwd=cwd, capture_output=True, text=True,
-                                timeout=5).stdout.strip()
-        dirty = bool(subprocess.run(["git", "status", "--porcelain"], cwd=cwd, capture_output=True, text=True,
-                                    timeout=5).stdout.strip())
-        return {"git_commit": commit or None, "git_dirty": dirty if commit else None}
-    except (OSError, subprocess.SubprocessError):
-        return {"git_commit": None, "git_dirty": None}
+        shown = script.resolve().relative_to(Path(root).resolve()).as_posix()
+    except (OSError, ValueError):
+        shown = argv[0]
+    words = " ".join(shlex.quote(a) for a in [shown, *argv[1:]])
+    return f"python {words}" if script.suffix == ".py" else words
+
+
+ID_RANGE_RE = re.compile(r"^\s*(\d+)\s*\.\.\s*(\d+)\s*$")
 
 
 DECISIONS = ("baseline", "keep", "discard", "inconclusive")
@@ -174,6 +197,47 @@ class Ledger:
                 return r
         raise KeyError(f"experiment {exp_id!r} not found in {self.path}")
 
+    def ids(self, spec: str) -> list[str]:
+        """Record ids for ``spec``: one id or name, a comma-separated list, or a range of numbers ``27..35`` (the
+        records numbered 27 to 35 that exist). KeyError when a single ref is unknown or a range matches nothing."""
+        out: list[str] = []
+        for part in [p.strip() for p in str(spec).split(",") if p.strip()]:
+            m = ID_RANGE_RE.match(part)
+            if m:
+                lo, hi = sorted((int(m.group(1)), int(m.group(2))))
+                found = [r["id"] for r in self.records()
+                         if r["id"].split("_")[0].isdigit() and lo <= int(r["id"].split("_")[0]) <= hi]
+                if not found:
+                    raise KeyError(f"no record numbered {lo}..{hi} in {self.path}")
+                out += found
+            else:
+                out.append(self.get(part)["id"])
+        return list(dict.fromkeys(out))
+
+    def phases(self) -> list[dict]:
+        """The phases records carry, in the order they first appear: ``{"name", "n", "first", "last"}`` (times of the
+        first and last record). Records with no phase are counted under ``""``."""
+        out: dict[str, dict] = {}
+        for r in self.records():
+            name = r.get("phase") or ""
+            p = out.setdefault(name, {"name": name, "n": 0, "first": r.get("time"), "last": r.get("time")})
+            p["n"] += 1
+            p["last"] = r.get("time") or p["last"]
+        return list(out.values())
+
+    def set_phase(self, exp_ids: Sequence[str], phase: str) -> int:
+        """Put existing records in a phase (records logged before a phase was named, or in the wrong one)."""
+        want = set(exp_ids)
+        recs = self.records()
+        n = 0
+        for r in recs:
+            if r["id"] in want:
+                r["phase"] = phase or None
+                n += 1
+        if n:
+            self._write_all(recs)
+        return n
+
     # ------------------------------------------------------------------ write
     def log(
         self,
@@ -227,7 +291,9 @@ class Ledger:
             "recheck": os.environ.get("KG_RECHECK") or None,  # set by `kgkit recheck`: not on the frozen folds
             "parent": self._resolve_id(parent) if parent else None,
             "decision": _check_decision(decision) if decision else None,
-            **_git_info(self.root),
+            "phase": (st.phase or None) if st else None,
+            "cmd": _command(self.root),
+            **_git_info(self.root, exp_id),
             **_jsonable(extra),
         }
         arrays = {"oof": oof, "test": test_pred, "holdout": holdout_pred}

@@ -54,6 +54,9 @@ class CompetitionState:
     eval_groups: str = ""
     public_lb_n: int | None = None    # rows in the public LB split: projects noise to the LB's sample size
     rope: float | None = None         # gains within +/- rope are "practically equivalent"
+    # What the work is about now ("stacking public OOFs", "final week"): every new ledger record carries it, and the
+    # journey of the finished competition is told phase by phase (`kgkit ledger phase`, `kgkit ledger journey`).
+    phase: str = ""
     notes: list[str] = field(default_factory=list)
 
     @property
