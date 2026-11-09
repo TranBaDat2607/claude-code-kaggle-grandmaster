@@ -293,3 +293,110 @@ test('two running kernels start closed; Show all opens every card', async ($, on
   expect(await ui.find({ type: 'Text', text: /now · avg/ })).toBeUndefined()
   await ui.unmount()
 })
+
+for (const source of ['clear', 'resume'] as const) {
+  test(`a /${source} brings the pane back: the account, the poll and the command`, async ($, on) => {
+    // The host's state, held for one session: emptied when it ends, as a /clear or /resume does.
+    const held = new Map<string, unknown>()
+    let registered = 0
+    let polls = 0
+    let ticked = () => {}
+    let nextTick = new Promise<void>(resolve => (ticked = resolve))
+    on('state.get', (_, e) => ({ value: held.has(e.key) ? { value: held.get(e.key), version: 1 } : { value: undefined, version: 0 } }))
+    on('state.set', (_, e) => {
+      held.set(e.key, e.value)
+      return { value: { isSet: true, version: 1 } }
+    })
+    on('command.register', (_, e) => {
+      registered++
+      return { value: { command: e.name } }
+    })
+    on('session.start', (_, e) => ({ cwd: e.cwd }))
+    on('session.end', (_, e) => {
+      held.clear()
+      return { sessionId: e.sessionId }
+    })
+    on('classic.SessionStart', () => ({}))
+    on('ui.panes', () => {
+      ticked()
+      return { value: [] }
+    })
+    on('env.get', (_, e) => ({ value: e.name === 'HOME' ? '/home/u' : undefined }))
+    on('env.set', () => ({ value: {} }))
+    on('store.get', (_, e) => ({ value: e.key === 'active' ? 'main' : undefined }))
+    on('store.set', () => ({ value: undefined }))
+    on('clock.now', () => ({ value: Date.UTC(2026, 10, 9) }))
+    on('clock.every', () => {
+      polls++
+      return new Promise(() => {}) // the polling timer never fires here
+    })
+    on('process.run', () => {
+      throw new Error('no processes in this test')
+    })
+    on('fs.exists', (_, e) => ({ value: e.path === '/home/u/.kaggle/access_token' }))
+    on('fs.read', (_, e) => {
+      throw new Error(`ENOENT: ${e.path}`)
+    })
+    const accountShown = async () => {
+      const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+      const found = await ui.find({ type: 'Text', text: /^(main|no Kaggle account)$/ })
+      await ui.unmount()
+      return found?.text
+    }
+
+    await $.session.start({ cwd: '/ws', surface: 'terminal', isInteractive: true })
+    await nextTick
+    expect(await accountShown()).toBe('main')
+
+    nextTick = new Promise<void>(resolve => (ticked = resolve))
+    await $.session.end({ reason: source, sessionId: 's1', resume: { id: 's1' } })
+    expect(await accountShown()).toBe('no Kaggle account') // what the person saw before the fix
+    await $.classic.SessionStart({ source, cwd: '/ws' })
+    await nextTick
+    expect(await accountShown()).toBe('main')
+    expect(registered).toBe(2)
+    expect(polls).toBe(2)
+  })
+}
+
+test('a session change with no SessionStart after it: /kaggle-monitor sets the pane up again', async ($, on) => {
+  const held = new Map<string, unknown>()
+  let polls = 0
+  on('state.get', (_, e) => ({ value: held.has(e.key) ? { value: held.get(e.key), version: 1 } : { value: undefined, version: 0 } }))
+  on('state.set', (_, e) => {
+    held.set(e.key, e.value)
+    return { value: { isSet: true, version: 1 } }
+  })
+  on('command.register', (_, e) => ({ value: { command: e.name } }))
+  on('session.start', (_, e) => ({ cwd: e.cwd }))
+  on('session.end', (_, e) => {
+    held.clear()
+    return { sessionId: e.sessionId }
+  })
+  on('command.run', () => ({ text: '' }))
+  on('ui.open', () => ({ value: { isPlaced: true } }))
+  on('ui.panes', () => ({ value: [] }))
+  on('env.get', (_, e) => ({ value: e.name === 'HOME' ? '/home/u' : undefined }))
+  on('env.set', () => ({ value: {} }))
+  on('store.get', (_, e) => ({ value: e.key === 'active' ? 'main' : undefined }))
+  on('store.set', () => ({ value: undefined }))
+  on('clock.now', () => ({ value: Date.UTC(2026, 10, 9) }))
+  on('clock.every', () => {
+    polls++
+    return new Promise(() => {})
+  })
+  on('process.run', () => {
+    throw new Error('no processes in this test')
+  })
+  on('fs.exists', (_, e) => ({ value: e.path === '/home/u/.kaggle/access_token' }))
+  on('fs.read', (_, e) => {
+    throw new Error(`ENOENT: ${e.path}`)
+  })
+  await $.session.start({ cwd: '/ws', surface: 'terminal', isInteractive: true })
+  await $.session.end({ reason: 'logout', sessionId: 's1', resume: { id: 's1' } })
+  await $.command.run({ command: 'kaggle-monitor', args: '' })
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect((await ui.find({ type: 'Text', text: /^(main|no Kaggle account)$/ }))?.text).toBe('main')
+  await ui.unmount()
+  expect(polls).toBe(2)
+})
