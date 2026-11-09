@@ -1,5 +1,5 @@
 import { atom, read, update } from 'claude-code'
-import type { EngineInterface, Register } from 'claude-code'
+import type { CommandSpec, EngineInterface, Register, Timer } from 'claude-code'
 
 import type { AccountView, Cards, CliInfo, Fetched, Kernel, KernelLive, Machine, Note, Proc, QuotaRow, Scope, Submissions, Tab } from '../../types'
 import {
@@ -33,6 +33,11 @@ import { LiveTracker, spark } from './live'
 import { type Platform, type Prev, machine as machineOf, nextPrev, platformOf, readGpus, readRaw, readTails, rows } from './probe'
 
 const PANE = 'kaggle-monitor'
+const COMMAND: CommandSpec = {
+  name: 'kaggle-monitor',
+  description: 'Kaggle pane: local processes, kernels, submissions, GPU/TPU quotas and accounts',
+  argumentHint: '[activity|quota|accounts|use <alias>|refresh]',
+}
 const TITLE = 'Kaggle'
 const TICK_MS = 3000
 const QUOTA_MS = 10 * 60_000
@@ -135,6 +140,18 @@ let formAlias = ''
 let formToken = ''
 let formGen = 0
 let cliPathInput = ''
+/** The workspace the mod was set up for. */
+let cwd = ''
+/** The 3 s poll, kept so a session change can stop it. */
+let ticker: Timer | undefined
+/**
+ * A session ended and this process goes on under another (/clear, /resume, a logout): the host
+ * emptied the pane's state with the old one and fires no session.start for the new one.
+ */
+let isStale = false
+let restarting: Promise<void> | undefined
+/** Moves on when the log readers are stopped: a stopped reader writes nothing more. */
+let followGen = 0
 const busy = new Set<string>()
 const last = new Map<string, number>()
 const seenKernel = new Map<string, string>()
@@ -230,6 +247,7 @@ async function pollQuota($: EngineInterface, a: Account) {
 /** Follows a running kernel's live log: its `[kgmon]` lines are the session's resources. */
 async function follow($: EngineInterface, a: Account, ref: string) {
   if (!cli || followers.has(ref)) return
+  const gen = followGen
   const stream = $.process.spawn({ argv: [...cli.argv, 'kernels', 'logs', '-f', ref], env: accountEnv(a) })
   followers.set(ref, stream)
   await update($, liveA, all => ({ ...all, [ref]: { ...all[ref], ref, alias: a.alias, isFollowing: true, error: undefined } }))
@@ -244,7 +262,7 @@ async function follow($: EngineInterface, a: Account, ref: string) {
   let wroteAt = 0
   const flush = async () => {
     isScheduled = false
-    if (!isDirty) return
+    if (!isDirty || gen !== followGen) return
     isDirty = false
     const now = await $.clock.now()
     wroteAt = now
@@ -303,8 +321,10 @@ async function follow($: EngineInterface, a: Account, ref: string) {
   } catch (err) {
     errText = errText || String(err)
   } finally {
-    followers.delete(ref)
+    if (followers.get(ref) === stream) followers.delete(ref)
   }
+  // Stopped with its session: what it would write now lands in the next session's pane.
+  if (gen !== followGen) return
   await flush()
   const ended = await stream.result.catch(() => undefined)
   const code = ended?.code ?? 0
@@ -330,6 +350,18 @@ function unfollow(ref: string) {
   const s = followers.get(ref)
   if (s) void s.return(undefined as never).catch(() => undefined)
   followers.delete(ref)
+}
+
+/** Stops what a session started: the poll and every kernel log reader (their `kaggle` children too). */
+function stopAll() {
+  try {
+    ticker?.cancel()
+  } catch {
+    // a timer of an ended session may already be gone
+  }
+  ticker = undefined
+  followGen++
+  for (const ref of [...followers.keys()]) unfollow(ref)
 }
 
 async function pollKernels($: EngineInterface, a: Account) {
@@ -582,7 +614,8 @@ async function refreshAll($: EngineInterface) {
 }
 
 /** Everything session.start sets up, run after it has answered. */
-async function init($: EngineInterface, cwd: string) {
+async function init($: EngineInterface, dir: string) {
+  cwd = dir
   platform = await platformOf($)
   P = await paths($, platform)
   try {
@@ -606,9 +639,34 @@ async function init($: EngineInterface, cwd: string) {
     await publishAccounts($)
   }
   // The pane opens only on /kaggle-monitor: opened here it came back in every new session.
-  $.clock.every(TICK_MS, () => void tick($))
+  ticker?.cancel()
+  ticker = $.clock.every(TICK_MS, () => void tick($))
   await detectCli($)
   await tick($)
+}
+
+/**
+ * Sets the mod up again for the session that took over this process. Its pane starts empty (the host
+ * held the old one's state); the accounts, kernels, readings and the poll come back as at a start.
+ */
+function restart($: EngineInterface, dir: string): Promise<void> {
+  if (restarting) return restarting
+  isStale = false
+  stopAll()
+  last.clear()
+  prev = undefined
+  restarting = (async () => {
+    await $.command.register(COMMAND).catch(() => undefined)
+    await init($, dir || cwd)
+  })()
+    .catch(async err => {
+      $.ui.log(`kaggle-monitor: restart failed: ${String(err)}`, { to: 'debug' })
+      await say($, `The monitor could not start again: ${String(err)}`, true)
+    })
+    .finally(() => {
+      restarting = undefined
+    })
+  return restarting
 }
 
 export const register: Register = on => {
@@ -617,11 +675,7 @@ export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     const started = await next(e)
     // The command first: nothing below may keep it from being declared.
-    await $.command.register({
-      name: 'kaggle-monitor',
-      description: 'Kaggle pane: local processes, kernels, submissions, GPU/TPU quotas and accounts',
-      argumentHint: '[activity|quota|accounts|use <alias>|refresh]',
-    })
+    await $.command.register(COMMAND)
     void init($, e.cwd).catch(async err => {
       $.ui.log(`kaggle-monitor: start failed: ${String(err)}`, { to: 'debug' })
       await say($, `The monitor could not start: ${String(err)}`, true)
@@ -629,7 +683,23 @@ export const register: Register = on => {
     return started
   })
 
+  // /clear, /resume and a logout end the session and go on under another, with no session.start:
+  // stop this one's poll and log readers, and set up again when the next one shows itself.
+  on('session.end', ($, e, next) => {
+    isStale = true
+    stopAll()
+    return next(e)
+  })
+
+  on('classic.SessionStart', async ($, e, next) => {
+    const started = await next(e)
+    if (isStale) void restart($, e.cwd)
+    return started
+  }).catch(($, e, next) => next(e))
+
   on('command.run', { command: 'kaggle-monitor' }, async ($, e) => {
+    // A session change no SessionStart followed: the command sets the mod up again.
+    if (isStale) await restart($, cwd)
     const [sub = '', arg = ''] = e.args.trim().split(/\s+/)
     if (sub === 'use') {
       if (!arg) return { text: `Usage: /kaggle-monitor use <alias> (${accounts.map(a => a.alias).join(', ') || 'no accounts yet'})` }
@@ -648,6 +718,7 @@ export const register: Register = on => {
   })
 
   on('prompt.compose', async ($, e, next) => {
+    if (isStale) void restart($, cwd)
     const composed = await next(e)
     const a = activeAccount()
     if (!isSwitched || !a) return composed
