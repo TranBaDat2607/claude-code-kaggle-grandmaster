@@ -2,6 +2,7 @@ import { expect, test } from 'claude-code/testing'
 
 import { describe, lastLine } from './describe'
 import { parseKgmon, parseQuota, status, utc } from './kaggle'
+import { HISTORY_MAX, LiveTracker, parseProgress, spark } from './live'
 import { etime, parseGpus } from './probe'
 
 const PANE = {
@@ -172,7 +173,7 @@ test('a running kernel draws its CPU, RAM, GPUs and disk', async ($, on) => {
       value: { acc2: { value: [{ ref: 'u2/train-b', title: 'train b', status: 'RUNNING', lastRunTime: '2026-11-06T11:00:00' }], fetchedAt: now } },
     },
     live: {
-      shape: 'live-1',
+      shape: 'live-2',
       value: {
         'u2/train-b': {
           ref: 'u2/train-b', alias: 'acc2', isFollowing: true, heardAt: now, readAt: now, t: 3600, cpu: 97, cores: 4,
@@ -185,10 +186,110 @@ test('a running kernel draws its CPU, RAM, GPUs and disk', async ($, on) => {
   on('state.get', (_, e) => ({ value: e.key in seeded ? { value: seeded[e.key], version: 1 } : { value: undefined, version: 0 } }))
   for (const surface of ['terminal', 'desktop'] as const) {
     const ui = await $.ui.mount({ ...PANE, surface })
-    for (const text of [/u2\/train-b/, /97% of 4 cores/, /12\.0 \/ 30\.0 GB/, /88% · 11\.0 \/ 15\.0 GB · T4/, /1\.0 \/ 20\.0 GB/, /exp\/f0 on gpu0/, /epoch 3\/10/]) {
+    for (const text of [/u2\/train-b/, /97% now · avg - · 4 cores/, /12\.0 \/ 30\.0 GB/, /88% now · avg - · 11\.0 \/ 15\.0 GB · T4/, /1\.0 \/ 20\.0 GB/, /exp\/f0 on gpu0/, /epoch 3\/10/]) {
       expect((await ui.find({ type: 'Text', text }))?.text).toMatch(text)
     }
     expect(await ui.find({ type: 'Text', text: /Processes \(/ })).toBeUndefined()
     await ui.unmount()
   }
+})
+
+
+test('a training log line reads as its progress', async () => {
+  expect(parseProgress('{"epoch": 1.911, "step": 820, "of": 858, "loss": 0.0854, "lr": 1.1e-06}')).toEqual({
+    label: 'step', done: 820, total: 858, epoch: 1.911,
+  })
+  expect(parseProgress('[train] {"epoch": 3, "epochs": 10, "val_auc": 0.91}')).toEqual({ label: 'epoch', done: 3, total: 10 })
+  expect(parseProgress('Epoch 2:  45%|####5     | 450/1000 [01:02<01:16, 7.2it/s]')).toEqual({ label: 'Epoch 2', done: 450, total: 1000 })
+  expect(parseProgress('fold 2/5 epoch 3/10 loss 0.21')).toEqual({ label: 'epoch', done: 3, total: 10 })
+  expect(parseProgress('Step [120/400] loss 1.2')).toEqual({ label: 'step', done: 120, total: 400 })
+  expect(parseProgress('loss 0.21 auc 0.93')).toBeUndefined()
+})
+
+test('a kernel log keeps its whole run: averages, peaks, thinned history, progress', async () => {
+  const tr = new LiveTracker()
+  for (let i = 0; i < 500; i++) {
+    tr.reading({ t: i * 30, cpu: i % 2 ? 100 : 0, ram: [1000 + i, 30000], gpus: [[0, 50, 2000 + i, 15000, 'T4'], [1, 0, 0, 15000, 'T4']] })
+    if (i >= 100 && i <= 200) tr.line(`{"step": ${(i - 100) * 10}, "of": 2000}`)
+  }
+  const st = tr.stats()
+  expect(st.n).toBe(500)
+  expect(st.cpuAvg).toBe(50)
+  expect(st.ramPeak).toBe(1499)
+  expect(st.gpuAvg).toEqual([50, 0])
+  expect(st.gmemPeak).toEqual([2499, 0])
+  const h = tr.history()
+  expect(h.length).toBeLessThanOrEqual(HISTORY_MAX)
+  expect(h.length).toBeGreaterThan(HISTORY_MAX / 2 - 2)
+  expect(h[h.length - 1]!.t).toBe(499 * 30)
+  expect(tr.progress).toEqual({ label: 'step', done: 1000, total: 2000 })
+  tr.line('saving checkpoint')  // a line that counts nothing keeps the last progress
+  expect(tr.progress?.done).toBe(1000)
+  expect(tr.tail).toEqual(['{"step": 990, "of": 2000}', '{"step": 1000, "of": 2000}', 'saving checkpoint'])
+  expect(spark([0, 0.5, 1, undefined], 6)).toBe('▁▅█   ')
+  expect(spark(Array.from({ length: 100 }, (_, i) => i / 99), 4)).toHaveLength(4)
+})
+
+const runningKernels = (now: number, refs: string[]) => ({
+  accounts: { shape: 'accounts-1', value: [{ alias: 'acc2', user: 'u2', tokenPath: '~/.kaggle/t', hasToken: true, isActive: true }] },
+  kernels: {
+    shape: 'kernels-1',
+    value: { acc2: { value: refs.map(ref => ({ ref, title: ref, status: 'RUNNING', lastRunTime: '2026-11-06T11:00:00' })), fetchedAt: now } },
+  },
+  live: {
+    shape: 'live-2',
+    value: Object.fromEntries(
+      refs.map(ref => [
+        ref,
+        {
+          ref, alias: 'acc2', isFollowing: true, heardAt: now, readAt: now, t: 1800, cpu: 53, cores: 4, ram: [7270, 30720],
+          disk: [0, 19968], gpus: [[0, 0, 6758, 15360, 'Tesla T4'], [1, 0, 0, 15360, 'Tesla T4']],
+          hist: [{ t: 0, cpu: 40, ram: 5000, gpu: [80, 0], gmem: [9000, 0] }, { t: 1800, cpu: 53, ram: 7270, gpu: [0, 0], gmem: [6758, 0] }],
+          stats: { n: 2, cpuAvg: 46.5, ramPeak: 8192, gpuAvg: [40, 0], gmemPeak: [9318, 0] },
+          progress: { label: 'step', done: 820, total: 858, epoch: 1.911 },
+          tail: ['[train] step 818 loss 0.0861', '[train] step 820 loss 0.0854'],
+        },
+      ]),
+    ),
+  },
+})
+
+test('a running kernel opens to its history, progress and log, and closes to one line', async ($, on) => {
+  const now = Date.UTC(2026, 10, 6, 12)
+  on('clock.now', () => ({ value: now }))
+  const seeded: Record<string, unknown> = runningKernels(now, ['u2/train-a'])
+  // Seeded until the pane writes its own value; what it writes (the cards) is read back from the engine.
+  on('state.get', ($, e, next) => (e.key in seeded ? { value: { value: seeded[e.key], version: 1 } } : next(e)))
+  on('store.set', () => ({ value: undefined }))
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  // one running kernel: open
+  expect(await ui.find({ type: 'Button', text: /▾ RUNNING u2\/train-a/ })).toBeDefined()
+  for (const text of [/30m of 12h/, /step 820\/858 · epoch 1\.9$/, /53% now · avg 47% · 4 cores/, /7\.1 \/ 30\.0 GB · peak 8\.0/,
+    /0% now · avg 40% · 6\.6 \/ 15\.0 GB, peak 9\.1 · T4/, /step 818 loss/]) {
+    expect((await ui.find({ type: 'Text', text }))?.text).toMatch(text)
+  }
+  expect(await ui.find({ type: 'Text', text: /Tmp|scratch/ })).toBeUndefined()
+  await ui.press({ key: 'card-u2/train-a' })
+  expect((await ui.find({ type: 'Text', text: /· CPU 53% · RAM 7\.1\/30\.0 GB · GPU 0% 0% · step 820\/858/ }))?.text).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /now · avg/ })).toBeUndefined()
+  // closed: the newest log line stays, the older ones go
+  expect((await ui.find({ type: 'Text', text: /└ \[train\] step 820 loss 0\.0854/ }))?.text).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /step 818 loss/ })).toBeUndefined()
+  await ui.unmount()
+})
+
+test('two running kernels start closed; Show all opens every card', async ($, on) => {
+  const now = Date.UTC(2026, 10, 6, 12)
+  on('clock.now', () => ({ value: now }))
+  const seeded: Record<string, unknown> = runningKernels(now, ['u2/train-a', 'u2/train-b'])
+  // Seeded until the pane writes its own value; what it writes (the cards) is read back from the engine.
+  on('state.get', ($, e, next) => (e.key in seeded ? { value: { value: seeded[e.key], version: 1 } } : next(e)))
+  on('store.set', () => ({ value: undefined }))
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /now · avg/ })).toBeUndefined()
+  await ui.press({ key: 'cards-all' })
+  expect((await ui.find({ type: 'Text', text: /53% now · avg 47%/ }))?.text).toBeDefined()
+  await ui.press({ key: 'cards-all' })
+  expect(await ui.find({ type: 'Text', text: /now · avg/ })).toBeUndefined()
+  await ui.unmount()
 })

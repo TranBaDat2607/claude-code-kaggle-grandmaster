@@ -173,11 +173,11 @@ for commands that mention Kaggle (or `VERBOSE`), which keeps overhead around 70 
 The plugin also ships a mod, `hooks/monitor/`: a TypeScript hooks module that Claude Code loads beside the Python
 hooks and that opens a pane beside the chat, so you do not have to keep Kaggle open in a browser. Run
 `/kaggle-monitor` (or `/kaggle-monitor quota`, `accounts`, `use <alias>`, `refresh`) to open it; it never opens by
-itself. Keys: `1` `2` `3` switch tabs, `r` refreshes.
+itself. Keys: `1` `2` `3` switch tabs, `r` refreshes, `u` opens or closes every running kernel's card.
 
 | Tab | Shows |
 |---|---|
-| Activity | Every kernel running on any registered account, with its session's live CPU, RAM, each GPU and disk, what it is doing (job and fold on each GPU) and its newest log line; the other kernels of the last 24 h (running blue, complete green, failed red); the workspace's latest submissions and scores. A notification when a kernel finishes or a submission is scored. `c` opens *This computer*: local CPU, RAM, disk, NVIDIA GPUs and your training processes, each described from its command line |
+| Activity | Every kernel running on any registered account, as a card you open or close by its title line (one running kernel opens, two or more start closed; your choice is kept across sessions). Closed, it is one line of CPU, RAM, each GPU's use and the training progress, with its newest log line under it. Open, it shows the whole run so far (the log is replayed from the start): a sparkline of CPU, RAM and each GPU with the value now, the average and the peak, GPU memory, disk, progress (`step 820/858`, an epoch, a tqdm bar), what it is doing (job and fold on each GPU) and its last three log lines; the other kernels of the last 24 h (running blue, complete green, failed red); the workspace's latest submissions and scores. A notification when a kernel finishes or a submission is scored. `c` opens *This computer*: local CPU, RAM, disk, NVIDIA GPUs and your training processes, each described from its command line |
 | Quotas | GPU and TPU hours used and left, and the reset time, for every account, and the total across them |
 | Accounts | The accounts of `~/.kaggle/kg_accounts.json`: **Use** points this session's Kaggle CLI and kgkit at that account's token file (`KAGGLE_API_TOKEN`), tells Claude which account it is, and is remembered for the next session; **Add** checks a pasted API token (or a token file) with Kaggle, then saves it to `~/.kaggle/access_token_<alias>`, readable by you alone; the registry holds only paths. Where the Kaggle CLI is, found from its install without contacting Kaggle |
 
