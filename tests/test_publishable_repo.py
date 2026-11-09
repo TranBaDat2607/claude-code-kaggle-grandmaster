@@ -13,6 +13,7 @@ from pathlib import Path
 import pytest
 
 from kgkit import cli
+from kgkit import journey as J
 from kgkit import layout as LY
 from kgkit import snapshot as SN
 from kgkit import state as S
@@ -232,6 +233,94 @@ def test_decide_a_range_at_once(repo, capsys):
     assert {r["decision_note"] for r in recs[1:]} == {"lr sweep: no gain"} and {r["parent"] for r in recs[1:]} == {"0001_base"}
     with pytest.raises(SystemExit):
         cli.main(["ledger", "decide", "8..9", "keep"])
+
+
+# ----------------------------------------------------------------------------- journey
+def _journey_ws(repo, monkeypatch):
+    monkeypatch.setattr(sys, "argv", ["src/train.py", "--depth", "8"])
+    st = S.load(repo)
+    st.phase = "baselines"
+    st.save(repo)
+    led = Ledger(repo)
+    led.log("base", 0.80, notes="lgbm defaults")
+    (repo / "src" / "train.py").write_text("print('v2')\n")
+    led.log("deeper", 0.81, notes="depth 8 | more leaves", parent="0001_base")
+    st.phase = "stacking"
+    st.save(repo)
+    (repo / "src" / "train.py").write_text("print('v3')\n")
+    led.log("stack", 0.83, parent="0002_deeper")
+    led.log("probe", 0.79)
+    led.decide("1", "baseline", "first")
+    led.decide("2", "keep", "+0.01, 5/5 folds")
+    led.decide("3", "keep", "stack")
+    return led
+
+
+def test_journey_writes_phases_lineage_and_code_links(repo, capsys, monkeypatch):
+    led = _journey_ws(repo, monkeypatch)
+    recs = led.records()
+    # a record from before snapshots existed: dirty, no snapshot -> approximate
+    recs[0]["git_dirty"] = True
+    led._write_all(recs)
+    cli.main(["ledger", "journey", "--repo-url", "https://github.com/me/demo/"])
+    out = capsys.readouterr().out
+    assert "wrote journey/experiments.md: 4 records in 2 phase(s), 3 decided, lineage graph of 3 record(s)" in out
+    assert "code links: 3 exact (3 of them snapshots of uncommitted changes), 1 approximate" in out
+    assert "git push origin 'refs/kg/*:refs/kg/*'" in out and "1 record(s) have no decision" in out
+    text = (repo / "journey" / "experiments.md").read_text(encoding="utf-8")
+    snap2, snap3 = recs[1]["git_snapshot"], recs[2]["git_snapshot"]
+    assert f"https://github.com/me/demo/tree/{snap3}" in text
+    assert f"https://github.com/me/demo/compare/{snap2}...{snap3}" in text
+    assert f"[≈{recs[0]['git_commit'][:7]}](https://github.com/me/demo/tree/{recs[0]['git_commit']})" in text
+    assert "```mermaid" in text and "n0002 --> n0003" in text and 'n0003["0003 stack<br/>CV 0.83000"]:::keep' in text
+    assert "n0004" not in text  # undecided and nobody's parent
+    assert "| [baselines](#1-baselines) | 2 |" in text and "## 2. stacking" in text
+    assert "depth 8 \\| more leaves" in text and "keep: +0.01, 5/5 folds" in text
+    assert "0002_deeper: python src/train.py --depth 8" in text and "<summary>Commands (2)</summary>" in text
+    assert text.endswith("\n") and "  \n" not in text
+
+
+def test_journey_without_a_remote_shows_ids_and_says_how_to_link(repo, capsys, monkeypatch):
+    _journey_ws(repo, monkeypatch)
+    cli.main(["ledger", "journey", "--out", "docs/exp.md"])
+    out = capsys.readouterr().out
+    assert "wrote docs/exp.md" in out and "no GitHub remote" in out and "--repo-url" in out
+    text = (repo / "docs" / "exp.md").read_text(encoding="utf-8")
+    assert "https://github.com" not in text and "| `" in text
+
+
+def test_journey_links_a_github_remote_and_a_workspace_folder(repo, capsys):
+    ws = repo / "comps" / "demo"
+    ws.mkdir(parents=True)
+    S.CompetitionState(slug="demo", metric="rmse", greater_is_better=False).save(ws)
+    (ws / "train.py").write_text("1\n")
+    commit(repo, "ws")
+    git(repo, "remote", "add", "origin", "git@github.com:me/kaggle.git")
+    assert J.repo_web_url(ws)[:2] == ("https://github.com/me/kaggle", "origin")
+    led = Ledger(ws)
+    (ws / "train.py").write_text("2\n")
+    rec = led.log("a", 1.5)
+    led.decide(rec["id"], "baseline")
+    text, stats = J.render(led.records(), S.load(ws), *J.repo_web_url(ws)[::2], today="2026-01-01")
+    assert f"https://github.com/me/kaggle/tree/{rec['git_snapshot']}/comps/demo" in text
+    assert "(lower is better)" in text and "(no phase)" in text and stats["no_phase"] == 1
+
+
+def test_journey_graph_keeps_the_finals_lineage_first(monkeypatch):
+    recs = [{"id": f"{i:04d}_r{i}", "cv": 0.5 + i / 1000, "decision": "discard", "parent": f"{i - 1:04d}_r{i - 1}"}
+            for i in range(1, 80)]
+    recs[0]["parent"] = None
+    monkeypatch.setattr(J, "MAX_GRAPH_NODES", 10)
+    lines, n, dropped = J.graph(recs, {"0070_r70"})
+    assert n == 10 and dropped == 69
+    text = "\n".join(lines)
+    assert all(f'n{i:04d}["' in text for i in range(61, 71)) and "FINAL 0070 r70" in text
+    assert 'n0060["' not in text and "n0061 --> n0062" in text and "n0060 --> n0061" not in text
+
+
+def test_journey_on_an_empty_ledger_says_so(repo):
+    with pytest.raises(SystemExit, match="the ledger is empty"):
+        cli.main(["ledger", "journey"])
 
 
 # ----------------------------------------------------------------------------- layout

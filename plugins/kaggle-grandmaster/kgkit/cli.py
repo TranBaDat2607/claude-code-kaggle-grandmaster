@@ -11,7 +11,8 @@ Commands
   adv         adversarial validation (train vs test)
   score       score a prediction column against a truth column with a registered metric
   metrics     list registered metrics
-  ledger      list | best | show | lb | add | tag | compare | noise | decide | baseline | lineage | import
+  ledger      list | best | show | lb | add | tag | compare | noise | decide | baseline | lineage | import | phase |
+              journey
   final       which submissions Kaggle has selected as finals, and whether auto-selection would pick a fitted file
   standing    rank, team count, medal cut-offs and ties on the leaderboard Kaggle shows (private after the end)
   backlog     add | list | set | render | fidelity  — the ranked idea backlog (human vs GPU hours)
@@ -764,6 +765,10 @@ def cmd_ledger(a):
             print(f"accepted baseline is now {done[-1]['id']} (CV {fmt_cv(done[-1])})")
     elif a.action == "phase":
         _ledger_phase(led, a)
+    elif a.action == "journey":
+        from . import journey as J
+
+        J.main(led, a)
     elif a.action == "baseline":
         r = led.baseline()
         if r is None:
@@ -1956,6 +1961,10 @@ _LEDGER_OPTIONS = [
     ("--top", dict(type=int, default=10, help="predictiveness: k for the k strongest records by public score and "
                                               "by CV (default 10)")),
     ("--records", dict(help="phase: put these existing records in the phase: an id, a list 3,7,9 or a range 12..20")),
+    ("--out", dict(default="journey/experiments.md", help="journey: the file to write (default "
+                                                          "journey/experiments.md)")),
+    ("--repo-url", dict(help="journey: web address of the repository the code links open (default: the GitHub "
+                             "remote, https://github.com/<owner>/<repo>)")),
     ("--plot", dict(metavar="DIR", help="predictiveness: also write public_vs_private.png, private_over_time.png and "
                                         "cv_vs_private.png to DIR (needs matplotlib)")),
 ]
@@ -1990,6 +1999,8 @@ _LEDGER_ACTIONS = {
                "--parent"),
     "phase": ("name the phase new records belong to (no name: list the phases), or put past records in one",
               [("name", "*", "the phase, e.g. stacking public OOFs")], "--records"),
+    "journey": ("write journey/experiments.md: every record by phase, its parent, change, scores, decision and a "
+                "link to the code it ran from, and the lineage as a Mermaid graph", [], "--out --repo-url"),
     "baseline": ("the accepted baseline (the highest CV while nothing is accepted)", [], ""),
     "lineage": ("the chain of decisions behind a record, for reverse ablation",
                 [("exp_id", "?", "default: the accepted baseline")], ""),
