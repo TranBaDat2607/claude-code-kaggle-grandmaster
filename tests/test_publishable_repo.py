@@ -13,6 +13,7 @@ from pathlib import Path
 import pytest
 
 from kgkit import cli
+from kgkit import layout as LY
 from kgkit import snapshot as SN
 from kgkit import state as S
 from kgkit.experiment import Ledger
@@ -231,3 +232,139 @@ def test_decide_a_range_at_once(repo, capsys):
     assert {r["decision_note"] for r in recs[1:]} == {"lr sweep: no gain"} and {r["parent"] for r in recs[1:]} == {"0001_base"}
     with pytest.raises(SystemExit):
         cli.main(["ledger", "decide", "8..9", "keep"])
+
+
+# ----------------------------------------------------------------------------- layout
+def test_init_makes_work_and_studies_and_ignores_generated_folders(tmp_path, capsys):
+    cli.main(["init", "demo", "--dir", str(tmp_path), "--metric", "auc"])
+    assert (tmp_path / "work").is_dir() and (tmp_path / "studies").is_dir()
+    assert "work/" in (tmp_path / ".gitignore").read_text().splitlines()
+    gi = (tmp_path / ".kaggle-gm" / ".gitignore").read_text()
+    assert "remote/" in gi.splitlines() and "build/" in gi.splitlines()
+    S.load(tmp_path).save(tmp_path)  # saving again adds nothing twice
+    assert (tmp_path / ".kaggle-gm" / ".gitignore").read_text() == gi
+
+
+def test_state_ignores_complete_an_existing_file(tmp_path):
+    d = tmp_path / ".kaggle-gm"
+    d.mkdir()
+    (d / ".gitignore").write_text("remote/\n*.tmp")
+    assert S.ensure_state_ignores(tmp_path) == ["build/"]
+    assert (d / ".gitignore").read_text().splitlines()[:2] == ["remote/", "*.tmp"]
+    assert S.ensure_state_ignores(tmp_path) == []
+
+
+def test_variants_and_log_targets():
+    assert LY.VARIANT_RE.match("train_v2") and LY.VARIANT_RE.match("train (2)") and LY.VARIANT_RE.match("train - Copy")
+    assert not LY.VARIANT_RE.match("train") and not LY.VARIANT_RE.match("make_folds")
+    assert LY.log_targets("python src/train.py > train.log 2>&1") == ["train.log"]
+    assert LY.log_targets("python a.py 2>&1 | tee -a reports/run.out; python b.py >> ./logs/b.log") == [
+        "reports/run.out", "logs/b.log"]
+    assert LY.log_targets("python a.py > work/logs/a.log; python b.py > .kaggle-gm/x.log; c > /tmp/c.log") == []
+    assert LY.log_targets("python a.py | Tee-Object -FilePath 'logs\\a.log'") == ["logs/a.log"]
+    assert LY.log_targets("python a.py > C:\\temp\\a.log; python b.py > $env:TEMP/b.log") == []
+    assert LY.log_targets("python a.py > out.csv") == []
+
+
+def test_variant_of_needs_the_script_beside_it(tmp_path):
+    (tmp_path / "train.py").write_text("")
+    for name in ("train_v2.py", "train_new.py", "train-copy.py", "train (2).py", "train_3.py"):
+        (tmp_path / name).write_text("")
+        assert LY.variant_of(tmp_path / name) == tmp_path / "train.py", name
+    (tmp_path / "infer_v2.py").write_text("")
+    assert LY.variant_of(tmp_path / "infer_v2.py") is None and LY.variant_of(tmp_path / "train.py") is None
+
+
+def test_drift_names_copies_crowding_logs_and_generated_files(repo):
+    assert LY.drift(repo) == [] and LY.brief_line(repo) == ""
+    src = repo / "src"
+    (src / "train_v2.py").write_text("")
+    for i in range(LY.SRC_SCRIPTS_MAX):
+        (src / f"probe{chr(97 + i)}.py").write_text("")
+    (repo / "run.log").write_text("x")
+    (repo / ".kaggle-gm" / "build" / "a-train").mkdir(parents=True)
+    (repo / ".kaggle-gm" / "build" / "a-train" / "a_train.py").write_text("x")
+    git(repo, "add", "-f", "run.log", ".kaggle-gm/build")
+    (repo / ".gitignore").write_text("data/\n")
+    (repo / "work").mkdir()
+    found = LY.drift(repo)
+    assert len(found) == 5, found
+    assert "train_v2.py (of train.py)" in found[0] and "src/ has 17 scripts" in found[1]
+    assert "1 log file(s) tracked by git (e.g. run.log)" in found[2]
+    assert "under .kaggle-gm/build tracked by git" in found[3] and "work/ is not ignored" in found[4]
+    assert LY.brief_line(repo).startswith("Repo layout (it goes public when the competition ends, /kg-showcase): ")
+
+
+def test_journey_lines_ask_for_a_phase_and_decisions():
+    st = S.CompetitionState(slug="d")
+    recs = [{"id": f"000{i}_x"} for i in range(1, 4)]
+    lines = LY.journey_lines(st, recs)
+    assert lines[0].startswith("No phase named") and "3 record(s) have no decision (oldest 0001_x)" in lines[1]
+    st.phase = "stacking"
+    recs[2]["phase"] = "stacking"
+    for r in recs:
+        r["decision"] = "keep"
+    lines = LY.journey_lines(st, recs)
+    assert len(lines) == 1 and lines[0].startswith('Phase: "stacking" (1 record(s) so far)')
+    assert LY.journey_lines(S.CompetitionState(slug="d"), recs[:2]) == []
+
+
+def test_status_prints_the_phase_and_the_drift(repo, capsys):
+    led = Ledger(repo)
+    for name in ("a", "b", "c"):
+        led.log(name, 0.8)
+    (repo / "src" / "train_v2.py").write_text("")
+    cli.main(["status", "--offline"])
+    out = capsys.readouterr().out
+    assert "No phase named" in out and "3 record(s) have no decision" in out
+    assert "Repo layout (it goes public" in out and "train_v2.py (of train.py)" in out
+
+
+# ----------------------------------------------------------------------------- hooks
+def _hook(plugin_root, script, payload):
+    r = subprocess.run([SH, str(plugin_root / "hooks" / "run.sh"), script], input=json.dumps(payload),
+                       capture_output=True, text=True, timeout=60)
+    assert r.returncode == 0, r.stderr
+    out = r.stdout.strip()
+    return json.loads(out)["hookSpecificOutput"] if out else None
+
+
+@pytest.mark.skipif(SH is None, reason="needs a POSIX sh")
+def test_post_write_notes_a_copy_of_a_script_once(plugin_root, repo):
+    sid = uuid.uuid4().hex
+    (repo / "src" / "train_v2.py").write_text("print('copy')\n")
+    payload = {"hook_event_name": "PostToolUse", "tool_name": "Write", "session_id": sid, "cwd": str(repo),
+               "tool_input": {"file_path": str(repo / "src" / "train_v2.py"), "content": "print('copy')\n"}}
+    out = _hook(plugin_root, "post_write.py", payload)
+    assert out and "src/train_v2.py looks like a copy of train.py" in out["additionalContext"]
+    assert _hook(plugin_root, "post_write.py", payload) is None  # once per file and session
+    payload["tool_name"] = "Edit"
+    payload["session_id"] = uuid.uuid4().hex
+    assert _hook(plugin_root, "post_write.py", payload) is None  # an edit of an existing copy: no note
+
+
+@pytest.mark.skipif(SH is None, reason="needs a POSIX sh")
+def test_post_tool_notes_a_log_outside_work_once(plugin_root, repo):
+    sid = uuid.uuid4().hex
+
+    def run(cmd):
+        return _hook(plugin_root, "post_tool.py", {"hook_event_name": "PostToolUse", "tool_name": "Bash",
+                                                   "session_id": sid, "cwd": str(repo),
+                                                   "tool_input": {"command": cmd}, "tool_response": {"stdout": ""}})
+
+    assert run("python src/train.py > work/logs/a.log 2>&1") is None
+    out = run("python src/train.py > reports/a.log 2>&1")
+    assert out and "This command writes reports/a.log: logs go in work/" in out["additionalContext"]
+    assert run("python src/train.py > b.log") is None  # once per session
+
+
+@pytest.mark.skipif(SH is None, reason="needs a POSIX sh")
+def test_session_brief_asks_for_a_phase_and_shows_the_drift(plugin_root, repo):
+    led = Ledger(repo)
+    for name in ("a", "b", "c"):
+        led.log(name, 0.8)
+    (repo / "src" / "train_v2.py").write_text("")
+    ctx = _hook(plugin_root, "session_start.py", {"hook_event_name": "SessionStart", "cwd": str(repo)})[
+        "additionalContext"]
+    assert "No phase named" in ctx and "3 record(s) have no decision" in ctx
+    assert "Repo layout (it goes public when the competition ends" in ctx

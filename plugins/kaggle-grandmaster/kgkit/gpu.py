@@ -9,7 +9,7 @@ so every accelerator-hour can be traced to the experiment it bought::
     python -m kgkit gpu quota                                   # live GPU + TPU quota, reset countdown
     python -m kgkit gpu build --name cnx384 --hours 6 \\
         --cmd "python src/train_image.py --name cnx384 --img-size 384 --folds {fold}"
-    python -m kgkit gpu push kernels/cnx384-train               # asks nothing; check quota first
+    python -m kgkit gpu push .kaggle-gm/build/cnx384-train      # asks nothing; check quota first
     python -m kgkit gpu push kernels/my-notebook --hours 1      # any kernel folder (kernel-metadata.json)
     python -m kgkit gpu wait <user>/cnx384-train                # poll until done (run in background)
     python -m kgkit gpu collect <user>/cnx384-train             # outputs -> ledger + GPU-hour log
@@ -1157,7 +1157,9 @@ def build_kernel(root: str | Path | None, name: str, cmd: str, hours: float, fol
                  prune_min_frac: float = 0.3, slug: str | None = None, out_dir: str | Path | None = None,
                  public: bool = False, extra_jobs: list[tuple[str, str]] = (), input_layout: str = "flat",
                  split_from: str | None = None) -> Path:
-    """Write ``kernels/<slug>/`` (kernel-metadata.json + generated runner script + kg-train.json).
+    """Write ``.kaggle-gm/build/<slug>/`` (kernel-metadata.json + generated runner script + kg-train.json): a build
+    output, ignored by git (``state.STATE_IGNORES``), since the script embeds the code as base64. What the run is
+    (command, jobs, inputs, the snapshot of the code) is in kg-train.json, the GPU-run log and the ledger records.
 
     ``extra_jobs`` ((name, cmd) pairs) share the session: e.g. two 1-fold screens of different ideas
     run side by side on the two T4s instead of leaving one GPU idle. ``datasets`` / ``kernels`` are linked
@@ -1251,7 +1253,8 @@ def build_kernel(root: str | Path | None, name: str, cmd: str, hours: float, fol
     script = script.replace("__KG_PAYLOAD_B64__", base64.b64encode(payload).decode(), 1)
     size = len(script.encode("utf-8"))
 
-    kdir = Path(out_dir) if out_dir else root / "kernels" / kslug
+    kdir = Path(out_dir) if out_dir else root / S.STATE_DIR / "build" / kslug
+    S.ensure_state_ignores(root)
     kdir.mkdir(parents=True, exist_ok=True)
     code_file = f"{kslug.replace('-', '_')}.py"
     (kdir / code_file).write_text(script, encoding="utf-8")

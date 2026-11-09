@@ -131,7 +131,7 @@ The plugin ships `kgkit` (Python, numpy/pandas/sklearn/scipy). Locate it via the
 `KGKIT_HOME` environment variable (set by the plugin's SessionStart hook) — otherwise it is
 the `kgkit/` folder inside the plugin root. Run it as
 `PYTHONPATH="$KGKIT_HOME" python -m kgkit <cmd>` (the installed version). To let training scripts
-`from kgkit import ...`, copy it into the project with `PYTHONPATH="$KGKIT_HOME" python -m kgkit vendor src/`:
+`from kgkit import ...`, copy it into the project with `PYTHONPATH="$KGKIT_HOME" python -m kgkit vendor third_party/`:
 a snapshot that a plugin update leaves as it is (commands run from it run its version). Vendor again to
 update it — the session brief says when its version is not the plugin's — knowing that later experiments
 then run the new code.

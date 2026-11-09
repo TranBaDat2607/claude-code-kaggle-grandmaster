@@ -202,6 +202,11 @@ def _state_from_args(a):
     return st
 
 
+# The workspace layout `kgkit init` creates (templates/CLAUDE.competition.md says what goes where). work/ is ignored by
+# git: probes, logs and downloads, so the repository stays readable when the competition ends and goes public.
+WORKSPACE_DIRS = ("data", "src", "notebooks", "artifacts", "subs", "reports", "kernels", "studies", "work")
+
+
 def cmd_init(a):
     from . import state as S
 
@@ -210,18 +215,21 @@ def cmd_init(a):
     if (root / S.STATE_DIR / S.STATE_FILE).exists() and not a.force:
         raise SystemExit(f"{root / S.STATE_DIR / S.STATE_FILE} exists (use --force to overwrite)")
     st.save(root)
-    for d in ["data", "src", "notebooks", "artifacts", "subs", "reports", "kernels"]:
+    for d in WORKSPACE_DIRS:
         (root / d).mkdir(exist_ok=True)
     gi = root / ".gitignore"
     if not gi.exists():
-        gi.write_text("data/\nartifacts/\nsubs/*.csv\n*.npy\n*.pkl\n*.pt\n*.pth\n*.ckpt\n*.safetensors\nkaggle.json\n"
-                      "__pycache__/\n.ipynb_checkpoints/\nwandb/\n", encoding="utf-8")
+        gi.write_text("data/\nartifacts/\nsubs/*.csv\nwork/\n*.npy\n*.pkl\n*.pt\n*.pth\n*.ckpt\n*.safetensors\n"
+                      "kaggle.json\n__pycache__/\n.ipynb_checkpoints/\nwandb/\n", encoding="utf-8")
     else:  # a repo's own .gitignore often names the downloaded files only; a file made from them would be committed
         from . import audit as AU
 
         added = AU.ensure_ignored(root, ["data"])
         if added:
             print(f"added {', '.join(added)} to .gitignore: competition data (copies and subsets too) stays out of git")
+        added = AU.ensure_ignored(root, ["work"], comment="# Scratch: probes, logs, downloads (kgkit init)")
+        if added:
+            print(f"added {', '.join(added)} to .gitignore: scratch work (probes, logs, downloads) stays out of git")
     tmpl = _plugin_file("templates/CLAUDE.competition.md")
     cm = root / "CLAUDE.md"
     if not cm.exists() and tmpl is None:
@@ -575,6 +583,10 @@ def cmd_status(a):
         agreement = led.cv_lb_summary() or led.noise_note()  # the noise line rides on the CV-LB line when there is one
         if agreement:
             print(agreement)
+        from . import layout as LY
+
+        for line in LY.journey_lines(st, recs):  # phase and undecided records, as in the session brief
+            print(line)
         print()
         print(led.table(a.n))
     from .backlog import Backlog
@@ -582,6 +594,11 @@ def cmd_status(a):
     top = Backlog(root).ranked()[:3]
     if top:
         print("\ntop of the backlog: " + "; ".join(f"#{i['id']} {i['idea'][:60]}" for i in top))
+    from . import layout as LY
+
+    layout = LY.brief_line(root)
+    if layout:
+        print("\n" + layout)
 
 
 def cmd_folds(a):

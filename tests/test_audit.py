@@ -260,10 +260,13 @@ def test_init_adds_data_to_an_existing_gitignore(tmp_path, capsys):
     gi = tmp_path / ".gitignore"
     gi.write_text("data/train.csv")  # names the download only, no final newline
     cli.main(["init", "knee", "--dir", str(tmp_path)])
-    assert "added /data/ to .gitignore" in capsys.readouterr().out
-    assert gi.read_text().splitlines()[0] == "data/train.csv" and gi.read_text().endswith("/data/\n")
+    out = capsys.readouterr().out
+    assert "added /data/ to .gitignore" in out and "added /work/ to .gitignore" in out
+    text = gi.read_text()
+    assert text.splitlines()[0] == "data/train.csv" and "\n/data/\n" in text and text.endswith("/work/\n")
     cli.main(["init", "knee", "--dir", str(tmp_path), "--force"])
     assert "added" not in capsys.readouterr().out and gi.read_text().count("/data/") == 1
+    assert gi.read_text().count("/work/") == 1
 
 
 def test_adopt_runs_the_audit(comp, capsys):

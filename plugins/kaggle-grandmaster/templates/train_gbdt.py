@@ -35,9 +35,10 @@ import numpy as np
 import pandas as pd
 
 try:
-    import kgkit  # noqa: F401  (vendored into src/ via `python -m kgkit vendor src/`)
-except ImportError:
-    sys.path.insert(0, os.environ.get("KGKIT_HOME", ""))
+    import kgkit  # noqa: F401  (a copy in third_party/: `python -m kgkit vendor third_party/`)
+except ImportError:  # <workspace>/third_party/kgkit, else the plugin's (KGKIT_HOME, set by its session hook)
+    _tp = Path(__file__).resolve().parents[1] / "third_party"
+    sys.path.insert(0, str(_tp) if (_tp / "kgkit").is_dir() else os.environ.get("KGKIT_HOME", ""))
 from kgkit import metrics as M
 from kgkit import state as S
 from kgkit.cv import split_indices

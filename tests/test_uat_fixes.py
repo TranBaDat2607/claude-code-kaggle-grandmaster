@@ -1499,7 +1499,7 @@ def test_nested_inputs_keep_every_source_in_its_own_folder(tmp_path):
                                            "thisray/s6e10-stack",
                                            "dariushafshar/s6e10-golem-oof-library=data/ext/golem", "me/prep=data"],
                                  kernels=["kagankoral/s6e10-stack"])
-    meta = json.loads((root / "kernels" / "show-train" / "kernel-metadata.json").read_text())
+    meta = json.loads((root / ".kaggle-gm" / "build" / "show-train" / "kernel-metadata.json").read_text())
     assert meta["dataset_sources"] == ["megayak/s6e10-oof", "mitudru/s6e10-oof", "thisray/s6e10-stack",
                                        "dariushafshar/s6e10-golem-oof-library", "me/prep"]  # Kaggle gets refs only
     assert meta["kernel_sources"] == ["kagankoral/s6e10-stack"]
@@ -1587,7 +1587,7 @@ def test_build_places_each_input_and_refuses_folders_outside_data(ws, monkeypatc
     text = capsys.readouterr().out
     assert "inputs: data/ <- demo, b/x; data/ext/lib/ <- a/lib; data/ext/kout-lib/ <- a/lib" in text
     assert "side by side" not in text
-    tm = json.loads((ws / "kernels" / "stk-train" / "kg-train.json").read_text())
+    tm = json.loads((ws / ".kaggle-gm" / "build" / "stk-train" / "kg-train.json").read_text())
     assert tm["input_layout"] == "nested" and tm["inputs"][0] == {"ref": "demo", "kind": "competition", "dest": "data"}
 
 
@@ -1609,7 +1609,7 @@ def test_a_vendored_kgkit_builds_a_kernel_with_its_own_runner(tmp_path, plugin_r
     r = _kgkit(root, root / "src", "gpu", "build", "--name", "show", "--cmd", f'"{sys.executable}" src/show.py',
                "--hours", "1", "--user", "me", "--accelerator", "none")
     assert r.returncode == 0, r.stdout + r.stderr
-    kdir = root / "kernels" / "show-train"
+    kdir = root / ".kaggle-gm" / "build" / "show-train"
     assert "# the vendored copy's runner" in (kdir / "show_train.py").read_text(encoding="utf-8")
     out, seen, rep = _run_built(kdir, tmp_path / "k", {"competitions/demo-comp/train.csv": "competition train"})
     assert seen == {"data/folds.csv": "id,fold|0,0|1,1", "data/train.csv": "competition train"}
@@ -1953,7 +1953,7 @@ def test_a_kernel_source_of_1_mb_is_flagged_at_build_and_refused_before_any_kagg
     (ws / "src" / "lookup.txt").write_bytes(base64.b64encode(np.random.default_rng(4).bytes(1_000_000)))
     monkeypatch.chdir(ws)
     cli.main(["gpu", "build", "--name", "big", "--cmd", "python src/x.py", "--hours", "1", "--user", "me"])
-    kdir = ws / "kernels" / "big-train"
+    kdir = ws / ".kaggle-gm" / "build" / "big-train"
     out = capsys.readouterr().out
     assert "WARNING: the kernel script is 1." in out and "Its biggest parts: src/ 1." in out
     assert "Keep data out of --include and attach it as a dataset (--dataset)." in out
@@ -1971,7 +1971,7 @@ def test_a_kernel_source_of_1_mb_is_flagged_at_build_and_refused_before_any_kagg
         G.push(ws, kdir, force=True)
     assert "warning: its source big_train.py is 1." in capsys.readouterr().out
     # a raw push of it: the hook names the size
-    ctx = _hook(plugin_root, "post_tool.py", "kaggle kernels push -p kernels/big-train", ws,
+    ctx = _hook(plugin_root, "post_tool.py", "kaggle kernels push -p .kaggle-gm/build/big-train", ws,
                 stdout=SAVE_400)["additionalContext"]
     assert "Kaggle refused the kernel push (a 4xx from SaveKernel), so nothing was started." in ctx
     assert "me/big-train: its source big_train.py is 1." in ctx and "1 MB or more with a bare 400" in ctx

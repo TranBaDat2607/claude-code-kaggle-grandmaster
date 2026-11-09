@@ -41,6 +41,29 @@ def read_input() -> dict:
         return {}
 
 
+def once(payload: dict, key: str, kind: str = "notes") -> bool:
+    """True the first time ``key`` comes up in this session (kept in the temp dir, keyed by session_id), so a note is
+    given once, not on every tool call. True when there is no session id. Never raises."""
+    import tempfile
+
+    sid = re.sub(r"[^A-Za-z0-9_-]", "", str(payload.get("session_id") or ""))[:64]
+    if not sid:
+        return True
+    p = Path(tempfile.gettempdir()) / "kaggle-gm-router" / f"{sid}.{kind}.json"
+    try:
+        seen = set(json.loads(p.read_text(encoding="utf-8")))
+    except (OSError, ValueError, TypeError):
+        seen = set()
+    if key in seen:
+        return False
+    try:
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(json.dumps(sorted(seen | {key})), encoding="utf-8")
+    except OSError:
+        pass
+    return True
+
+
 def emit(event: str, **fields) -> None:
     sys.stdout.write(json.dumps({"hookSpecificOutput": {"hookEventName": event, **fields}}))
     sys.stdout.flush()

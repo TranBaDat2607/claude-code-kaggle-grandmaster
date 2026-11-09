@@ -56,7 +56,7 @@ Unused quota expires at the weekly reset, so hours you don't spend are also lost
 
 ```
 quota / plan        ->  how many hours (GPU and TPU), until when, what to reserve, what holds a reservation
-build               ->  kernels/<name>-train/: runner + your src/ + kgkit + competition.json + data/folds.csv
+build               ->  .kaggle-gm/build/<name>-train/ (ignored): runner + your src/ + kgkit + competition.json + data/folds.csv
                         (packed column by column: 700k rows of id,fold take ~0.3 MB of the script, not 2.4 MB)
 push                ->  input-kernel and busy-session checks, quota check, -t cap, --accelerator, run log
                         (.kaggle-gm/gpu_runs.jsonl). Also any other kernel folder: `gpu push <dir> --hours H`
@@ -100,7 +100,7 @@ checked byte for byte.
 # full 5-fold run of a promoted idea: folds 0-4 spread over both T4s
 python -m kgkit gpu build --name cnx384 --hours 7 --dataset me/knee-png-512 \
     --cmd "python src/train_image.py --name cnx384 --img-size 384 --folds {fold}"
-python -m kgkit gpu push kernels/cnx384-train          # outward-facing: confirm with the user first
+python -m kgkit gpu push .kaggle-gm/build/cnx384-train # outward-facing: confirm with the user first
 python -m kgkit gpu wait me/cnx384-train --collect     # background
 ```
 
