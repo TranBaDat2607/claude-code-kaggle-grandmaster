@@ -60,6 +60,20 @@ export type Kernel = {
   /** RUNNING, QUEUED, COMPLETE, ERROR, CANCEL_REQUESTED, ... */
   status: string
   lastRunTime?: string
+  /** What the workspace's GPU run log says of the push that started this run, when it has it. */
+  run?: KernelRun
+  /** When the pane saw it go from queued to running (local clock, ms): the session's start, within a poll. */
+  seenRunningAt?: number
+}
+
+/** A push as `.kaggle-gm/gpu_runs.jsonl` records it (`kgkit gpu push`, or a `kaggle kernels push` the hook saw). */
+export type KernelRun = {
+  /** The push's `-t` / `--hours`, in hours: Kaggle cancels the session there. */
+  capH?: number
+  /** GPU, TPU or CPU: which session maximum applies. */
+  resource?: string
+  /** When kgkit first saw it running (UTC). */
+  startedAt?: string
 }
 
 /** A running kernel's latest reading, from the `[kgmon]` lines its log carries. */
@@ -72,6 +86,8 @@ export type KernelLive = {
   readAt?: number
   /** Seconds since the session started, as the kernel counts them. */
   t?: number
+  /** When the kernel's clock started (its first `[kgmon]` line's `t0`), in Unix seconds. */
+  t0?: number
   cpu?: number
   cores?: number
   /** [used, limit] MB. */
@@ -93,7 +109,27 @@ export type KernelLive = {
   stats?: LiveStats
   /** The newest progress its training log reported. */
   progress?: Progress
+  /** Its script has ended: the log shows the notebook converted to HTML (Kaggle then saves the outputs), or
+   * nbconvert's error. `at`: when (local clock, ms), when the log tells it. */
+  scriptEnd?: { at?: number; isError: boolean }
+  /** When a log reader found the log closed: it replayed what was known and the stream ended by itself. Kaggle has
+   * ended the session, whatever its status still says. */
+  logClosedAt?: number
+  /** The files Kaggle serves for its session, looked up once the script has ended or the session looks over. */
+  outputs?: Outputs
   isFollowing: boolean
+  error?: string
+}
+
+/** A lookup of a session's output files (what `kaggle kernels output` would download). */
+export type Outputs = {
+  /** When it was looked up (local clock, ms). */
+  checkedAt: number
+  /** The file names, when Kaggle answered. */
+  files?: string[]
+  /** More files than were listed. */
+  isMore?: boolean
+  /** Why it could not be looked up. */
   error?: string
 }
 

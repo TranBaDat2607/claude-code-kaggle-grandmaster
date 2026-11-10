@@ -10,7 +10,7 @@ import subprocess
 
 import pytest
 
-KGMON_KEYS = {"v", "t", "cores", "cpu", "ram", "disk", "tmp", "gpus", "doing"}
+KGMON_KEYS = {"v", "t", "t0", "cores", "cpu", "ram", "disk", "tmp", "gpus", "doing"}
 
 
 def _mod(plugin_root):
@@ -48,7 +48,7 @@ def test_the_pane_reads_every_field_the_runner_prints(plugin_root, monkeypatch, 
     first, prev = runner.snapshot(None)
     snap, _ = runner.snapshot((prev[0] - 1, prev[1]))
     assert set(first) | set(snap) <= KGMON_KEYS, set(snap) - KGMON_KEYS
-    assert {"v", "t", "cores", "disk", "tmp", "gpus", "doing"} <= set(snap)
+    assert {"v", "t", "t0", "cores", "disk", "tmp", "gpus", "doing"} <= set(snap)
     parser = (_mod(plugin_root) / "kaggle.ts").read_text(encoding="utf-8")
     body = parser[parser.index("export function parseKgmon"):]
     assert {k for k in KGMON_KEYS if f"j.{k}" in body} == KGMON_KEYS

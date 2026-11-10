@@ -128,7 +128,7 @@ itself. Keys: `1` `2` `3` switch tabs, `r` refreshes, `u` opens or closes every 
 
 | Tab | Shows |
 |---|---|
-| Activity | Every kernel running on any registered account, as a card you open or close by its title line (one running kernel opens, two or more start closed; your choice is kept across sessions). Closed, it is one line of CPU, RAM, each GPU's use and the training progress, with its newest log line under it. Open, it shows the whole run so far (the log is replayed from the start): a sparkline of CPU, RAM and each GPU with the value now, the average and the peak, GPU memory, disk, progress (`step 820/858`, an epoch, a tqdm bar), what it is doing (job and fold on each GPU) and its last three log lines; the other kernels of the last 24 h (running blue, complete green, failed red); the workspace's latest submissions and scores. A notification when a kernel finishes or a submission is scored. `c` opens *This computer*: local CPU, RAM, disk, NVIDIA GPUs and your training processes, each described from its command line |
+| Activity | Every kernel running on any registered account, as a card you open or close by its title line (one running kernel opens, two or more start closed; your choice is kept across sessions). Closed, it is one line of CPU, RAM, each GPU's use and the training progress, with its newest log line under it. Open, it shows the whole run so far (the log is replayed from the start): a sparkline of CPU, RAM and each GPU with the value now, the average and the peak, GPU memory, disk, progress (`step 820/858`, an epoch, a tqdm bar), what it is doing (job and fold on each GPU) and its last three log lines. Each card's title has the session's run time and limit (`limit 12h · 28m left`), see below; the other kernels of the last 24 h (running blue, complete green, failed red); the workspace's latest submissions and scores. A notification when a kernel finishes or a submission is scored. `c` opens *This computer*: local CPU, RAM, disk, NVIDIA GPUs and your training processes, each described from its command line |
 | Quotas | GPU and TPU hours used and left, and the reset time, for every account, and the total across them |
 | Accounts | The accounts of `~/.kaggle/kg_accounts.json`: **Use** points this session's Kaggle CLI and kgkit at that account's token file (`KAGGLE_API_TOKEN`), tells Claude which account it is, and is remembered for the next session; **Add** checks a pasted API token (or a token file) with Kaggle, then saves it to `~/.kaggle/access_token_<alias>`, readable by you alone; the registry holds only paths. Where the Kaggle CLI is, found from its install without contacting Kaggle |
 
@@ -140,6 +140,27 @@ kgmon anywhere is left alone, so a `# kgmon: off` comment opts out. For a kernel
 as its first cell (`kgmon_doing("fold 2")` adds what it is doing).
 The pane follows each running kernel's live log (`kaggle kernels logs -f`, Kaggle CLI 2.2 or later). Only batch runs
 (Save Version, `kaggle kernels push`) have a log the API streams; an interactive editor session does not.
+
+Kaggle's status of a kernel lags: it can say RUNNING for minutes after the script has ended, after the outputs are
+saved, or after the session limit has cancelled it. So each running card also keeps a session clock:
+
+- **The limit**: the push's `-t` / `--hours` as `.kaggle-gm/gpu_runs.jsonl` records it (`kgkit gpu push`, or a GPU or
+  TPU `kaggle kernels push` the hook saw), else Kaggle's longest session (12 h GPU or CPU, 9 h TPU). It counts from
+  the kernel's own clock (the `t0` of its `[kgmon]` lines), else from Kaggle's last-run time for a GPU or CPU session,
+  or, for a TPU session, from when it was first seen running (TPU sessions queue for hours); a TPU kernel never seen
+  running shows its limit with no countdown. In the last half hour (a quarter of a limit under 2 h), while the script
+  still runs, the card turns yellow and warns, once with a notification.
+- **SAVING**: the log shows the notebook converted to HTML (`[NbConvertApp] ... to html`): the script has finished
+  (or stopped on an error) and Kaggle is saving the outputs. Near the limit it warns that a save the limit cuts off
+  can lose them.
+- **PAST LIMIT**: the clock has passed the limit: Kaggle has probably cancelled the session; the run time stops at
+  the limit.
+- **ENDED**: Kaggle has closed the log (a reader replays it and the stream ends by itself): the session is over.
+- **Outputs**: once the script has ended or the session looks over, the pane lists the files Kaggle serves for the
+  session every few minutes (kgkit's `kaggle_outputs`, under the Kaggle CLI's Python; nothing is downloaded): whether
+  `kaggle kernels output` would get anything. The notification when the status finally changes says how many files
+  were readable. A cancelled version usually cannot be attached to another kernel: download its outputs and upload
+  them as a dataset.
 
 Mods need a Claude Code release that loads hooks modules; elsewhere the pane is simply absent and the rest of the
 plugin works as before.
@@ -204,7 +225,7 @@ multi_level_stack / residual_stack / prune_library`; `kgkit.compare.compare_fold
 | `train_image.py` | timm; AMP (bf16/fp16), channels_last, cudnn.benchmark, fused AdamW, `--compile` (Linux, sm_70+), `--bench`, EMA, cosine warmup, head LR multiplier, hflip TTA; `--folds` lets you split folds across GPUs, and the run that completes the set logs the experiment; checkpoints before a session deadline and resumes, learning-curve pruning, `--assemble` |
 | `train_transformer.py` | HF AutoModel with mean/attention/CLS pooling, layer-wise LR decay, gradient accumulation, length-bucketed training batches, fused AdamW, `--bench`, several evaluations per epoch, length-sorted inference, offline-model friendly; same deadline/resume/pruning/`--assemble` support |
 | `kgkit/kaggle_gpu_runner.py` | filled in by `kgkit gpu build`, and part of the package so that a vendored kgkit (`kgkit vendor third_party`) builds kernels too: the kernel that runs your training command on Kaggle (code bundle embedded, inputs linked into `data/` or one folder each, one (job, fold) per GPU, deadline, resume, assembly, `kg_run.json` report) |
-| `kaggle_monitor_cell.py` | the first cell for a notebook kgkit did not build: prints the session's CPU, RAM, disk and GPUs as `[kgmon]` lines for the Kaggle pane |
+| `kaggle_monitor_cell.py` | the first cell for a notebook kgkit did not build: prints the session's CPU, RAM, disk and GPUs, and when its clock started, as `[kgmon]` lines for the Kaggle pane |
 | `inference_kernel.py` + `kernel/*.json` | offline Kaggle kernel: runtime test discovery, offline wheels, time-budgeted ensemble members with fallback, output validation; metadata with internet off |
 
 ## Compute efficiency

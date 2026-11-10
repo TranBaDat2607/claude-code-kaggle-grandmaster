@@ -304,6 +304,82 @@ export async function submissions($: EngineInterface, cli: Cli, a: Account, comp
   return { competition, items }
 }
 
+const PY_NAME_RE = /^(python|pypy)[\d.]*(\.exe)?$/i
+const PIP_SH_RE = /^'''exec' (["']?)(.+?)\1 "\$0" "\$@"\s*$/ // pip's #!/bin/sh second line, for long paths
+
+/**
+ * The Python the Kaggle CLI runs on: `python -m kaggle`'s, else the one its script's #! line names (pip's `#!/bin/sh`
+ * form too), else a python beside it (a venv or conda env; on Windows, beside its Scripts folder too), else the one on
+ * PATH (which says so when it has no Kaggle SDK).
+ */
+export async function cliPython($: EngineInterface, cli: Cli, platform: Platform): Promise<string | undefined> {
+  if (cli.argv[1] === '-m') return cli.argv[0]
+  const exe = cli.argv[0]
+  if (!exe) return undefined
+  const dir = parent(exe)
+  const has = (p: string) => $.fs.exists(p).catch(() => false)
+  if (platform === 'windows') {
+    for (const p of [`${dir}\\python.exe`, `${parent(dir)}\\python.exe`]) if (await has(p)) return p
+    return 'python'
+  }
+  try {
+    const [first = '', second = ''] = (await $.fs.read(exe)).slice(0, 2048).split(/\r?\n/)
+    if (first.startsWith('#!')) {
+      let words = first.slice(2).trim().split(/\s+/)
+      if (words[0]?.endsWith('/env')) words = words.slice(1).filter(w => !w.startsWith('-'))
+      else if (/\/(ba|da)?sh$/.test(words[0] ?? '')) words = [PIP_SH_RE.exec(second)?.[2] ?? '']
+      const py = words[0] ?? ''
+      if (PY_NAME_RE.test(py.split('/').pop() ?? '')) return py
+    }
+  } catch {
+    // not readable as text: look beside it
+  }
+  for (const p of [`${dir}/python3`, `${dir}/python`]) if (await has(p)) return p
+  return 'python3'
+}
+
+export type Listed = { files: string[]; isMore: boolean }
+
+/**
+ * The files Kaggle serves for the latest session of `ref` (what `kaggle kernels output` downloads), listed without
+ * downloading anything: kgkit's `kaggle_outputs`, run from the plugin under the CLI's Python, asks the SDK call that
+ * command makes. (`kaggle kernels files` lists nothing for a session that was stopped.) A string says why not.
+ */
+export async function sessionOutputs(
+  $: EngineInterface,
+  cli: Cli,
+  a: Account,
+  ref: string,
+  platform: Platform,
+  pluginRoot: string,
+): Promise<Listed | string> {
+  const sep = platform === 'windows' ? '\\' : '/'
+  if (!(await $.fs.exists(`${pluginRoot}${sep}kgkit${sep}kaggle_outputs.py`).catch(() => false))) {
+    return "kgkit's kaggle_outputs is not beside the pane"
+  }
+  const py = await cliPython($, cli, platform)
+  if (!py) return "the Kaggle CLI's Python could not be told"
+  try {
+    const r = await $.process.run([py, '-m', 'kgkit.kaggle_outputs'], {
+      cwd: pluginRoot,
+      env: accountEnv(a),
+      stdin: JSON.stringify({ kernel: ref, max_pages: 1, log: false }),
+      timeoutMs: 120000,
+    })
+    const last = r.stdout.split(/\r?\n/).map(l => l.trim()).filter(Boolean).pop() ?? ''
+    let j: { files?: unknown; more?: unknown; error?: unknown }
+    try {
+      j = JSON.parse(last) as typeof j
+    } catch {
+      return failure(r.stdout, r.stderr, r.exitCode) // it died before its answer (no such module, say)
+    }
+    if (j.error) return oneLine(String(j.error), 140)
+    return { files: Array.isArray(j.files) ? j.files.map(f => oneLine(String(f), 80)) : [], isMore: j.more === true }
+  } catch (err) {
+    return /timeout|still running/i.test(String(err)) ? 'Kaggle did not answer within 2 min' : oneLine(String(err), 140)
+  }
+}
+
 /** The username a token belongs to, from `kaggle config view` (it prints no secret). */
 export async function whoami($: EngineInterface, cli: Cli, tokenPath: string): Promise<string | undefined> {
   const r = await kaggle($, cli, { alias: '?', tokenPath }, ['config', 'view'], 60000)
@@ -423,7 +499,7 @@ export async function readTokenInput($: EngineInterface, text: string, P: Paths)
 
 // ---------------------------------------------------------------- live readings
 
-export type Reading = Pick<KernelLive, 't' | 'cpu' | 'cores' | 'ram' | 'disk' | 'tmp' | 'gpus' | 'doing'>
+export type Reading = Pick<KernelLive, 't' | 't0' | 'cpu' | 'cores' | 'ram' | 'disk' | 'tmp' | 'gpus' | 'doing'>
 
 const pair = (v: unknown): [number, number] | undefined =>
   Array.isArray(v) && v.length === 2 && v.every(n => typeof n === 'number') ? [v[0] as number, v[1] as number] : undefined
@@ -447,6 +523,7 @@ export function parseKgmon(line: string): Reading | undefined {
     : undefined
   return {
     t: n(j.t),
+    t0: n(j.t0),
     cpu: n(j.cpu),
     cores: n(j.cores),
     ram: pair(j.ram),

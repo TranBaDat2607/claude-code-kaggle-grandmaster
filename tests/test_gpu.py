@@ -276,6 +276,8 @@ def test_runner_reports_live_resources(gws, tmp_path):
     assert mon, out[-2000:]
     first = mon[0]
     assert first["v"] == 1 and first["cores"] >= 1 and isinstance(first["t"], int)
+    # when the session's clock started, the same in every line: the pane counts the time to the limit from it
+    assert {m["t0"] for m in mon} == {first["t0"]} and abs(first["t0"] - time.time()) < 600
     assert len(first["disk"]) == 2 and first["disk"][0] <= first["disk"][1]
     assert "gpus" not in first  # fake GPUs: no nvidia-smi call
     _kaggle_input(tmp_path / "m2", gws)
@@ -292,6 +294,7 @@ def test_monitor_cell_prints_the_runner_reading(plugin_root, tmp_path):
     assert r.returncode == 0, r.stderr
     (snap,) = _kgmon(r.stdout)
     assert snap["v"] == 1 and len(snap["disk"]) == 2 and snap["cores"] >= 1
+    assert isinstance(snap["t0"], int) and abs(snap["t0"] - time.time()) < 600
     r = subprocess.run([sys.executable, str(cell)], env=dict(env, KG_MONITOR_S="0"), capture_output=True, text=True,
                        timeout=60)
     assert _kgmon(r.stdout) == []

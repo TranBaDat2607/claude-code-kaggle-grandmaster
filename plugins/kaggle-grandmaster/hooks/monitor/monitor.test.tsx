@@ -1,9 +1,11 @@
 import { expect, test } from 'claude-code/testing'
 
+import type { Kernel, KernelLive } from '../../types'
 import { describe, lastLine } from './describe'
 import { parseKgmon, parseQuota, status, utc } from './kaggle'
 import { HISTORY_MAX, LiveTracker, parseProgress, spark } from './live'
 import { etime, parseGpus } from './probe'
+import { age, clockOf, endNotes, limitText, runOf } from './session'
 
 // The test kit's runtime has timers; its type library does not name them.
 const sleep = (ms: number) =>
@@ -173,11 +175,11 @@ test('a running kernel draws its CPU, RAM, GPUs and disk', async ($, on) => {
   const seeded: Record<string, unknown> = {
     accounts: { shape: 'accounts-1', value: [{ alias: 'acc2', user: 'u2', tokenPath: '~/.kaggle/t', hasToken: true, isActive: true }] },
     kernels: {
-      shape: 'kernels-1',
+      shape: 'kernels-2',
       value: { acc2: { value: [{ ref: 'u2/train-b', title: 'train b', status: 'RUNNING', lastRunTime: '2026-11-06T11:00:00' }], fetchedAt: now } },
     },
     live: {
-      shape: 'live-2',
+      shape: 'live-3',
       value: {
         'u2/train-b': {
           ref: 'u2/train-b', alias: 'acc2', isFollowing: true, heardAt: now, readAt: now, t: 3600, cpu: 97, cores: 4,
@@ -237,11 +239,11 @@ test('a kernel log keeps its whole run: averages, peaks, thinned history, progre
 const runningKernels = (now: number, refs: string[]) => ({
   accounts: { shape: 'accounts-1', value: [{ alias: 'acc2', user: 'u2', tokenPath: '~/.kaggle/t', hasToken: true, isActive: true }] },
   kernels: {
-    shape: 'kernels-1',
+    shape: 'kernels-2',
     value: { acc2: { value: refs.map(ref => ({ ref, title: ref, status: 'RUNNING', lastRunTime: '2026-11-06T11:00:00' })), fetchedAt: now } },
   },
   live: {
-    shape: 'live-2',
+    shape: 'live-3',
     value: Object.fromEntries(
       refs.map(ref => [
         ref,
@@ -270,7 +272,8 @@ test('a running kernel opens to its history, progress and log, and closes to one
   expect(await ui.find({ type: 'Button', text: /▾ RUNNING u2\/train-a/ })).toBeDefined()
   const border = { borderStyle: 'round', borderColor: '#5fafff' }
   expect((await ui.find({ key: 'live-u2/train-a' }))?.props).toMatchObject(border)
-  for (const text of [/30m of 12h/, /step 820\/858 · epoch 1\.9$/, /53% now · avg 47% · 4 cores/, /7\.1 \/ 30\.0 GB · peak 8\.0/,
+  // the session clock: from Kaggle's lastRunTime (11:00) to now (12:00), and the GPU session's 12 h limit
+  for (const text of [/· acc2 · 1h00 ·/, /^limit 12h · 11h00 left$/, /step 820\/858 · epoch 1\.9$/, /53% now · avg 47% · 4 cores/, /7\.1 \/ 30\.0 GB · peak 8\.0/,
     /0% now · avg 40% · 6\.6 \/ 15\.0 GB, peak 9\.1 · T4/, /step 818 loss/]) {
     expect((await ui.find({ type: 'Text', text }))?.text).toMatch(text)
   }
@@ -533,4 +536,295 @@ test('a log reader that hears nothing for 15 min is replaced; Refresh replaces e
   // the session's end ends the last one
   await $.session.end({ reason: 'other', sessionId: 's1', resume: { id: 's1' } })
   await until('every reader ended', () => live() === 0)
+})
+
+// ---------------------------------------------------------------- the session's limit and end (#104)
+
+test("a [kgmon] line's t0 is when the kernel's clock started", async () => {
+  expect(parseKgmon('[kgmon] {"v":1,"t":5,"t0":1762394400,"cores":4}')?.t0).toBe(1762394400)
+  expect(parseKgmon('[kgmon] {"v":1,"t":5,"cores":4}')?.t0).toBeUndefined() // a line from before t0
+})
+
+test('the run log says which push started the run Kaggle reports, and its -t cap', async () => {
+  const log =
+    [
+      { kernel: 'u/a', version: 3, hours: 6, resource: 'GPU', pushed_at: '2026-11-06T01:00:00Z', status: 'superseded' },
+      { kernel: 'u/a', version: 4, hours: 4, resource: 'GPU', pushed_at: '2026-11-06T02:00:40Z', status: 'pushed' },
+      // pushed after the run Kaggle reports (a background push still pending): not this run's
+      { kernel: 'u/a', hours: 2, resource: 'GPU', pushed_at: '2026-11-06T09:00:00Z', status: 'pending' },
+      { kernel: 'u/tpu', hours: 9, accelerator: 'TpuV5E8', pushed_at: '2026-11-05T20:00:00Z', started_at: '2026-11-06T05:00:00Z' },
+    ]
+      .map(r => JSON.stringify(r))
+      .join('\n') + '\nnot json\n'
+  expect(runOf(log, 'U/A', '2026-11-06T02:00:05')).toEqual({ capH: 4, resource: 'GPU' })
+  expect(runOf(log, 'u/tpu', '2026-11-05T20:00:30')).toEqual({ capH: 9, resource: 'TPU', startedAt: '2026-11-06T05:00:00Z' })
+  expect(runOf(log, 'u/other', '2026-11-06T02:00:05')).toBeUndefined()
+  expect(runOf('', 'u/a')).toBeUndefined()
+})
+
+test('the session clock: the limit, the time left, past it, and a TPU counted from when it was seen running', async () => {
+  const k = (over: Partial<Kernel>): Kernel => ({ ref: 'u/a', title: 'a', status: 'RUNNING', lastRunTime: '2026-11-06T02:00:00', ...over })
+  const live = (over: Partial<KernelLive>): KernelLive => ({ ref: 'u/a', alias: 'x', isFollowing: true, ...over })
+  const at = (h: number, m = 0) => Date.UTC(2026, 10, 6, h, m)
+  // a push capped at 4 h (the run log): 28 min left at 05:32, the last half hour
+  let c = clockOf(k({ run: { capH: 4, resource: 'GPU' } }), undefined, at(5, 32))
+  expect([c.limitH, c.limitFrom, c.phase, limitText(c)]).toEqual([4, 'cap', 'near', 'limit 4h · 28m left'])
+  // nothing logged: Kaggle's 12 h maximum; past it at 14:04, the run time stops at the limit
+  c = clockOf(k({}), undefined, at(14, 4))
+  expect([c.limitFrom, c.phase, age(c.ranMs! / 1000), limitText(c)]).toEqual(['max', 'over', '12h00', 'past the 12h limit'])
+  expect(endNotes(c, undefined, 'u/a', at(14, 4))[0]?.text).toBe(
+    "Past its 12h limit by 4m: Kaggle has probably cancelled it, though its status still says RUNNING: Kaggle's status lags.",
+  )
+  // the kernel's own clock: it waited 40 min in the queue, so 36 min are left
+  c = clockOf(k({}), live({ t0: at(2, 40) / 1000 }), at(14, 4))
+  expect([c.phase, age(c.leftMs! / 1000)]).toEqual(['running', '36m'])
+  // the pane saw it queue for an hour: counted from then
+  c = clockOf(k({ seenRunningAt: at(3) }), undefined, at(14, 4))
+  expect(limitText(c)).toBe('limit 12h · 56m left')
+  // a TPU session counts from when it was seen running, not from its push 9 h before; never seen running: no clock
+  const tpu = k({ ref: 'u/tpu', lastRunTime: '2026-11-05T20:00:00', run: { capH: 9, resource: 'TPU', startedAt: '2026-11-06T05:00:00Z' } })
+  c = clockOf(tpu, undefined, at(6))
+  expect([c.limitH, c.phase, limitText(c)]).toEqual([9, 'running', 'limit 9h · 8h00 left'])
+  c = clockOf({ ...tpu, run: { resource: 'TPU' } }, undefined, at(6))
+  expect([c.startAt, c.phase, limitText(c)]).toEqual([undefined, 'running', 'limit 9h'])
+  // the script has ended: saving, its outputs listed; Kaggle closed the log: over, the run time stops there
+  const L = live({ scriptEnd: { at: at(13), isError: false }, outputs: { checkedAt: at(13, 9), files: ['submission.csv', 'model.pt'] } })
+  c = clockOf(k({}), L, at(13, 10))
+  expect(c.phase).toBe('saving')
+  expect(endNotes(c, L, 'u/a', at(13, 10))).toEqual([
+    { text: 'The script finished 10m ago: Kaggle is saving the outputs.', tone: 'success' },
+    { text: 'Outputs: 2 files readable now (submission.csv, model.pt): kaggle kernels output u/a -p <dir>.', tone: 'success' },
+  ])
+  c = clockOf(k({}), { ...L, logClosedAt: at(13, 20) }, at(13, 40))
+  expect([c.phase, age(c.ranMs! / 1000), limitText(c)]).toEqual(['closed', '11h20', 'limit 12h'])
+  // closed before the limit, it ended by itself: not cancelled by the limit once the clock passes it
+  c = clockOf(k({}), { ...L, logClosedAt: at(13, 20) }, at(14, 5))
+  expect([c.phase, c.isOver, limitText(c)]).toEqual(['closed', false, 'limit 12h'])
+  expect(endNotes(c, { ...L, outputs: undefined }, 'u/a', at(14, 5))).toEqual([
+    { text: "Kaggle has closed its log: the session is over (the script finished 1h05 ago), though its status still says RUNNING: Kaggle's status lags." },
+  ])
+  // still saving at 13:45: 15 min to the limit, a warning
+  c = clockOf(k({}), L, at(13, 45))
+  expect(endNotes(c, L, 'u/a', at(13, 45))[1]).toEqual({ text: '15m to the 12h limit: a save the limit cuts off can lose the outputs.', tone: 'warning' })
+})
+
+test("a log's end: the notebook converted to HTML, or nbconvert's error; a reading after it means it ran on", async () => {
+  const tr = new LiveTracker()
+  tr.line('[NbConvertApp] Converting notebook __notebook__.ipynb to notebook') // how a run starts
+  expect(tr.scriptEnd).toBeUndefined()
+  tr.reading({ t: 600, t0: 1762394400 })
+  tr.reading({ t: 630, t0: 1762394500 }) // a later t0 (a second monitor) does not move the start
+  expect(tr.t0).toBe(1762394400)
+  tr.line('[NbConvertApp] Converting notebook __script__.ipynb to html')
+  tr.line('[NbConvertApp] Writing 412093 bytes to __results__.html')
+  expect(tr.scriptEnd).toEqual({ t: 630, isError: false })
+  tr.reading({ t: 660 }) // the script had converted a notebook of its own: it still runs
+  expect([tr.scriptEnd, tr.isResumed]).toEqual([undefined, true])
+  tr.line('nbclient.exceptions.CellExecutionError: An error occurred while executing the following cell:')
+  expect(tr.scriptEnd).toEqual({ t: 660, isError: true })
+})
+
+test('a card in its last half hour warns; past its limit it says Kaggle has probably cancelled it', async ($, on) => {
+  // the helper's kernel last ran at 11:00 (UTC) with GPUs: a 12 h session
+  let now = Date.UTC(2026, 10, 6, 22, 32)
+  on('clock.now', () => ({ value: now }))
+  const seeded: Record<string, unknown> = runningKernels(now, ['u2/train-a'])
+  on('state.get', ($, e, next) => (e.key in seeded ? { value: { value: seeded[e.key], version: 1 } } : next(e)))
+  on('store.set', () => ({ value: undefined }))
+  let ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Button', text: /▾ RUNNING u2\/train-a/ })).toBeDefined()
+  expect((await ui.find({ type: 'Text', text: /^limit 12h · 28m left$/ }))?.props.color).toBe('warning')
+  const near = await ui.find({ type: 'Text', text: /28m to its 12h limit and the script has not finished/ })
+  expect(near?.props.color).toBe('warning')
+  expect((await ui.find({ key: 'live-u2/train-a' }))?.props).toMatchObject({ borderColor: 'warning' })
+  await ui.unmount()
+
+  now = Date.UTC(2026, 10, 6, 23, 4)
+  ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Button', text: /▾ PAST LIMIT u2\/train-a/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /· acc2 · 12h00 ·/ })).toBeDefined() // the run time stopped at the limit
+  expect(await ui.find({ type: 'Text', text: /^past the 12h limit$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /Past its 12h limit by 4m: Kaggle has probably cancelled it/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /upload them as a dataset/ })).toBeDefined()
+  // its readings stopped half an hour ago: no "last reading" warning on a session that is over
+  expect(await ui.find({ type: 'Text', text: /Last reading/ })).toBeUndefined()
+  await ui.unmount()
+})
+
+test('a closed card whose script has ended shows that and its outputs, not its last log line', async ($, on) => {
+  const now = Date.UTC(2026, 10, 6, 14)
+  on('clock.now', () => ({ value: now }))
+  const kernels = runningKernels(now, ['u2/train-a', 'u2/train-b'])
+  const live = kernels.live.value as unknown as Record<string, KernelLive>
+  live['u2/train-a'] = { ...live['u2/train-a']!, scriptEnd: { at: now - 12 * 60_000, isError: false }, outputs: { checkedAt: now, files: ['sub.csv'] } }
+  const seeded: Record<string, unknown> = kernels
+  on('state.get', ($, e, next) => (e.key in seeded ? { value: { value: seeded[e.key], version: 1 } } : next(e)))
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Button', text: /▸ SAVING u2\/train-a/ })).toBeDefined()
+  expect((await ui.find({ type: 'Text', text: /└ The script finished 12m ago: Kaggle is saving the outputs\./ }))?.props.color).toBe('success')
+  expect(await ui.find({ type: 'Text', text: /└ Outputs: 1 file readable now \(sub\.csv\)/ })).toBeDefined()
+  expect((await ui.find({ key: 'live-u2/train-a' }))?.props).toMatchObject({ borderColor: 'success' })
+  expect(await ui.find({ type: 'Button', text: /▸ RUNNING u2\/train-b/ })).toBeDefined()
+  expect((await ui.findAll({ type: 'Text', text: /└ \[train\] step 820 loss/ })).length).toBe(1) // train-b's alone
+  await ui.unmount()
+})
+
+test("a run's cap from the run log: toasts as it nears and passes it, its script's end, its outputs, its closed log", async ($, on) => {
+  let now = Date.UTC(2026, 10, 9, 11, 20)
+  const held = new Map<string, unknown>()
+  const toasts: string[] = []
+  const t0 = Date.UTC(2026, 10, 9, 11, 0) / 1000 // the kernel's clock started at its push
+  let log = `[kgmon] {"v":1,"t":1200,"t0":${t0},"cores":4,"gpus":[[0,90,9000,15360,"Tesla T4"]]}\n{"step": 60, "of": 1314}\n`
+  let status = 'RUNNING'
+  let isLogClosed = false // Kaggle closed it: a reader gets the log, then the stream ends
+  const readers: { isRead: boolean; isEnded: boolean }[] = []
+  const asked: { cwd?: string; stdin?: string; token?: string }[] = []
+  let fire = () => {}
+  const until = async (what: string, ok: () => boolean | Promise<boolean>) => {
+    for (let i = 0; i < 2000; i++) {
+      if (await ok()) return
+      await sleep(1)
+    }
+    throw new Error(`never: ${what}`)
+  }
+  const polled = () => (held.get('kernels') as { value?: { main?: { fetchedAt?: number } } })?.value?.main?.fetchedAt === now
+  // The clock moves on and the poll timer fires, again while an earlier poll (Refresh's) still runs and this one is skipped.
+  const tick = async (ms: number) => {
+    now += ms
+    await until(`a poll at +${ms / 60_000} min`, () => {
+      if (polled()) return true
+      fire()
+      return false
+    })
+  }
+  // Refresh: every reader replaced by one that replays the log
+  const refresh = async () => {
+    const n = readers.length
+    await $.command.run({ command: 'kaggle-monitor', args: 'refresh', origin: { kind: 'composer' }, presentation: { isFullscreen: false, columns: 100 } })
+    await until('a new reader', () => readers.length > n && readers[readers.length - 1]!.isRead)
+  }
+  const card = async () => {
+    const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+    const texts = (await ui.findAll({ type: 'Text' })).map(t => t.text)
+    const title = (await ui.find({ type: 'Button', text: /u\/train/ }))?.text
+    await ui.unmount()
+    return { title, texts }
+  }
+  on('state.get', (_, e) => ({ value: held.has(e.key) ? { value: held.get(e.key), version: 1 } : { value: undefined, version: 0 } }))
+  on('state.set', (_, e) => {
+    held.set(e.key, e.value)
+    return { value: { isSet: true, version: 1 } }
+  })
+  on('command.register', (_, e) => ({ value: { command: e.name } }))
+  on('command.run', () => ({ text: '' }))
+  on('session.start', (_, e) => ({ cwd: e.cwd }))
+  on('session.end', (_, e) => ({ sessionId: e.sessionId }))
+  on('ui.panes', () => ({ value: [{ id: 'kaggle-monitor', title: 'Kaggle', isShown: true, isFocused: false, isPlaced: true }] }))
+  on('ui.log', () => ({ value: undefined }))
+  on('ui.toast', (_, e) => {
+    toasts.push(e.text)
+    return { value: undefined }
+  })
+  on('env.get', (_, e) => ({ value: e.name === 'HOME' ? '/home/u' : undefined }))
+  on('env.set', () => ({ value: {} }))
+  on('store.get', (_, e) => ({ value: e.key === 'active' ? 'main' : e.key === 'cli' ? ['/opt/kaggle'] : undefined }))
+  on('store.set', () => ({ value: undefined }))
+  on('clock.now', () => ({ value: now }))
+  on('clock.after', () => ({ value: undefined }))
+  on('clock.every', () => new Promise(resolve => (fire = () => resolve({ value: undefined }))))
+  on('fs.exists', (_, e) => ({
+    value: e.path === '/home/u/.kaggle/access_token' || e.path === '/opt/kaggle' || e.path.endsWith('/kgkit/kaggle_outputs.py'),
+  }))
+  on('fs.read', (_, e) => {
+    // pushed with -t 3600 (`kgkit gpu push --hours 1`)
+    const run = { kernel: 'u/train', version: 2, hours: 1, resource: 'GPU', pushed_at: '2026-11-09T11:00:20Z', status: 'running' }
+    if (e.path === '/ws/.kaggle-gm/gpu_runs.jsonl') return { value: `${JSON.stringify(run)}\n` }
+    if (e.path === '/opt/kaggle') return { value: '#!/opt/env/bin/python3.12\n# -*- coding: utf-8 -*-\nfrom kaggle.cli import main\n' }
+    throw new Error(`ENOENT: ${e.path}`)
+  })
+  on('process.run', (_, e) => {
+    const cmd = e.argv.join(' ')
+    const ran = (stdout: string) => ({ value: { exitCode: 0, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } })
+    if (cmd.startsWith('/opt/kaggle kernels list')) {
+      return ran(JSON.stringify([{ ref: 'u/train', title: 'train', lastRunTime: '2026-11-09T11:00:00' }]))
+    }
+    if (cmd === '/opt/kaggle kernels status u/train') return ran(`u/train has status "KernelWorkerStatus.${status}"\n`)
+    if (cmd === '/opt/env/bin/python3.12 -m kgkit.kaggle_outputs') {
+      asked.push({ cwd: e.init?.cwd, stdin: e.init?.stdin, token: e.init?.env?.KAGGLE_API_TOKEN })
+      return ran('{"files": ["submission.csv", "oof.npy"], "more": false, "log": "", "error": null}\n')
+    }
+    throw new Error('no such process in this test')
+  })
+  on('process.spawn', async function* (_, e, next) {
+    const me = { isRead: false, isEnded: false }
+    readers.push(me)
+    try {
+      yield { stream: 'stdout' as const, text: log }
+      me.isRead = true
+      if (isLogClosed) return { value: { code: 0, signal: null } }
+      await new Promise(resolve => next.signal.addEventListener('abort', () => resolve(undefined), { once: true }))
+    } finally {
+      me.isEnded = true
+    }
+    return { value: { code: null, signal: 'SIGTERM' } }
+  })
+
+  await $.session.start({ cwd: '/ws', surface: 'terminal', isInteractive: true })
+  await until('a first reader', () => readers[0]?.isRead === true)
+  await until('the reading', async () => (await card()).texts.some(t => t === 'limit 1h · 40m left'))
+  expect((await card()).title).toMatch(/^▾ RUNNING u\/train · main · 20m · limit 1h · 40m left$/)
+
+  // 11:40, 20 min left: not yet the last quarter of a 1 h cap
+  await tick(20 * 60_000)
+  expect(toasts).toEqual([])
+  // 11:47, 13 min left, the script still running: a warning on the card, and a toast
+  await tick(7 * 60_000)
+  expect(toasts).toEqual(['Kaggle kernel u/train (main): 13m to its 1h limit, and the script has not finished'])
+  expect((await card()).texts).toContain(
+    '13m to its 1h limit and the script has not finished: Kaggle cancels it at the limit and keeps only what is already in /kaggle/working.',
+  )
+
+  // the script ends at 2800 s on the kernel's clock (11:46:40): a new reader replays it, ending in the notebook's
+  // conversion to HTML
+  log +=
+    `[kgmon] {"v":1,"t":2800,"t0":${t0},"cores":4,"gpus":[[0,5,9000,15360,"Tesla T4"]]}\n` +
+    '[NbConvertApp] Converting notebook __script__.ipynb to html\n[NbConvertApp] Writing 412093 bytes to __results__.html\n'
+  await refresh()
+  await tick(6 * 60_000) // 11:53: the poll sees it saving, and looks its outputs up
+  await until('the outputs looked up', () => toasts.length === 3)
+  expect(toasts.slice(1)).toEqual([
+    'Kaggle kernel u/train (main): the script finished; Kaggle is saving its outputs',
+    'Kaggle kernel u/train (main): 2 output files readable (kaggle kernels output)',
+  ])
+  expect(asked[0]?.cwd).toBeDefined()
+  expect(JSON.parse(asked[0]!.stdin!)).toEqual({ kernel: 'u/train', max_pages: 1, log: false })
+  expect(asked[0]?.token).toBe('/home/u/.kaggle/access_token')
+  let seen = await card()
+  expect(seen.title).toMatch(/^▾ SAVING u\/train · main · 53m · limit 1h · 7m left$/)
+  expect(seen.texts).toContain('The script finished 6m ago: Kaggle is saving the outputs.')
+  expect(seen.texts).toContain('7m to the 1h limit: a save the limit cuts off can lose the outputs.')
+  expect(seen.texts).toContain('Outputs: 2 files readable now (submission.csv, oof.npy): kaggle kernels output u/train -p <dir>.')
+
+  // 12:01: past the cap, Kaggle still says RUNNING
+  await tick(8 * 60_000)
+  expect(toasts[3]).toBe("Kaggle kernel u/train (main): past its 1h limit, probably cancelled (Kaggle's status lags)")
+  seen = await card()
+  expect(seen.title).toMatch(/^▾ PAST LIMIT u\/train · main · 1h00 · past the 1h limit$/)
+
+  // Kaggle closes the log: the next reader gets the replay, then the stream ends; one end, one toast
+  isLogClosed = true
+  await refresh()
+  await until('the closed log read', () => readers[readers.length - 1]?.isEnded === true)
+  await until('the card ended', async () => /^▾ ENDED u\/train/.test((await card()).title ?? ''))
+  expect((await card()).texts).toContain(
+    "Kaggle has closed its log, past its 1h limit: the limit has probably cancelled the session, though its status still says RUNNING: Kaggle's status lags.",
+  )
+  await tick(60_000)
+  expect(toasts.length).toBe(4)
+
+  // the status catches up
+  status = 'CANCELLED'
+  await tick(60_000)
+  expect(toasts[4]).toBe('Kaggle kernel u/train (main): CANCELLED; 2 output files were readable')
+  await $.session.end({ reason: 'other', sessionId: 's1', resume: { id: 's1' } })
 })
