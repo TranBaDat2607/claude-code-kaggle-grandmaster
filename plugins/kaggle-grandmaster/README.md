@@ -38,8 +38,9 @@ public).
 - `hooks/`: session brief (accepted baseline, backlog top, GPU quota, competition data in git), prompt→skill router, submission +
   GPU-quota + upload guard (credentials never printed or uploaded, repeated files caught), submission /
   GPU-run logger, compute defaults (and slow patterns) when a training or inference script is written
-- `hooks/monitor/`: the Kaggle pane (`/kaggle-monitor`), a mod: running kernels with live CPU/GPU/RAM/disk,
-  submissions, GPU/TPU quota of every account, switching the session's Kaggle account
+- `hooks/monitor/`: the Kaggle pane (`/kaggle-monitor`), a mod: running kernels with live CPU/GPU/RAM/disk, the time
+  left to each session's limit, the script's end and the session's outputs while Kaggle's status lags, submissions,
+  GPU/TPU quota of every account, switching the session's Kaggle account
 - `kgkit/`: Python toolkit (`python -m kgkit --help`):
   - experiment loop: `ledger compare` (paired per-fold test + paired noise on stored OOF or holdout
     predictions for any metric, projected to the public LB with `--public-n`), `ledger noise` (one score's

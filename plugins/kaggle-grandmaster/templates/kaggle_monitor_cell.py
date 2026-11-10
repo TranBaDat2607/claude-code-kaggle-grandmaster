@@ -1,8 +1,8 @@
 """Live resource readings for a Kaggle notebook or script that kgkit did not build.
 
 Paste this as the first cell (or the top of the script). Every KG_MONITOR_S seconds (default 30) it prints one
-`[kgmon] {...}` line to the session log: CPU, RAM, disk and each GPU of the session, and what the code says it
-is doing. The kaggle-monitor pane in Claude Code follows a running kernel's log (`kaggle kernels logs -f`) and
+`[kgmon] {...}` line to the session log: CPU, RAM, disk and each GPU of the session, what the code says it is
+doing, and when its clock started (t0, Unix seconds: the pane counts the time to the session limit from it). The kaggle-monitor pane in Claude Code follows a running kernel's log (`kaggle kernels logs -f`) and
 draws the latest line; Kaggle's API reports no session resources of its own. Kernels pushed with
 `kgkit gpu push` print these lines already, and when Claude Code runs `kaggle kernels push` the plugin's hook adds
 this block to the kernel's .py or .ipynb itself. A code file that mentions kgmon anywhere is left alone, so a
@@ -107,7 +107,7 @@ def _kgmon_gpus():
 
 def _kgmon_snapshot(prev):
     now, cpu_us = _kgmon_time.time(), _kgmon_cpu_us()
-    snap = {"v": 1, "t": int(now - KGMON_T0), "cores": round(_kgmon_cores(), 1)}
+    snap = {"v": 1, "t": int(now - KGMON_T0), "t0": int(KGMON_T0), "cores": round(_kgmon_cores(), 1)}
     if cpu_us is not None and prev and prev[1] is not None and now > prev[0]:
         snap["cpu"] = round(100.0 * (cpu_us - prev[1]) / 1e6 / (now - prev[0]) / snap["cores"], 1)
     ram = _kgmon_ram_mb()

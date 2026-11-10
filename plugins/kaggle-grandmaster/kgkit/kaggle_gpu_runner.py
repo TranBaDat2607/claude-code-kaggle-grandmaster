@@ -25,8 +25,9 @@ What it does inside the Kaggle session:
      `python -m kgkit gpu collect`.
 
 While it runs it prints a `[kgmon] {...}` line every KG_MONITOR_S seconds (default 30; 0 turns it off):
-the session's CPU, RAM, disk and each GPU, and which tasks are running. The kaggle-monitor pane follows the
-live log (`kaggle kernels logs -f`) and draws the latest one, since Kaggle's API reports no session resources.
+the session's CPU, RAM, disk and each GPU, which tasks are running, and when the session's clock started (t0, Unix
+seconds: the pane counts the time to the session limit from it). The kaggle-monitor pane follows the live log
+(`kaggle kernels logs -f`) and draws the latest one, since Kaggle's API reports no session resources.
 
 Standard library only. Prints ASCII only.
 """
@@ -505,7 +506,7 @@ def _gpus():
 def snapshot(prev, has_gpu=True):
     """One reading: (dict for the [kgmon] line, state for the next CPU delta)."""
     now, cpu_us = time.time(), _cgroup_cpu_us()
-    snap = {"v": 1, "t": int(now - T0), "cores": round(_cores(), 1)}
+    snap = {"v": 1, "t": int(now - T0), "t0": int(T0), "cores": round(_cores(), 1)}
     if cpu_us is not None and prev and prev[1] is not None and now > prev[0]:
         snap["cpu"] = round(100.0 * (cpu_us - prev[1]) / 1e6 / (now - prev[0]) / snap["cores"], 1)
     ram = _ram_mb()

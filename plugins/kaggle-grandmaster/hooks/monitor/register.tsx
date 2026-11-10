@@ -1,7 +1,22 @@
 import { atom, read, update } from 'claude-code'
 import type { CommandSpec, EngineInterface, Register, Timer } from 'claude-code'
 
-import type { AccountView, Cards, CliInfo, Fetched, Kernel, KernelLive, Machine, Note, Proc, QuotaRow, Scope, Submissions, Tab } from '../../types'
+import type {
+  AccountView,
+  Cards,
+  CliInfo,
+  Fetched,
+  Kernel,
+  KernelLive,
+  Machine,
+  Note,
+  Outputs,
+  Proc,
+  QuotaRow,
+  Scope,
+  Submissions,
+  Tab,
+} from '../../types'
 import {
   type Account,
   type Cli,
@@ -22,6 +37,7 @@ import {
   readTokenInput,
   removeFile,
   saveRegistry,
+  sessionOutputs,
   submissions as fetchSubmissions,
   tilde,
   utc,
@@ -31,6 +47,7 @@ import {
 import { lastLine } from './describe'
 import { LiveTracker, spark } from './live'
 import { type Platform, type Prev, machine as machineOf, nextPrev, platformOf, readGpus, readRaw, readTails, rows } from './probe'
+import { LOOK, RUNNING_BLUE, age, clockOf, endNotes, limitText, phaseToast, runOf } from './session'
 
 const PANE = 'kaggle-monitor'
 const COMMAND: CommandSpec = {
@@ -52,6 +69,15 @@ const SUBS_PENDING_MS = 20_000
 const SUBS_IDLE_MS = 5 * 60_000
 const ALIAS_RE = /^[A-Za-z0-9_-]{1,32}$/
 const LIVE = new Set(['RUNNING', 'QUEUED', 'NEW', 'PENDING', 'CANCEL_REQUESTED'])
+const WAITING = new Set(['QUEUED', 'NEW', 'PENDING'])
+/** How often a session's outputs are looked up once its script has ended or it looks over: until some are found,
+ * then less often. */
+const OUTPUTS_MS = 3 * 60_000
+const OUTPUTS_FOUND_MS = 10 * 60_000
+/** A log reader still open this long is on a live stream: a closed log's reader ends once it has replayed it. */
+const LIVE_OPEN_MS = 120_000
+/** The log a reader is handed when it connects comes within this; a line after it was written as it was heard. */
+const REPLAY_MS = 10_000
 
 // What the pane draws: host-held, so it outlives a reload. Each tag changes with its value's fields.
 const tabA = atom({ plugin: 'kaggle-grandmaster', key: 'tab' } as const, 'activity' as Tab)
@@ -63,7 +89,7 @@ const quotasA = atom({ plugin: 'kaggle-grandmaster', key: 'quotas' } as const, {
   shape: 'quotas-1',
 })
 const kernelsA = atom({ plugin: 'kaggle-grandmaster', key: 'kernels' } as const, {} as Record<string, Fetched<Kernel[]>>, {
-  shape: 'kernels-1',
+  shape: 'kernels-2',
 })
 const subsA = atom({ plugin: 'kaggle-grandmaster', key: 'submissions' } as const, null as Fetched<Submissions> | null, {
   shape: 'subs-1',
@@ -71,21 +97,13 @@ const subsA = atom({ plugin: 'kaggle-grandmaster', key: 'submissions' } as const
 const cliA = atom({ plugin: 'kaggle-grandmaster', key: 'cli' } as const, {} as CliInfo, { shape: 'cli-1' })
 const noteA = atom({ plugin: 'kaggle-grandmaster', key: 'note' } as const, null as Note | null, { shape: 'note-1' })
 const confirmA = atom({ plugin: 'kaggle-grandmaster', key: 'confirmRemove' } as const, '')
-const liveA = atom({ plugin: 'kaggle-grandmaster', key: 'live' } as const, {} as Record<string, KernelLive>, { shape: 'live-2' })
+const liveA = atom({ plugin: 'kaggle-grandmaster', key: 'live' } as const, {} as Record<string, KernelLive>, { shape: 'live-3' })
 const cardsA = atom({ plugin: 'kaggle-grandmaster', key: 'cards' } as const, { open: {} } as Cards)
 const showLocalA = atom({ plugin: 'kaggle-grandmaster', key: 'showLocal' } as const, false)
 
 // ---------------------------------------------------------------- formatting
 
 const h1 = (n: number) => (n >= 100 ? n.toFixed(0) : n.toFixed(1))
-
-function age(s: number | undefined): string {
-  if (s === undefined) return '-'
-  if (s < 60) return `${Math.round(s)}s`
-  if (s < 3600) return `${Math.floor(s / 60)}m`
-  if (s < 86400) return `${Math.floor(s / 3600)}h${String(Math.floor((s % 3600) / 60)).padStart(2, '0')}`
-  return `${Math.floor(s / 86400)}d${Math.floor((s % 86400) / 3600)}h`
-}
 
 function mb(n: number | undefined): string {
   if (n === undefined) return '-'
@@ -109,9 +127,6 @@ function until(iso: string | undefined, now: number): string | undefined {
   const t = utc(iso)
   return t === undefined ? undefined : t > now ? `resets in ${age((t - now) / 1000)}` : 'reset due'
 }
-
-/** A bright blue that reads well on a black terminal. */
-const RUNNING_BLUE = '#5fafff'
 
 /** Running blue, failed red, complete green, waiting yellow; anything else (cancelled, unknown) stays dim. */
 const statusColor = (s: string) =>
@@ -161,8 +176,12 @@ const busy = new Set<string>()
 const last = new Map<string, number>()
 const seenKernel = new Map<string, string>()
 const seenSub = new Map<string, string>()
+/** The session-clock phase each running kernel was in at the last poll: a change is toasted. */
+const phaseSeen = new Map<string, string>()
+/** What was toasted of each running kernel's end, so a flicker does not toast it twice. */
+const told = new Map<string, Set<string>>()
 /** A `kaggle kernels logs -f` child; `heardAt` is when it started or last wrote, `isLetGo` set once it is ended. */
-type Follower = { stream: ReturnType<EngineInterface['process']['spawn']>; heardAt: number; isLetGo: boolean }
+type Follower = { stream: ReturnType<EngineInterface['process']['spawn']>; startedAt: number; heardAt: number; isLetGo: boolean }
 /** One log reader per running kernel, by ref. */
 const followers = new Map<string, Follower>()
 /** The most log any reader of a kernel has had, in characters: a reconnect's replay up to here is nothing new. */
@@ -260,7 +279,7 @@ async function follow($: EngineInterface, a: Account, ref: string) {
   const startedAt = await $.clock.now()
   if (followers.has(ref) || gen !== followGen) return // another poll started one while the clock answered
   const stream = $.process.spawn({ argv: [...cli.argv, 'kernels', 'logs', '-f', ref], env: accountEnv(a) })
-  const me: Follower = { stream, heardAt: startedAt, isLetGo: false }
+  const me: Follower = { stream, startedAt, heardAt: startedAt, isLetGo: false }
   followers.set(ref, me)
   await update($, liveA, all => ({ ...all, [ref]: { ...all[ref], ref, alias: a.alias, isFollowing: true, error: undefined } }))
 
@@ -274,6 +293,10 @@ async function follow($: EngineInterface, a: Account, ref: string) {
   let wroteAt = 0
   let got = 0
   let isNews = false
+  /** This reader got log no earlier reader had. */
+  let isHeardNew = false
+  /** When the script's end was heard as it happened (not in the replay a reader starts with). */
+  let endHeardAt: number | undefined
   const flush = async () => {
     isScheduled = false
     // A reader that was ended (its kernel stopped, or it was replaced) writes nothing more: the card is its successor's.
@@ -286,23 +309,37 @@ async function follow($: EngineInterface, a: Account, ref: string) {
     const isFresh = isNews
     reading = undefined
     isNews = false
-    await update($, liveA, all => ({
-      ...all,
-      [ref]: {
-        ...all[ref],
-        ref,
-        alias: a.alias,
-        isFollowing: followers.has(ref),
-        // when the log last grew, not when a reconnect replayed it
-        heardAt: isFresh || all[ref]?.heardAt === undefined ? now : all[ref].heardAt,
-        ...(r ? { ...r, readAt: now } : {}),
-        ...(l ? { lastLine: l } : {}),
-        tail: tracker.tail,
-        hist: tracker.history(),
-        stats: tracker.stats(),
-        progress: tracker.progress,
-      },
-    }))
+    await update($, liveA, all => {
+      const old = all[ref]
+      const t0 = tracker.t0 !== undefined && old?.t0 !== undefined ? Math.min(tracker.t0, old.t0) : (tracker.t0 ?? old?.t0)
+      // A reconnect replays the log from its start: what an earlier reader learnt of the end stands until this one
+      // has seen the script carry on after it.
+      const end = tracker.scriptEnd ?? (tracker.isResumed ? undefined : old?.scriptEnd)
+      const t = tracker.scriptEnd?.t
+      const heard = t !== undefined && t0 !== undefined ? (t0 + t) * 1000 : endHeardAt
+      const at = [old?.scriptEnd?.at, tracker.scriptEnd ? heard : undefined].filter((x): x is number => x !== undefined)
+      return {
+        ...all,
+        [ref]: {
+          ...old,
+          ref,
+          alias: a.alias,
+          isFollowing: followers.has(ref),
+          // when the log last grew, not when a reconnect replayed it
+          heardAt: isFresh || old?.heardAt === undefined ? now : old.heardAt,
+          ...(r ? { ...r, readAt: now } : {}),
+          ...(l ? { lastLine: l } : {}),
+          tail: tracker.tail,
+          hist: tracker.history(),
+          stats: tracker.stats(),
+          progress: tracker.progress,
+          t0,
+          scriptEnd: end ? { isError: end.isError, ...(at.length ? { at: Math.min(...at) } : {}) } : undefined,
+          // a log that grows is open
+          logClosedAt: isFresh ? undefined : old?.logClosedAt,
+        },
+      }
+    })
   }
 
   try {
@@ -314,9 +351,11 @@ async function follow($: EngineInterface, a: Account, ref: string) {
         continue
       }
       got += chunk.text.length
-      if (got > (logSeen.get(ref) ?? 0)) {
+      const isChunkNew = got > (logSeen.get(ref) ?? 0)
+      if (isChunkNew) {
         logSeen.set(ref, got)
         isNews = true
+        isHeardNew = true
       }
       buf += chunk.text
       const lines = buf.split(/\r?\n/)
@@ -330,7 +369,9 @@ async function follow($: EngineInterface, a: Account, ref: string) {
           const text = lastLine(one, 200)
           if (text) {
             line = text
+            const hadEnd = tracker.scriptEnd !== undefined
             tracker.line(text)
+            if (!hadEnd && tracker.scriptEnd && isChunkNew && now - startedAt > REPLAY_MS) endHeardAt = now
           }
         }
         isDirty = true
@@ -352,6 +393,10 @@ async function follow($: EngineInterface, a: Account, ref: string) {
   await flush()
   const ended = await stream.result.catch(() => undefined)
   const code = ended?.code ?? 0
+  // It replayed the log as earlier readers had it, and the stream ended by itself: Kaggle has closed the log, so the
+  // session is over, whatever the status still says. (A live stream stays open after the replay.)
+  const isClosed = ended?.code === 0 && got > 0 && !isHeardNew
+  const endedAt = await $.clock.now()
   await update($, liveA, all => ({
     ...all,
     [ref]: {
@@ -360,6 +405,7 @@ async function follow($: EngineInterface, a: Account, ref: string) {
       alias: a.alias,
       isFollowing: false,
       error: code !== 0 || (!all[ref]?.heardAt && errText) ? failure('', errText, code) : undefined,
+      ...(isClosed ? { logClosedAt: all[ref]?.logClosedAt ?? endedAt } : {}),
     },
   }))
 }
@@ -391,29 +437,109 @@ function stopAll() {
   for (const ref of [...followers.keys()]) unfollow(ref)
 }
 
+/** Toasts `kind` of a kernel once. */
+function once(ref: string, kind: string): boolean {
+  const s = told.get(ref) ?? new Set<string>()
+  told.set(ref, s)
+  if (s.has(kind)) return false
+  s.add(kind)
+  return true
+}
+
+/** Looks up the files Kaggle serves for a kernel's session: once its script has ended, or it looks over, they say
+ * whether anything was saved, while Kaggle's status still says RUNNING. */
+async function checkOutputs($: EngineInterface, a: Account, ref: string) {
+  if (!cli) return
+  const r = await sessionOutputs($, cli, a, ref, platform, $.plugin.root)
+  const now = await $.clock.now()
+  const outputs: Outputs = typeof r === 'string' ? { checkedAt: now, error: r } : { checkedAt: now, files: r.files, isMore: r.isMore }
+  const before = (await read($, liveA))[ref]
+  if (!before) return // its kernel ended meanwhile
+  await update($, liveA, all => (all[ref] ? { ...all, [ref]: { ...all[ref], outputs } } : all))
+  const n = outputs.files?.length ?? 0
+  if (n && !before.outputs?.files?.length && once(ref, 'outputs')) {
+    $.ui.toast(`Kaggle kernel ${ref} (${a.alias}): ${n}${outputs.isMore ? '+' : ''} output file${n === 1 ? '' : 's'} readable (kaggle kernels output)`, {
+      timeoutMs: 10000,
+    })
+  }
+}
+
+/** What the session clock says of a running kernel: a phase it reaches is toasted (not one it was in when the pane
+ * first saw it), and once the script has ended or the session looks over, its outputs are looked up now and then. */
+function watchSession($: EngineInterface, a: Account, k: Kernel, L: KernelLive | undefined, now: number) {
+  const c = clockOf(k, L, now)
+  const was = phaseSeen.get(k.ref)
+  phaseSeen.set(k.ref, c.phase)
+  if (was !== undefined && was !== c.phase) {
+    const text = phaseToast(c, L, k.ref, a.alias)
+    // past the limit, then the log closed: one end, one toast
+    if (text && once(k.ref, c.phase === 'over' || c.phase === 'closed' ? 'end' : c.phase)) $.ui.toast(text, { timeoutMs: 10000 })
+  }
+  const key = `outputs:${k.ref}`
+  if ((c.isScriptDone || c.isOver || c.isClosed) && due(key, L?.outputs?.files?.length ? OUTPUTS_FOUND_MS : OUTPUTS_MS, now)) {
+    void job($, key, () => checkOutputs($, a, k.ref))
+  }
+}
+
+/** Forgets what was kept of a kernel's run once it no longer runs. */
+function forgetRun(ref: string) {
+  unfollow(ref)
+  logSeen.delete(ref)
+  phaseSeen.delete(ref)
+  told.delete(ref)
+  last.delete(`outputs:${ref}`)
+}
+
 async function pollKernels($: EngineInterface, a: Account) {
   if (!cli) return
   const c = cli
   const now = await $.clock.now()
-  const r = await fetchKernels($, c, a, now)
-  await update($, kernelsA, all => ({
-    ...all,
-    [a.alias]: typeof r === 'string' ? { ...all[a.alias], error: r } : { value: r, fetchedAt: now },
-  }))
-  if (typeof r === 'string') return
+  const fetched = await fetchKernels($, c, a, now)
+  if (typeof fetched === 'string') {
+    await update($, kernelsA, all => ({ ...all, [a.alias]: { ...all[a.alias], error: fetched } }))
+    return
+  }
+  // The run log has the limit each push asked for (-t / --hours); the last poll, when each kernel was seen to start.
+  const runLog = await $.fs.read(`${cwd}/.kaggle-gm/gpu_runs.jsonl`).catch(() => '')
+  const before = new Map(((await read($, kernelsA))[a.alias]?.value ?? []).map(k => [k.ref, k]))
+  const r: Kernel[] = fetched.map(k => {
+    const was = before.get(k.ref)
+    const run = runOf(runLog, k.ref, k.lastRunTime)
+    const seenRunningAt =
+      k.status !== 'RUNNING'
+        ? undefined
+        : was?.status === 'RUNNING' && was.lastRunTime === k.lastRunTime
+          ? was.seenRunningAt
+          : was && WAITING.has(was.status)
+            ? now
+            : undefined
+    return { ...k, ...(run ? { run } : {}), ...(seenRunningAt !== undefined ? { seenRunningAt } : {}) }
+  })
+  await update($, kernelsA, all => ({ ...all, [a.alias]: { value: r, fetchedAt: now } }))
+  const lives = await read($, liveA)
   for (const k of r) {
     const was = seenKernel.get(k.ref)
     if (was && LIVE.has(was) && !LIVE.has(k.status)) {
-      $.ui.toast(`Kaggle kernel ${k.ref} (${a.alias}): ${k.status}`)
+      // whether anything was saved, as the last lookup found it
+      const out = lives[k.ref]?.outputs
+      const n = out?.files?.length ?? 0
+      const saved = n ? `; ${n}${out?.isMore ? '+' : ''} output file${n === 1 ? ' was' : 's were'} readable` : ''
+      $.ui.toast(`Kaggle kernel ${k.ref} (${a.alias}): ${k.status}${saved}`)
       last.delete(`quota:${a.alias}`)
     }
     seenKernel.set(k.ref, k.status)
     if (k.status !== 'RUNNING') {
-      unfollow(k.ref)
-      logSeen.delete(k.ref)
+      forgetRun(k.ref)
       continue
     }
+    const L = lives[k.ref]
     const f = followers.get(k.ref)
+    // A reader on a closed log ends within seconds of connecting: one still open is on a live stream.
+    if (L?.logClosedAt !== undefined && f && now - f.startedAt >= LIVE_OPEN_MS) {
+      const ref = k.ref
+      await update($, liveA, all => (all[ref] ? { ...all, [ref]: { ...all[ref], logClosedAt: undefined } } : all))
+    }
+    watchSession($, a, k, L, now)
     if (f && now - f.heardAt >= SILENT_MS) {
       $.ui.log(`kaggle-monitor: ${k.ref}: no log for ${age((now - f.heardAt) / 1000)}, reconnecting`, { to: 'debug' })
       unfollow(k.ref)
@@ -478,7 +604,7 @@ async function sampleLocal($: EngineInterface, now: number) {
     if (!gpu) gpuRetryAt = now + 5 * 60_000
   }
   const scope = await read($, scopeA)
-  const list = rows(raw, prev, now, scope, gpu, cmd => /kaggle/.test(cmd) && (busy.size > 0 || followers.size > 0) && /\b(quota|kernels (list|status|logs)|competitions submissions|config view|--version)\b/.test(cmd))
+  const list = rows(raw, prev, now, scope, gpu, cmd => /kaggle/.test(cmd) && (busy.size > 0 || followers.size > 0) && /\b(quota|kernels (list|status|logs)|competitions submissions|config view|--version|kgkit\.kaggle_outputs)\b/.test(cmd))
   const shown = list.slice(0, 30)
   const files = new Map<number, string>()
   for (const p of shown) {
@@ -978,28 +1104,43 @@ export const register: Register = on => {
       const liveCard = ({ alias, k }: { alias: string; k: Kernel }) => {
         const L = lives[k.ref]
         const hasReading = L?.readAt !== undefined
+        // The session clock: the limit, the time left, and whether the script or the session has ended. Kaggle's
+        // status lags, so a card past its limit or with a closed log stops counting its run time.
+        const clk = clockOf(k, L, now)
+        const look = LOOK[clk.phase]
+        const border = clk.isNear || clk.isOver ? 'warning' : look.color
+        const notes = endNotes(clk, L, k.ref, now)
         // A quiet log says nothing: a slow step can print nothing for many minutes, and a reader on a dead connection
-        // reconnects by itself after SILENT_MS. Readings come on a timer (KG_MONITOR_S), so a gap in them is one.
-        const isStale = hasReading && now - (L?.readAt ?? 0) > STALE_MS
-        const runFor = L?.t !== undefined ? age(L.t) : age((now - (utc(k.lastRunTime) ?? now)) / 1000)
-        // Kaggle ends a CPU or GPU session at 12 h; a TPU one (no GPUs either) at 9 h, so the limit is said for GPUs.
-        const limit = L?.gpus?.length ? ' of 12h' : ''
+        // reconnects by itself after SILENT_MS. Readings come on a timer (KG_MONITOR_S), so a gap in them is one, while
+        // the script runs.
+        const isStale = hasReading && !clk.isScriptDone && !clk.isOver && !clk.isClosed && now - (L?.readAt ?? 0) > STALE_MS
+        const runFor = clk.ranMs !== undefined ? age(clk.ranMs / 1000) : age((now - (utc(k.lastRunTime) ?? now)) / 1000)
         const open = isOpen(cards, k.ref)
         const toggle = () => void setCards($, c => ({ ...c, open: { ...c.open, [k.ref]: !isOpen(c, k.ref) } }))
         const title = (
           <Button key={`card-${k.ref}`} plain onPress={toggle}>
             {open ? '▾ ' : '▸ '}
-            <Text color={RUNNING_BLUE} bold>
-              RUNNING
+            <Text color={look.color} dimColor={!look.color} bold>
+              {look.label}
             </Text>{' '}
             <Text bold>{k.ref}</Text>
             <Text dimColor>
               {' '}
-              · {alias} · {runFor}
-              {limit}
+              · {alias} · {runFor} ·{' '}
+            </Text>
+            <Text color={clk.isNear || clk.isOver ? 'warning' : undefined} dimColor={!clk.isNear && !clk.isOver}>
+              {limitText(clk)}
             </Text>
           </Button>
         )
+        // folded, a card says what happened, not what to do about it
+        const noteRows = (isShort: boolean) =>
+          notes.filter(n => !isShort || !n.isAdvice).map((n, i) => (
+            <Text key={`note-${i}`} color={n.tone} dimColor={!n.tone} wrap={isShort ? 'truncate' : 'wrap'}>
+              {isShort ? '  └ ' : ''}
+              {n.text}
+            </Text>
+          ))
         const P = L?.progress
 
         if (!open) {
@@ -1013,14 +1154,17 @@ export const register: Register = on => {
           const newest = L?.tail?.[L.tail.length - 1] ?? L?.lastLine
           // Closed or open, a running card keeps its border: the cards stay apart when several are folded.
           return (
-            <Box key={`live-${k.ref}`} flexDirection="column" borderStyle="round" borderColor={RUNNING_BLUE} paddingX={1}>
+            <Box key={`live-${k.ref}`} flexDirection="column" borderStyle="round" borderColor={border} borderDimColor={!border} paddingX={1}>
               <Box flexDirection="row" columnGap={1}>
                 <Box flexShrink={0}>{title}</Box>
                 <Text dimColor wrap="truncate">
                   {parts.length ? `· ${parts.join(' · ')}` : L?.heardAt ? '· no readings' : '· connecting...'}
                 </Text>
               </Box>
-              {newest ? (
+              {/* what it says of the end matters more than its last log line */}
+              {notes.length ? (
+                noteRows(true)
+              ) : newest ? (
                 <Text dimColor wrap="truncate">
                   {'  └ '}
                   {newest}
@@ -1033,8 +1177,9 @@ export const register: Register = on => {
         const H = L?.hist ?? []
         const St = L?.stats
         return (
-          <Box key={`live-${k.ref}`} flexDirection="column" borderStyle="round" borderColor={RUNNING_BLUE} paddingX={1}>
+          <Box key={`live-${k.ref}`} flexDirection="column" borderStyle="round" borderColor={border} borderDimColor={!border} paddingX={1}>
             {title}
+            {noteRows(false)}
             {P ? meter('prog', 'Prog', P.done / P.total, progressText(P), RUNNING_BLUE) : null}
             {hasReading && L ? (
               <Box flexDirection="column">

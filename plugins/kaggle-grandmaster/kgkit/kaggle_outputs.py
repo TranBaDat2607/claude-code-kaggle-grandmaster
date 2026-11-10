@@ -7,8 +7,10 @@ which files a stopped run kept.
 
 ``kgkit.gpu.session_output`` runs this module in a child process (``python -m kgkit.kaggle_outputs``, a JSON request on
 stdin, one JSON line on stdout) under the Kaggle CLI's interpreter, with VERBOSE scrubbed from the environment and a
-hard timeout; whatever the SDK prints goes to stderr. It must stay standard-library only at import time: that
-interpreter may have nothing but the Kaggle CLI installed.
+hard timeout; whatever the SDK prints goes to stderr. The kaggle-monitor pane runs it the same way, with ``"log": false``
+(the files alone), to say whether a session whose script has ended, or that looks over, has outputs to read while
+Kaggle's status still says RUNNING. It must stay standard-library only at import time: that interpreter may have
+nothing but the Kaggle CLI installed.
 """
 
 from __future__ import annotations
@@ -50,7 +52,8 @@ def main() -> int:
     try:
         req = json.loads(sys.stdin.read())
         with _client() as kc:
-            res["files"], res["more"], res["log"] = _lister(kc)(str(req["kernel"]), int(req.get("max_pages") or 5))
+            res["files"], res["more"], log = _lister(kc)(str(req["kernel"]), int(req.get("max_pages") or 5))
+        res["log"] = log if req.get("log", True) else ""  # the pane asks for the files alone
     except ImportError as e:
         res["error"] = f"this Python has no Kaggle SDK ({e}; pip install -U kaggle)"
     except SystemExit:  # authenticate() exits when no credentials are found

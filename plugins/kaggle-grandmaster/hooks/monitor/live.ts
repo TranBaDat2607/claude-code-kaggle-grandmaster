@@ -13,6 +13,12 @@ const TQDM_RE = /(?:^|\s)([^|:]{0,40}?)[:\s]*\d{1,3}%\|[^|]*\|\s*(\d+)\/(\d+)\b/
 const COUNT_RE = (word: string) => new RegExp(`\\b(${word})\\s*[:=#]?\\s*\\[?\\s*(\\d+)\\s*/\\s*(\\d+)\\b`, 'i')
 const WORDS = ['step|iter(?:ation)?|batch', 'epoch', 'fold']
 
+/** Kaggle's step after a script or notebook has run: the notebook converted to HTML for its viewer, then the outputs
+ * saved. (The run itself starts with a conversion `to notebook`.) */
+export const SCRIPT_END_RE = /\[NbConvertApp\]\s+(?:Converting notebook\s+\S+\s+to\s+html\b|Writing\s+\d+\s+bytes\s+to\s+__results__\.html)/i
+/** nbconvert or papermill stopping the run on a cell's error. */
+export const SCRIPT_ERROR_RE = /\b(?:CellExecutionError|PapermillExecutionError)\b|\[NbConvertApp\]\s+ERROR\b/
+
 /** Where one log line says the training is: a JSON record with step/of or epoch/epochs, a tqdm bar, or
  * `step 820/858`, `epoch 3/10`, `fold 2/5`. undefined when it says nothing countable. */
 export function parseProgress(line: string): Progress | undefined {
@@ -61,11 +67,25 @@ export class LiveTracker {
   private sums = { n: 0, cpu: 0, cpuN: 0, gpu: [] as number[], gpuN: 0, ramPeak: undefined as number | undefined, gmemPeak: [] as number[] }
   tail: string[] = []
   progress: Progress | undefined
+  /** When the kernel's clock started (Unix seconds): the earliest `t0` of its readings. */
+  t0: number | undefined
+  /** Its script has ended (SCRIPT_END_RE, SCRIPT_ERROR_RE); `t`: the kernel's time at the last reading before. */
+  scriptEnd: { t?: number; isError: boolean } | undefined
+  /** A reading came after an end this log showed: that was not the end (a script that converts a notebook itself). */
+  isResumed = false
   private lastT = 0
+  private readT: number | undefined
 
   reading(r: Reading) {
     const t = r.t ?? this.lastT
     this.lastT = t
+    if (r.t !== undefined) this.readT = r.t
+    if (r.t0 !== undefined) this.t0 = Math.min(this.t0 ?? r.t0, r.t0)
+    // The readings come from the script's own process: one after the "end" means it still runs.
+    if (this.scriptEnd) {
+      this.scriptEnd = undefined
+      this.isResumed = true
+    }
     const s: Sample = {
       t,
       cpu: r.cpu,
@@ -103,6 +123,10 @@ export class LiveTracker {
   line(text: string) {
     this.tail = [...this.tail, text].slice(-TAIL_MAX)
     this.progress = parseProgress(text) ?? this.progress
+    const isError = SCRIPT_ERROR_RE.test(text)
+    if (isError || SCRIPT_END_RE.test(text)) {
+      this.scriptEnd = { t: this.scriptEnd?.t ?? this.readT, isError: isError || !!this.scriptEnd?.isError }
+    }
   }
 
   stats(): LiveStats {

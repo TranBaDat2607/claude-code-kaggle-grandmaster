@@ -2843,6 +2843,15 @@ def test_session_output_says_why_kaggle_could_not_be_asked(outputs_sdk, tmp_path
     assert G.session_output("me/k") == (None, False, "", "the request to Kaggle timed out")
 
 
+def test_outputs_child_leaves_the_log_out_when_asked(outputs_sdk, plugin_root):
+    """#104: the kaggle-monitor pane asks for a session's files alone (`"log": false`), every few minutes while
+    Kaggle's status lags; one page of them, and whether more follow."""
+    r = subprocess.run([sys.executable, "-m", "kgkit.kaggle_outputs"], cwd=str(plugin_root), capture_output=True,
+                       text=True, timeout=60, input=json.dumps({"kernel": "me/k", "max_pages": 1, "log": False}))
+    assert json.loads(r.stdout.strip().splitlines()[-1]) == {"files": ["a.npy", "b.npy"], "more": True, "log": "",
+                                                               "error": None}, r.stderr
+
+
 # ----------------------------------------------------------------------------- #56 collect of a kernel gpu build did not make
 def _kernel_output(files=None, log=None, status="COMPLETE"):
     """Kaggle's side of `gpu collect me/k`: the status of its last session, and `kernels output` writing ``files``
