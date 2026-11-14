@@ -145,7 +145,8 @@ HINTS: list[tuple[str, str, str]] = [
      r"\bmonitor (my |the )?(kaggle|kernels?|notebooks?|training|runs?)\b",
      "To watch Kaggle from inside Claude Code (running kernels with their live CPU, GPU, RAM and disk, recent "
      "submissions, the GPU/TPU quota of every registered account, and switching the session's account), suggest the "
-     "user run `/kaggle-monitor`: it opens a pane beside the chat. Answer the question itself as well."),
+     "user run `/kaggle-monitor`: it opens a pane beside the chat. Answer the question itself as well: "
+     "`python -m kgkit gpu quota --all` reads the quota of every registered account."),
 ]
 COMPILED_HINTS = [(name, re.compile(rx, re.IGNORECASE), text) for name, rx, text in HINTS]
 

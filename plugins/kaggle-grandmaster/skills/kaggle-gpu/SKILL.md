@@ -23,7 +23,10 @@ Re-check the regime whenever an account is added, the quota resets, or the deadl
   reservation), lists what still holds hours, and warns when hours are about to expire unused. The live call is
   tried twice; when it still fails the report says `NOT LIVE`, why, and how old the cached value is, and counts the
   runs logged since against it (it cannot see sessions started elsewhere, such as the website or another machine:
-  run `gpu quota` again before committing hours on a cached figure).
+  run `gpu quota` again before committing hours on a cached figure). With several accounts registered in the Kaggle
+  pane (`~/.kaggle/kg_accounts.json`), `python -m kgkit gpu quota --all` reads each one's hours (as that account, never
+  printing a token) and the session brief lists them; runs still go to the active account, which the person switches
+  in the pane.
 - Per-session limit 12 h (GPU/CPU), 9 h (TPU). The push timeout `-t` (`--hours`) caps a run below that, and a
   capped run never burns more than its cap. A push without `-t` reserves the full session limit until the run is
   seen finished.
@@ -213,11 +216,11 @@ python -m kgkit gpu build --name stack --hours 2 --accelerator none --input-layo
 - Exploration budget = the rest. With measured cost per fold c, a screen costs ≈ c/2 quota-hours
   (2 per session) and a full K-fold promotion ≈ c·K/2. Plan about 4-6 screens per promotion.
 - Re-plan after every `collect`. Costs are measured, not guessed.
-- **Which regime** (section 1): count the hours of every registered account, not only the active one (the Kaggle
-  pane's Quota tab, or `kaggle quota` per account token). It is **time-bound** when those hours exceed what the
-  planned runs will spend before the reset (they would expire), or when one run takes >= ~6 h on one T4 and the
-  days left allow only a handful of such cycles. `gpu plan` prints the regime from the active account's quota, the
-  measured run lengths and the deadline, and lists the other registered accounts it cannot count.
+- **Which regime** (section 1): count the hours of every registered account, not only the active one
+  (`gpu quota --all`). It is **time-bound** when those hours exceed what the planned runs will spend before the reset
+  (they would expire), or when one run takes >= ~6 h on one T4 and the days left allow only a handful of such
+  cycles. `gpu plan` prints the regime from every account's quota (read live; `--cached` uses the last reading), the
+  measured run lengths and the deadline, and names any account whose quota it could not read.
 
 ## 5. When a run disappoints
 

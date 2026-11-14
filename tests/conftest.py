@@ -9,6 +9,8 @@ import pytest
 PLUGIN_ROOT = Path(__file__).resolve().parents[1] / "plugins" / "kaggle-grandmaster"
 sys.path.insert(0, str(PLUGIN_ROOT))
 os.environ.setdefault("KGKIT_OFFLINE", "1")  # no test asks Kaggle (kgkit status / adopt sync)
+# never the developer's own Kaggle pane registry (~/.kaggle/kg_accounts.json): a test that needs one writes its own
+os.environ["KGKIT_ACCOUNTS_FILE"] = str(Path(__file__).resolve().parent / "no-such-dir" / "kg_accounts.json")
 
 
 @pytest.fixture
