@@ -40,7 +40,7 @@ Kaggle submissions and GPU pushes still go through the plugin's hooks, which che
 | **Kaggle pane** | 1 mod | `/kaggle-monitor`: running kernels with live CPU / GPU / RAM / disk and what each GPU is doing, recent kernels and submissions, GPU/TPU quota for every account, multi-account token management ([below](#kaggle-pane-kaggle-monitor)) |
 | **`kgkit` toolkit** | 25 modules | Tested Python: leak-free folds, 35+ metrics, threshold/rounding optimisers, hill climbing / multi-level and residual stacking / library pruning, adversarial validation, leak-safe features, brute-force feature search, EDA red flags, experiment ledger with decisions + lineage, paired experiment comparison, fresh-split recheck, idea backlog, public-notebook review, competition pages and discussions, submission validation, Kaggle GPU/TPU pipeline, speed measurement (input-bound / compute-bound / idle, speed-up of a change) and slow-pattern checks, dataset download with per-file fallback, upload and third-party-text safety |
 | **Templates** | 5 + metadata | Tabular (LightGBM/XGBoost/CatBoost/HGB + linear/kNN/SVM/MLP, GPU option), timm image models, HF transformers (both resumable, with `--bench`), offline inference kernel, Kaggle-pane monitor cell for any notebook |
-| **Evals** | 48 cases | `claude plugin eval` suite with a no-plugin baseline arm |
+| **Evals** | 49 cases | `claude plugin eval` suite with a no-plugin baseline arm |
 
 ## How a competition flows
 
