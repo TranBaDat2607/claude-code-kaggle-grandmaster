@@ -2,7 +2,7 @@ import { expect, test } from 'claude-code/testing'
 
 import type { Kernel, KernelLive } from '../../types'
 import { describe, lastLine } from './describe'
-import { parseKgmon, parseQuota, status, utc } from './kaggle'
+import { accountsBrief, parseKgmon, parseQuota, status, utc } from './kaggle'
 import { HISTORY_MAX, LiveTracker, parseProgress, spark } from './live'
 import { etime, parseGpus } from './probe'
 import { age, clockOf, endNotes, limitText, runOf } from './session'
@@ -826,5 +826,135 @@ test("a run's cap from the run log: toasts as it nears and passes it, its script
   status = 'CANCELLED'
   await tick(60_000)
   expect(toasts[4]).toBe('Kaggle kernel u/train (main): CANCELLED; 2 output files were readable')
+  await $.session.end({ reason: 'other', sessionId: 's1', resume: { id: 's1' } })
+})
+
+test('the accounts line names every account, its hours, the reading and the reset; never a token', async () => {
+  const quotas = {
+    main: { value: [{ resource: 'GPU', usedH: 20.8, remainingH: 9.2, totalH: 30, refreshAt: '2026-11-14T00:00:00' }], fetchedAt: Date.UTC(2026, 10, 10, 16, 2) },
+    acc6: {
+      value: [
+        { resource: 'GPU', usedH: 0, remainingH: 30, totalH: 30, refreshAt: '2026-11-14T00:00:00' },
+        { resource: 'TPU', usedH: 0, remainingH: 20, totalH: 20 },
+      ],
+      fetchedAt: Date.UTC(2026, 10, 10, 16, 9),
+    },
+    acc7: { error: '401 Unauthorized' },
+  }
+  const list = [{ alias: 'main', user: 'me' }, { alias: 'acc6', user: 'u6' }, { alias: 'acc7' }]
+  const b = accountsBrief(list, 'main', quotas)!
+  expect(b.text).toContain('(read 2026-11-10 16:02 UTC; next weekly reset 2026-11-14 00:00 UTC)')
+  expect(b.text).toContain('main (active) 9.2h · acc6 30.0h (TPU 20.0h) · acc7 not read yet (401 Unauthorized); 39.2h in total')
+  expect(b.text).not.toContain('token_file')
+  // a few minutes of quota spent is no news; a whole hour, an account or a switch is
+  const spent = { ...quotas, main: { ...quotas.main, value: [{ ...quotas.main.value[0]!, remainingH: 9.0 }] } }
+  expect(accountsBrief(list, 'main', spent)!.key).toBe(b.key)
+  const hour = { ...quotas, main: { ...quotas.main, value: [{ ...quotas.main.value[0]!, remainingH: 8.1 }] } }
+  expect(accountsBrief(list, 'main', hour)!.key).not.toBe(b.key)
+  expect(accountsBrief(list, 'acc6', quotas)!.key).not.toBe(b.key)
+  expect(accountsBrief(list.slice(0, 1), 'main', quotas)).toBeUndefined() // one account: the session section says it
+})
+
+test('with the pane hidden every account is read and the model told once, then again on a change', async ($, on) => {
+  let now = Date.UTC(2026, 10, 10, 16)
+  const held = new Map<string, unknown>()
+  let fire = () => {}
+  const left: Record<string, number> = { me: 9.2, u6: 30 }
+  const reads: string[] = []
+  const until = async (what: string, ok: () => boolean | Promise<boolean>) => {
+    for (let i = 0; i < 2000; i++) {
+      if (await ok()) return
+      await sleep(1)
+    }
+    throw new Error(`never: ${what}`)
+  }
+  on('state.get', (_, e) => ({ value: held.has(e.key) ? { value: held.get(e.key), version: 1 } : { value: undefined, version: 0 } }))
+  on('state.set', (_, e) => {
+    held.set(e.key, e.value)
+    return { value: { isSet: true, version: 1 } }
+  })
+  on('command.register', (_, e) => ({ value: { command: e.name } }))
+  on('session.start', (_, e) => ({ cwd: e.cwd }))
+  on('session.end', (_, e) => ({ sessionId: e.sessionId }))
+  on('classic.UserPromptSubmit', () => ({}))
+  on('ui.panes', () => ({ value: [] })) // the pane is closed
+  on('ui.open', () => ({ value: { isPlaced: true } }))
+  on('command.run', () => ({ text: '' }))
+  on('ui.log', () => ({ value: undefined }))
+  on('ui.toast', () => ({ value: undefined }))
+  on('env.get', (_, e) => ({ value: e.name === 'HOME' ? '/home/u' : undefined }))
+  on('env.set', () => ({ value: {} }))
+  on('store.get', (_, e) => ({ value: e.key === 'active' ? 'main' : e.key === 'cli' ? ['/opt/kaggle'] : undefined }))
+  on('store.set', () => ({ value: undefined }))
+  on('clock.now', () => ({ value: now }))
+  on('clock.after', () => ({ value: undefined }))
+  on('clock.every', () => new Promise(resolve => (fire = () => resolve({ value: undefined }))))
+  let registry = JSON.stringify({ main: { user: 'me' }, acc6: { user: 'u6', token_file: '~/.kaggle/access_token_acc6' } })
+  const files = ['/home/u/.kaggle/access_token', '/home/u/.kaggle/access_token_acc6', '/home/u/.kaggle/access_token_acc7', '/opt/kaggle']
+  on('fs.exists', (_, e) => ({ value: files.includes(e.path) }))
+  on('fs.read', (_, e) => {
+    if (e.path === '/home/u/.kaggle/kg_accounts.json') return { value: registry }
+    throw new Error(`ENOENT: ${e.path}`)
+  })
+  on('fs.write', (_, e) => {
+    if (e.path === '/home/u/.kaggle/kg_accounts.json') registry = e.text
+    return { value: undefined }
+  })
+  on('process.run', (_, e) => {
+    const cmd = e.argv.join(' ')
+    const ran = (stdout: string) => ({ value: { exitCode: 0, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } })
+    if (cmd === '/opt/kaggle quota --format json') {
+      const user = String(e.init?.env?.KAGGLE_USERNAME)
+      reads.push(user)
+      const h = left[user] ?? 0
+      return ran(JSON.stringify([{ resource: 'GPU', used: `${30 - h}h`, remaining: `${h}h`, total: '30h', refreshAt: '2026-11-14T00:00:00' }]))
+    }
+    if (cmd.startsWith('/opt/kaggle kernels list')) return ran('[]')
+    if (cmd === '/opt/kaggle config view' && e.init?.env?.KAGGLE_API_TOKEN === '/home/u/.kaggle/access_token_acc7') {
+      return ran('- username: u7\n')
+    }
+    throw new Error('no such process in this test')
+  })
+  const told = async () => (await $.classic.UserPromptSubmit({ prompt: 'plan the next runs' })).additionalContext ?? []
+
+  await $.session.start({ cwd: '/ws', surface: 'terminal', isInteractive: true })
+  await until('both accounts read', () => reads.includes('me') && reads.includes('u6'))
+  await until('both readings held', () => Object.keys((held.get('quotas') as { value?: object } | undefined)?.value ?? {}).length === 2 &&
+    Object.values((held.get('quotas') as { value: Record<string, { value?: unknown }> }).value).every(q => q.value))
+  const first = await told()
+  expect(first.length).toBe(1)
+  expect(first[0]).toContain('main (active) 9.2h · acc6 30.0h; 39.2h in total')
+  expect(first[0]).not.toContain('access_token')
+  expect(await told()).toEqual([]) // unchanged: not repeated
+
+  // hidden, the quotas are read again every 30 min, not every 10
+  const n = reads.length
+  now += 11 * 60_000
+  fire()
+  await sleep(20)
+  expect(reads.length).toBe(n)
+  left.u6 = 18.5 // a run on acc6
+  now += 20 * 60_000
+  fire()
+  await until('a second reading', () => reads.length >= n + 2)
+  await until('the new value held', () => (held.get('quotas') as { value: Record<string, { value?: { remainingH: number }[] }> }).value.acc6?.value?.[0]?.remainingH === 18.5)
+  const again = await told()
+  expect(again[0]).toContain('acc6 18.5h')
+
+  // an account added in the pane: the next prompt says so, once, and its quota is read right away
+  left.u7 = 30
+  await $.command.run({ command: 'kaggle-monitor', args: 'accounts', origin: { kind: 'composer' }, presentation: { isFullscreen: false, columns: 100 } })
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  await ui.input({ key: 'alias-0', text: 'acc7' })
+  await ui.input({ key: 'token-0', text: '~/.kaggle/access_token_acc7' })
+  await ui.unmount()
+  await until('the registry saved', () => registry.includes('acc7'))
+  fire()
+  await until('acc7 read', () => reads.includes('u7'))
+  await until('acc7 held', () => !!(held.get('quotas') as { value: Record<string, { value?: unknown }> }).value.acc7?.value)
+  const added = await told()
+  expect(added[0]).toContain('Kaggle account "acc7" (u7) was added in the Kaggle pane at 16:31 UTC')
+  expect(added[0]).toContain('acc7 30.0h')
+  expect(await told()).toEqual([])
   await $.session.end({ reason: 'other', sessionId: 's1', resume: { id: 's1' } })
 })
