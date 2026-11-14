@@ -2,7 +2,7 @@
 
 Contents: [Measuring](#measuring) · [Precision and kernels](#precision-and-kernels) ·
 [Memory](#memory-bigger-batch-or-bigger-model) · [Input pipeline](#input-pipeline) ·
-[Two GPUs](#two-gpus-fold-parallel-vs-ddp-on-2xt4) · [Schedules that save epochs](#schedules-that-save-epochs) ·
+[Two GPUs](#two-gpus-fold-parallel-vs-ddp-on-2xt4) · [DDP checklist](#ddp-checklist-for-your-own-loop) · [Schedules that save epochs](#schedules-that-save-epochs) ·
 [Stalls in the step](#stalls-in-the-step)
 
 ## Measuring
@@ -97,12 +97,39 @@ The usual culprit: a Kaggle GPU session has 4 CPU cores for two GPUs.
 
 ## Two GPUs: fold-parallel vs DDP on 2xT4
 
+Both cost the same GPU-hours per trained model. They differ in how soon one result arrives:
+
 - **Fold-parallel (the runner's default):** one fold per GPU, no communication, nearly 2x throughput, and each
-  process can fail or resume on its own. Best when you train >= 2 folds or 2 screens.
-- **DDP** (`torchrun --nproc_per_node 2`, a command without `{fold}`): for a single big model whose batch does not fit
-  one T4, or a single full-data fit. Expect 1.6-1.8x (PCIe, no NVLink). The command then owns both GPUs, and the
-  runner gives it the whole session.
+  process can fail or resume on its own. Best when quota binds and you train >= 2 folds or 2 screens: two results
+  per session, each after the full single-GPU time.
+- **DDP** (`torchrun --nproc_per_node 2`, a command without `{fold}`): one model on both GPUs, so its result comes
+  1.6-1.9x sooner than on one GPU (PCIe, no NVLink; LoRA syncs few gradients and gets closer to 1.9x than a full
+  fine-tune). Use it for a single big model whose batch does not fit one T4, a single full-data fit, and **screens
+  when wall time binds** (`kaggle-gpu` section 1: quota to spare, or runs of ~6 h+ with few cycles left before the
+  deadline). The command then owns both GPUs, and the runner gives it the whole session.
+- To keep a DDP screen comparable with one-GPU runs, keep the effective batch (micro-batch x accumulation x GPUs):
+  halve the accumulation steps, keep the learning rate and the schedule.
 - TPU v5e-8 when the GPU quota is gone: `kaggle-gpu` section 6 (bf16, XLA, the queue).
+
+### DDP checklist for your own loop
+
+A rank that takes a different branch from the other waits for it forever in the next collective (the session then
+burns until its cap). So every decision that ends, skips or reshapes a step must be the same on every rank:
+
+- **Stop decisions agree.** Early stopping, the deadline and pruning: all-reduce a "done" flag (MAX) and stop
+  together. `kgkit.budget.TrainBudget` does this itself under `torch.distributed`: every rank calls `end_epoch` and
+  gets the same answer (a timeout if any rank is short of time; prune as rank 0 decides from its score).
+- **One learning-rate schedule.** A schedule driven by elapsed time or a measured step count is computed on rank 0
+  and broadcast; ranks that drift apart in LR drift apart in parameters.
+- **No per-rank recovery.** Skipping a batch on OOM, `try/except` around a step, or restarting one process
+  deadlocks the other. Size the batch so it fits, or fail the whole run.
+- **`model.no_sync()` on accumulation steps**, so gradients are all-reduced once per optimizer step.
+- **`DistributedSampler(..., shuffle=True)` with `sampler.set_epoch(epoch)`** for training; validate on rank 0 over
+  the full set (or shard and all-gather in order) so the score is the one-GPU score.
+- **Only rank 0 writes**: checkpoints, OOF/test predictions, curves, status, the ledger (`if tb.is_main:`), then
+  `dist.barrier()` before any rank reads them.
+- **HF Trainer / accelerate** handle the sampler, `no_sync` and rank-0 saving; a custom callback that stops early
+  must still agree across ranks.
 
 ## Schedules that save epochs
 

@@ -30,9 +30,11 @@ loop: it has the measurement, the per-domain how-to and what runs on which GPU.
   the loader is the bottleneck.
 - `torch.compile` for runs over ~20 min on Linux with a T4 or newer (not P100, not native Windows).
 - Gradient accumulation for a large effective batch; gradient checkpointing only to fit a better model.
-- Kaggle 2×T4: run two folds in parallel, one per GPU (simpler, nearly 2× throughput), or DDP
-  (`torchrun --nproc_per_node 2`) for one big model. No bf16 on T4/P100. Remote runs, quota and resume: skill
-  `kaggle-gpu`.
+- Kaggle 2×T4: run two folds in parallel, one per GPU (simpler, nearly 2× throughput, two results per session), or
+  DDP (`torchrun --nproc_per_node 2`) for one model on both GPUs: a big model, or a result 1.6-1.9× sooner when
+  wall time rather than quota binds (runs of ~6 h+, quota to spare, deadline close). Same GPU-hours either way;
+  DDP needs a loop whose ranks agree on every stop (compute-efficiency `training-loop.md`, DDP checklist). No bf16
+  on T4/P100. Remote runs, quota, the two regimes and resume: skill `kaggle-gpu`.
 - Lower resolution / shorter max_len / subset of data for exploration; scale for finals.
 
 ## Debugging checklist (when the score is bad)

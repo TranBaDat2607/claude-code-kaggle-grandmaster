@@ -110,7 +110,9 @@ ROUTES: list[tuple[str, str]] = [
                                r"nan loss|batch size|gradient"),
     ("kaggle-gpu", r"\bgpu (quota|hours?|budget|time)|\bquota\b|\bp100\b|\bt4s?\b|accelerator|"
                    r"\b(train|run)\w*\b.{0,40}\bon kaggle\b|kaggle(?:'s)? (gpus?|notebooks?|kernels?)\b.{0,40}\btrain|"
-                   r"remote(ly)? train|session (limit|timeout)"),
+                   r"remote(ly)? train|session (limit|timeout)|"
+                   r"\b(several|multiple|two|three|four|five|six|seven|eight|nine|\d+) (kaggle )?accounts\b|"
+                   r"wall[- ]?(clock|time)|time to (the |a )?(first |next )?result"),
     ("competition-recon", r"public (notebooks?|kernels?)|top(-voted)? notebooks?|\bdiscussions?\b|write-?ups?|"
                           r"prior art|\brecon\b|reproduce (a|the|this) (notebook|kernel)|"
                           r"(competition|the) rules\b|rules page|evaluation page|data description"),
@@ -143,7 +145,8 @@ HINTS: list[tuple[str, str, str]] = [
      r"\bmonitor (my |the )?(kaggle|kernels?|notebooks?|training|runs?)\b",
      "To watch Kaggle from inside Claude Code (running kernels with their live CPU, GPU, RAM and disk, recent "
      "submissions, the GPU/TPU quota of every registered account, and switching the session's account), suggest the "
-     "user run `/kaggle-monitor`: it opens a pane beside the chat. Answer the question itself as well."),
+     "user run `/kaggle-monitor`: it opens a pane beside the chat. Answer the question itself as well: "
+     "`python -m kgkit gpu quota --all` reads the quota of every registered account."),
 ]
 COMPILED_HINTS = [(name, re.compile(rx, re.IGNORECASE), text) for name, rx, text in HINTS]
 

@@ -1,12 +1,19 @@
 ---
 name: kaggle-gpu
-description: Training on Kaggle's free GPUs and TPUs under their weekly quotas — choosing T4x2, P100, TPU v5e-8 or a CPU kernel, remote training runs with kgkit gpu (build/push/wait/collect), one-fold screens with pruning, resuming past the session limit, porting to torch_xla, and budgeting accelerator hours until the deadline. Use when training on Kaggle notebooks/kernels, planning or rationing GPU/TPU quota, choosing an accelerator, or when a remote run was slow, idle, queued, timed out or wasted hours.
+description: Training on Kaggle's free GPUs and TPUs under their weekly quotas — choosing T4x2, P100, TPU v5e-8 or a CPU kernel, remote training runs with kgkit gpu (build/push/wait/collect), one-fold screens with pruning, resuming past the session limit, porting to torch_xla, and budgeting accelerator hours until the deadline, and telling whether GPU-hours or wall time is the limit (several accounts, runs that fill a session: one model on both T4s with DDP). Use when training on Kaggle notebooks/kernels, planning or rationing GPU/TPU quota (one account or several), choosing an accelerator, or when a remote run was slow, idle, queued, timed out or wasted hours.
 ---
 
 # Training on Kaggle GPUs
 
-The quota is the scarce resource: score gained per GPU-hour is what you optimise, not wall time.
-Unused quota expires at the weekly reset, so hours you don't spend are also lost.
+Two things run out: GPU-hours (a weekly quota per account) and wall time (the days to the deadline, at ~12 h per
+session). Find out which one binds before you plan (section 4, `gpu plan` prints it):
+- **Quota-bound** (the usual case with one account): optimise score per GPU-hour.
+- **Time-bound**: the quota across *all* registered accounts is more than the planned runs can spend before the
+  reset or the deadline, or one experiment fills most of a session and only a few decide-then-run cycles remain.
+  Optimise time to the next result instead (section 3, item 10). Unused quota expires at the weekly reset, so hours
+  you don't spend are lost anyway.
+
+Re-check the regime whenever an account is added, the quota resets, or the deadline gets close.
 
 ## 1. Facts to work from (verify live, they change)
 
@@ -16,7 +23,10 @@ Unused quota expires at the weekly reset, so hours you don't spend are also lost
   reservation), lists what still holds hours, and warns when hours are about to expire unused. The live call is
   tried twice; when it still fails the report says `NOT LIVE`, why, and how old the cached value is, and counts the
   runs logged since against it (it cannot see sessions started elsewhere, such as the website or another machine:
-  run `gpu quota` again before committing hours on a cached figure).
+  run `gpu quota` again before committing hours on a cached figure). With several accounts registered in the Kaggle
+  pane (`~/.kaggle/kg_accounts.json`), `python -m kgkit gpu quota --all` reads each one's hours (as that account, never
+  printing a token) and the session brief lists them; runs still go to the active account, which the person switches
+  in the pane.
 - Per-session limit 12 h (GPU/CPU), 9 h (TPU). The push timeout `-t` (`--hours`) caps a run below that, and a
   capped run never burns more than its cap. A push without `-t` reserves the full session limit until the run is
   seen finished.
@@ -179,6 +189,22 @@ python -m kgkit gpu build --name stack --hours 2 --accelerator none --input-layo
    of the current best (always useful as a baseline OOF and ensemble member). In later weeks, top up
    the last hours with queued, already-validated work (extra folds/seeds of ensemble members, the
    final-resolution variant, pseudo-label rounds). Never start untested exploration just to burn hours.
+10. **Time-bound: one model on both T4s.** When a run trains for ~6 h or more on one T4 and wall time binds,
+    screen each idea as one model on both GPUs (DDP, `torchrun --nproc_per_node 2` in a `--cmd` without `{fold}`).
+    It costs the same GPU-hours as two one-GPU runs side by side, but the result comes 1.6-1.9x sooner (~6-7 h
+    instead of ~12 h), so about twice as many ideas get screened before the deadline.
+    - Keep the effective batch (micro-batch x accumulation x GPUs) and the schedule of the one-GPU recipe: halve
+      the accumulation (or, without accumulation, the per-GPU batch), not the learning rate, so the screen stays
+      comparable with earlier runs.
+    - Compare against a one-copy control run the same way, never against an average of two copies (averaging
+      removes seed noise the screen still has).
+    - Spend the extra copies or seeds (two one-GPU runs in one session, as before) only on promoted ideas.
+    - Put the trade-off to the user when you plan recurring runs, with the numbers: "two copies per session:
+      steadier result, ~12 h" vs "one copy on both GPUs: ~6-7 h, noisier, twice the ideas before the deadline".
+    - The training loop must be DDP-safe (checklist in `compute-efficiency`,
+      [training-loop.md](../compute-efficiency/references/training-loop.md#ddp-checklist-for-your-own-loop)).
+      `TrainBudget` agrees across ranks by itself; save, log and write OOFs on rank 0 only (`tb.is_main`).
+      The plugin's image and transformer templates run one process per fold, not DDP.
 
 ## 4. Budgeting until the deadline (`python -m kgkit gpu plan`)
 
@@ -190,6 +216,11 @@ python -m kgkit gpu build --name stack --hours 2 --accelerator none --input-layo
 - Exploration budget = the rest. With measured cost per fold c, a screen costs ≈ c/2 quota-hours
   (2 per session) and a full K-fold promotion ≈ c·K/2. Plan about 4-6 screens per promotion.
 - Re-plan after every `collect`. Costs are measured, not guessed.
+- **Which regime** (section 1): count the hours of every registered account, not only the active one
+  (`gpu quota --all`). It is **time-bound** when those hours exceed what the planned runs will spend before the reset
+  (they would expire), or when one run takes >= ~6 h on one T4 and the days left allow only a handful of such
+  cycles. `gpu plan` prints the regime from every account's quota (read live; `--cached` uses the last reading), the
+  measured run lengths and the deadline, and names any account whose quota it could not read.
 
 ## 5. When a run disappoints
 
@@ -198,6 +229,7 @@ python -m kgkit gpu build --name stack --hours 2 --accelerator none --input-layo
 | Finding | Fix |
 |---|---|
 | second T4 idle | ≥ 2 tasks per session (2 folds, or `--extra-job`), or DDP |
+| one result per ~12 h session, deadline close | time-bound: DDP for screens (section 3, item 10) |
 | GPU util < 60 % | input-bound: pre-resize, uint8, GPU augmentation, fewer CPU transforms, `persistent_workers`. Confirm with the script's `--bench` before the next push |
 | too short to diagnose | a smoke/dev run (< 20 min) is mostly start-up; judge throughput on a longer run |
 | deadline hit | `--resume-from`; next time raise `--hours` or lower epochs/res |

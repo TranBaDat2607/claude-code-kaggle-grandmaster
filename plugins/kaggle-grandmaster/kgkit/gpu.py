@@ -7,6 +7,7 @@ busy, or one process per TPU chip; deadline-aware, resumable), and keeps ``.kagg
 so every accelerator-hour can be traced to the experiment it bought::
 
     python -m kgkit gpu quota                                   # live GPU + TPU quota, reset countdown
+    python -m kgkit gpu quota --all                             # every account registered in the Kaggle pane
     python -m kgkit gpu build --name cnx384 --hours 6 \\
         --cmd "python src/train_image.py --name cnx384 --img-size 384 --folds {fold}"
     python -m kgkit gpu push .kaggle-gm/build/cnx384-train      # asks nothing; check quota first
@@ -54,6 +55,7 @@ KGKIT_DIR = Path(__file__).resolve().parent
 RUNNER = KGKIT_DIR / "kaggle_gpu_runner.py"
 RUNS_FILE = "gpu_runs.jsonl"
 QUOTA_FILE = "gpu_quota.json"
+ACCOUNTS_QUOTA_FILE = "gpu_quota_accounts.json"  # every account registered in the Kaggle pane (`gpu quota --all`)
 SESSION_LIMIT_H = 12.0
 SESSION_LIMITS = {"GPU": 12.0, "TPU": 9.0, "CPU": 12.0}
 # Batch sessions an account may run at once; a push beyond this fails ("Maximum batch GPU session count
@@ -219,24 +221,25 @@ def kaggle_python() -> str | None:
     return py if PY_NAME_RE.fullmatch(Path(py).name) and Path(py).is_file() else None
 
 
-def _run_cli(cmd: list[str], timeout: float) -> subprocess.CompletedProcess:
+def _run_cli(cmd: list[str], timeout: float, env: dict[str, str] | None = None) -> subprocess.CompletedProcess:
     return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, encoding="utf-8", errors="replace",
-                          env=safety.kaggle_env())
+                          env=env or safety.kaggle_env())
 
 
-def run_kaggle(args: list[str], timeout: float = 600) -> subprocess.CompletedProcess:
+def run_kaggle(args: list[str], timeout: float = 600, env: dict[str, str] | None = None) -> subprocess.CompletedProcess:
     """Run the Kaggle CLI: through `kaggle_cli.py` under the CLI's own Python when `kaggle_python` can tell it, so a
-    refused request shows Kaggle's reason; otherwise as `KGKIT_KAGGLE` (used as given), or plain."""
+    refused request shows Kaggle's reason; otherwise as `KGKIT_KAGGLE` (used as given), or plain. ``env``: the whole
+    environment (`account_env`), default `safety.kaggle_env()`."""
     py = None if os.environ.get("KGKIT_KAGGLE") else kaggle_python()
     if py and py not in _PLAIN:
         try:
-            r = _run_cli([py, str(Path(KC.__file__).resolve()), *args], timeout)
+            r = _run_cli([py, str(Path(KC.__file__).resolve()), *args], timeout, env)
         except OSError:
             r = None
         if r is not None and r.returncode != KC.NO_CLI:
             return r
         _PLAIN.add(py)
-    return _run_cli([*kaggle_cmd(), *args], timeout)
+    return _run_cli([*kaggle_cmd(), *args], timeout, env)
 
 
 _USERNAME: dict[str, str | None] = {}
@@ -561,7 +564,7 @@ def quota_line(root: str | Path) -> str:
     q = cached_quota(root)
     active = active_runs(root)
     if q is None and not active:
-        return ""
+        return accounts_line(root)
     s = ""
     if q is not None:
         avail = available_hours(root, q)
@@ -579,7 +582,41 @@ def quota_line(root: str | Path) -> str:
     if active:
         s += (f" Remote runs not yet seen finished: {', '.join(run_label(r) for r in active)} "
               "(`python -m kgkit gpu status` checks them and releases their quota reservations).")
-    return s.strip()
+    acc = accounts_line(root)
+    return f"{s.strip()} {acc}".strip()
+
+
+def accounts_line(root: str | Path) -> str:
+    """The registered accounts and their cached GPU hours (no network), for the session brief; '' with one account
+    or none."""
+    reg = registry()
+    if len(reg) < 2:
+        return ""
+    accs = cached_account_quotas(root)
+    if not accs:
+        return (f"{len(reg)} Kaggle accounts are registered in the Kaggle pane ({', '.join(list(reg)[:8])}); their "
+                "quota is not read yet: `python -m kgkit gpu quota --all` before planning GPU runs.")
+    parts, total, unread, oldest, reset = [], 0.0, [], None, None
+    for alias in reg:
+        q = (accs.get(alias) or {}).get("quota")
+        if not q:
+            unread.append(alias)
+            continue
+        parts.append(f"{alias} {q['remaining_h']:.1f}h")
+        total += q["remaining_h"]
+        t = _parse_time(q.get("fetched_at"))
+        oldest = t if oldest is None or (t and t < oldest) else oldest
+        r = _parse_time(q.get("refresh_at"))
+        reset = r if reset is None or (r and r < reset) else reset
+    s = (f"Registered Kaggle accounts, GPU hours left (`gpu quota --all`, read "
+         f"{oldest.strftime('%Y-%m-%d %H:%M UTC') if oldest else 'at an unknown time'}): " + " · ".join(parts)
+         + (f"; not read: {', '.join(unread)}" if unread else "") + f" = {total:.1f}h in total")
+    if reset is not None:
+        h = (reset - _now()).total_seconds() / 3600
+        s += f", next reset in {h:.0f}h"
+        if 0 < h <= 36 and total >= 1:
+            s += " - USE IT OR LOSE IT across the accounts"
+    return s + ". Runs go to the active account; the person switches it in the Kaggle pane."
 
 
 def resets_before(q: dict, deadline: str | None) -> int:
@@ -2199,6 +2236,221 @@ def run_table(root: str | Path | None = None, n: int = 20) -> str:
     return "\n".join(lines)
 
 
+def accounts_file() -> Path:
+    """The Kaggle pane's account registry (``/kaggle-monitor``): alias -> username and token file
+    (``KGKIT_ACCOUNTS_FILE`` overrides it)."""
+    return Path(os.environ.get("KGKIT_ACCOUNTS_FILE") or Path.home() / ".kaggle" / "kg_accounts.json")
+
+
+def registry() -> dict[str, dict]:
+    """The registered accounts, alias -> entry (``user``, ``token_file``); {} when there is no registry or it cannot be
+    read. A token file's path is used to run the CLI as that account, never printed, and its content never read."""
+    try:
+        reg = json.loads(accounts_file().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return {str(a): v for a, v in reg.items() if isinstance(v, dict)} if isinstance(reg, dict) else {}
+
+
+def other_accounts(me: str | None) -> list[str]:
+    """Aliases of the registered Kaggle accounts other than ``me`` (the active username, when known)."""
+    users = {a: v.get("user") for a, v in registry().items()}
+    if me and me in users.values():
+        return [a for a, u in users.items() if u != me]
+    return list(users)
+
+
+def account_env(entry: dict) -> dict[str, str]:
+    """The environment that runs the Kaggle CLI as a registered account, as the Kaggle pane does: KAGGLE_API_TOKEN at
+    its token file (``token_file``, else ``~/.kaggle/access_token``) and KAGGLE_USERNAME its user."""
+    env = safety.kaggle_env()
+    tok = entry.get("token_file")
+    path = Path(os.path.expanduser(tok.strip())) if isinstance(tok, str) and tok.strip() else (
+        Path.home() / ".kaggle" / "access_token")
+    if path.is_file():
+        env["KAGGLE_API_TOKEN"] = str(path)
+    else:  # no token file (a kaggle.json login): the CLI's own default
+        env.pop("KAGGLE_API_TOKEN", None)
+    if entry.get("user"):
+        env["KAGGLE_USERNAME"] = str(entry["user"])
+    else:
+        env.pop("KAGGLE_USERNAME", None)
+    return env
+
+
+def accounts_quota_path(root: Path) -> Path:
+    return root / S.STATE_DIR / ACCOUNTS_QUOTA_FILE
+
+
+def cached_account_quotas(root: str | Path) -> dict[str, dict]:
+    """alias -> {"user", "quota" (as `parse_quota`, rolled over past a reset; None if never read), "error"} from the
+    last `gpu quota --all`, for the accounts still registered."""
+    try:
+        data = json.loads(accounts_quota_path(Path(root)).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    reg = registry()
+    out = {}
+    for alias, rec in (data.get("accounts") or {}).items() if isinstance(data, dict) else []:
+        if alias in reg and isinstance(rec, dict):
+            q = rec.get("quota")
+            out[alias] = {**rec, "quota": _rolled(q) if isinstance(q, dict) else None}
+    return out
+
+
+def fetch_account_quotas(root: str | Path | None = None) -> dict[str, dict]:
+    """Every registered account's quota from the Kaggle API (one `kaggle quota` per account, 4 at a time), cached in
+    .kaggle-gm/gpu_quota_accounts.json. An account whose call fails keeps its last reading, with the error."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    root = _root(root)
+    reg = registry()
+    if not reg:
+        return {}
+    old = cached_account_quotas(root)
+
+    def one(item):
+        alias, entry = item
+        try:
+            r = run_kaggle(["quota", "--format", "json"], timeout=60, env=account_env(entry))
+            q = parse_quota(r.stdout) if r.returncode == 0 else None
+            why = None if q else (_cli_failure(r) if r.returncode else "no GPU row in its output")
+        except (OSError, subprocess.SubprocessError) as e:
+            q, why = None, f"could not run the Kaggle CLI ({type(e).__name__})"
+        prev = (old.get(alias) or {}).get("quota")
+        return alias, {"user": entry.get("user"), "quota": q or prev, "error": why}
+
+    with ThreadPoolExecutor(max_workers=4) as ex:
+        out = dict(ex.map(one, reg.items()))
+    p = accounts_quota_path(root)
+    try:
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(json.dumps({"fetched_at": _iso(_now()), "accounts": out}, indent=1), encoding="utf-8")
+    except OSError:
+        pass
+    return {a: {**v, "quota": _rolled(v["quota"]) if v.get("quota") else None} for a, v in out.items()}
+
+
+def accounts_report(root: str | Path | None = None, refresh: bool = True) -> str:
+    """`gpu quota --all`: GPU and TPU hours left on every registered account, the total and the next reset."""
+    root = _root(root)
+    if not registry():
+        return (f"No accounts registered ({accounts_file().name} not found in ~/.kaggle): register them in the Kaggle "
+                "pane (/kaggle-monitor accounts). `python -m kgkit gpu quota` shows the active account.")
+    accs = fetch_account_quotas(root) if refresh else cached_account_quotas(root)
+    me = kaggle_username(probe=False)
+    lines = [f"Registered Kaggle accounts ({len(accs)}), hours left this week:"]
+    gpu = tpu = 0.0
+    resets = []
+    for alias, rec in accs.items():
+        q = rec.get("quota")
+        mark = " (active)" if me and rec.get("user") == me else ""
+        if not q:
+            lines.append(f"  {alias}{mark}: unknown ({rec.get('error') or 'never read'})")
+            continue
+        t = tpu_of(q)
+        gpu += q["remaining_h"]
+        tpu += t["remaining_h"] if t else 0.0
+        if _parse_time(q.get("refresh_at")):
+            resets.append(_parse_time(q.get("refresh_at")))
+        when, age = _when(q)
+        lines.append(f"  {alias}{mark}: GPU {q['remaining_h']:.1f}h of {q['total_h']:.0f}h"
+                     + (f", TPU {t['remaining_h']:.1f}h" if t else "")
+                     + (f" (cached {when}, {age} old" + (f"; read failed: {rec['error']}" if rec.get("error") else "")
+                        + ")" if not refresh or rec.get("error") else "")
+                     + (" - reset passed since, full week counted" if q.get("stale_reset") else ""))
+    lines.append(f"Total: GPU {gpu:.1f}h, TPU {tpu:.1f}h left across accounts"
+                 + (f"; next reset {_iso(min(resets))}" if resets else "") + ".")
+    lines.append("Runs go to the active account; switch in the Kaggle pane (/kaggle-monitor use <alias>), never by "
+                 "changing KAGGLE_API_TOKEN yourself.")
+    return "\n".join(lines)
+
+
+def run_lengths(root: str | Path, n: int = 5) -> list[float]:
+    """Session hours of the last ``n`` ended GPU runs that trained for at least an hour (smoke and bench runs left
+    out): how long one experiment keeps a session busy."""
+    hs = [session_hours(r) for r in runs(root) if run_resource(r) == "GPU" and r.get("status") in ENDED]
+    return [h for h in hs if h is not None and h >= 1.0][-n:]
+
+
+TIME_BOUND_RUN_H = 6.0  # a run this long on one T4 leaves only a few decide-then-run cycles a week
+
+
+def regime_lines(root: str | Path, hours: float, days: float, others: dict[str, float | None], weekly: float,
+                 resets: int) -> list[str]:
+    """Quota-bound or time-bound (skill kaggle-gpu, section 1): can the GPU-hours until the deadline keep a session
+    running nonstop, and does one run fill most of a session? ``hours`` counts the active account; ``others`` are the
+    other registered accounts with their GPU-hours until the deadline (`gpu quota --all`), None where never read."""
+    known = {a: h for a, h in others.items() if h is not None}
+    if known:
+        lines = [f"Other registered accounts: {len(known)} read ("
+                 + ", ".join(f"{a} ~{h:.0f}h" for a, h in list(known.items())[:8])
+                 + (", ..." if len(known) > 8 else "") + " until the deadline)."]
+        hours += sum(known.values())
+    else:
+        lines = []
+    others = [a for a, h in others.items() if h is None]
+    lens = sorted(run_lengths(root))
+    run_h = lens[len(lens) // 2] if lens else None
+    nonstop = max(0.0, days * 24)
+
+    def bound(h: float) -> str:
+        if h < nonstop:
+            return "QUOTA-BOUND"
+        return "TIME-BOUND" if run_h is None or run_h >= TIME_BOUND_RUN_H else "QUOTA TO SPARE"
+
+    reg = bound(hours)
+    if run_h is None:
+        run = "no GPU run of an hour or more measured yet"
+    else:
+        cycles = nonstop / run_h if run_h else 0
+        run = (f"one run takes ~{run_h:.1f} h (median of {len(lens)} measured GPU session(s)), "
+               f"so ~{cycles:.0f} decide-then-run cycle(s) are left")
+    scope = " (without the unread accounts)" if others and known else " (this account only)" if others else ""
+    where = f"across {len(known) + 1} accounts" if known else "on this account"
+    lines.append(f"Regime{scope}: {reg}. ~{hours:.0f} GPU-hours {where} vs {nonstop:.0f} h of wall time to the "
+                 f"deadline (one session running nonstop); {run}.")
+    if others:
+        low, high = hours + len(others) * resets * weekly, hours + len(others) * (resets + 1) * weekly
+        shown = ", ".join(others[:8]) + (", ..." if len(others) > 8 else "")
+        lines.append(f"Not counted: {len(others)} other registered account(s) ({shown}, from "
+                     "~/.kaggle/kg_accounts.json), quota never read. "
+                     f"With them it is ~{low:.0f}-{high:.0f} GPU-hours (their future weeks, plus this week's if "
+                     "unused): `python -m kgkit gpu quota --all` reads every account's quota before planning." +
+                     (f" With them the regime is {bound(low)}." if bound(low) == bound(high) != reg else
+                      f" The regime depends on them: {bound(low)} at ~{low:.0f} h, {bound(high)} at ~{high:.0f} h."
+                      if bound(low) != bound(high) else ""))
+        reg = bound(low) if bound(low) == bound(high) else f"{bound(low)} or {bound(high)}"
+    if "TIME-BOUND" in reg:
+        lines.append(("Time-bound" if reg == "TIME-BOUND" else "If time-bound") +
+                     ": optimise time to the next result, not score per GPU-hour. Run each screen (or final-week "
+                     "model) as one model on both T4s (DDP, `torchrun --nproc_per_node 2`: the result 1.6-1.9x "
+                     "sooner for the same GPU-hours), keep the effective batch of the one-GPU recipe, train extra "
+                     "copies/seeds only for promoted ideas, and put this trade-off to the user (skill kaggle-gpu, "
+                     "section 3 item 10).")
+    elif "QUOTA TO SPARE" in reg:
+        lines.append("Quota to spare and short runs: wall time is not the limit either. Run more screens side by "
+                     "side (both T4s, two sessions per account), not longer ones.")
+    elif run_h is not None and run_h >= TIME_BOUND_RUN_H:
+        lines.append("Quota-bound: score per GPU-hour, both T4s on separate folds/screens. Re-check the regime when an "
+                     "account is added or the quota resets.")
+    return lines
+
+
+def _other_hours(root: Path, refresh: bool, deadline: str) -> dict[str, float | None]:
+    """The other registered accounts' GPU-hours until the deadline: this week's left plus a full week per reset
+    before it; None for an account whose quota was never read. Read live with ``refresh``, else from the cache."""
+    others = other_accounts(kaggle_username(probe=refresh))
+    if not others:
+        return {}
+    accs = fetch_account_quotas(root) if refresh else cached_account_quotas(root)
+    out: dict[str, float | None] = {}
+    for a in others:
+        q = (accs.get(a) or {}).get("quota")
+        out[a] = (q["remaining_h"] + resets_before(q, deadline) * (q.get("total_h") or 30.0)) if q else None
+    return out
+
+
 def plan(root: str | Path | None = None, refresh: bool = True, deadline: str | None = None) -> str:
     """Budget the GPU hours left until the deadline (weekly resets, final-week reserve, measured costs)."""
     root = _root(root)
@@ -2219,6 +2471,7 @@ def plan(root: str | Path | None = None, refresh: bool = True, deadline: str | N
         days = (dl - now).total_seconds() / 86400
         lines.append(f"Until the deadline ({dl.date()}, {days:.1f} days): {avail_now:.1f}h now + {resets} weekly "
                      f"reset(s) x {weekly:.0f}h = ~{total:.0f} GPU-hours in total.")
+        lines += regime_lines(root, total, days, _other_hours(root, refresh, deadline), weekly, resets)
         if st and st.code_competition:
             lines.append("Code competition: committing each GPU inference notebook version spends your quota "
                          "(it runs on the public test) - keep a few hours for the final inference kernels and "

@@ -24,6 +24,7 @@ import {
   type Reading,
   type Registry,
   accountEnv,
+  accountsBrief,
   accountsOf,
   copyToken,
   entryFor,
@@ -58,6 +59,8 @@ const COMMAND: CommandSpec = {
 const TITLE = 'Kaggle'
 const TICK_MS = 3000
 const QUOTA_MS = 10 * 60_000
+/** Every account's quota is read at this pace with the pane hidden, so the model's account line stays current. */
+const QUOTA_HIDDEN_MS = 30 * 60_000
 const KERNELS_BUSY_MS = 60_000
 const KERNELS_IDLE_MS = 5 * 60_000
 /**
@@ -122,6 +125,9 @@ function bar(frac: number, width: number): string {
   const full = Math.round(f * width)
   return '█'.repeat(full) + '░'.repeat(width - full)
 }
+
+/** '23:10 UTC' */
+const hhmm = (ms: number) => `${new Date(ms).toISOString().slice(11, 16)} UTC`
 
 function until(iso: string | undefined, now: number): string | undefined {
   const t = utc(iso)
@@ -188,6 +194,10 @@ const followers = new Map<string, Follower>()
 const logSeen = new Map<string, number>()
 const FLUSH_MS = 1000
 const STALE_MS = 120_000
+/** The accounts line the model was last given (aliases, whole hours, reset): a prompt carries it again on a change. */
+let toldAccounts = ''
+/** Account changes the model has not been told of yet: the next prompt carries them, once. */
+const accountNews: string[] = []
 
 const activeAccount = () => accounts.find(a => a.alias === active)
 
@@ -579,7 +589,7 @@ async function pollSubs($: EngineInterface) {
 async function kaggleJobs($: EngineInterface, now: number, isShown: boolean) {
   if (!cli) return
   for (const a of accounts) {
-    if (isShown && due(`quota:${a.alias}`, QUOTA_MS, now)) void job($, `quota:${a.alias}`, () => pollQuota($, a))
+    if (due(`quota:${a.alias}`, isShown ? QUOTA_MS : QUOTA_HIDDEN_MS, now)) void job($, `quota:${a.alias}`, () => pollQuota($, a))
     const ks = (await read($, kernelsA))[a.alias]?.value ?? []
     const isLive = ks.some(k => LIVE.has(k.status))
     if ((isShown || isLive) && due(`kernels:${a.alias}`, isLive ? KERNELS_BUSY_MS : KERNELS_IDLE_MS, now)) {
@@ -723,6 +733,7 @@ async function addAccount($: EngineInterface) {
   last.delete(`quota:${alias}`)
   last.delete(`kernels:${alias}`)
   await say($, `${existing ? 'Updated' : 'Added'} ${alias} (${user}); its token is in ${tilde(check, paths_)}, readable by you alone.`)
+  accountNews.push(`Kaggle account "${alias}" (${user}) was ${existing ? 'updated' : 'added'} in the Kaggle pane at ${hhmm(await $.clock.now())}; count its quota when planning GPU runs.`)
   if (!active) await useAccount($, alias, true)
 }
 
@@ -758,6 +769,7 @@ async function removeAccount($: EngineInterface, alias: string) {
     }
   }
   await say($, `Removed ${alias}. Its token file ${a ? tilde(a.tokenPath, P) : ''} was left in place; delete it if you no longer need it.`)
+  accountNews.push(`Kaggle account "${alias}" was removed from the Kaggle pane at ${hhmm(await $.clock.now())}; plan no runs on it.`)
 }
 
 async function setCliPath($: EngineInterface, text: string) {
@@ -818,6 +830,7 @@ function restart($: EngineInterface, dir: string): Promise<void> {
   isStale = false
   stopAll()
   last.clear()
+  toldAccounts = '' // a new conversation: tell it the accounts again
   prev = undefined
   restarting = (async () => {
     await $.command.register(COMMAND).catch(() => undefined)
@@ -900,6 +913,21 @@ export const register: Register = on => {
       ],
     }
   })
+
+  // The accounts and their quotas reach the model with the prompt (not the system prompt, whose cache a reading
+  // would break): the first prompt, then only when an account or a whole hour changed, or an account was added or
+  // removed.
+  on('classic.UserPromptSubmit', async ($, e, next) => {
+    const r = await next(e)
+    const lines = accountNews.splice(0)
+    const b = accountsBrief(accounts, active, await read($, quotasA))
+    if (b && (b.key !== toldAccounts || lines.length)) {
+      lines.push(b.text)
+      toldAccounts = b.key
+    }
+    if (!lines.length) return r
+    return { ...r, additionalContext: [...(r.additionalContext ?? []), `[kaggle-monitor] ${lines.join(' ')}`] }
+  }).catch(($, e, next) => next(e))
 
   // A submit or a push makes the pane look again soon, rather than at its idle pace.
   on('tool.call', { tool: 'Bash' }, async ($, e, next) => {

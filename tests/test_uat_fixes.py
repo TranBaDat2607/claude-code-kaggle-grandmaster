@@ -36,8 +36,9 @@ class FakeKaggle:
     def __init__(self, routes):
         self.routes, self.calls = routes, []
 
-    def __call__(self, args, timeout=600):
+    def __call__(self, args, timeout=600, env=None):
         self.calls.append(list(args))
+        self.envs = [*getattr(self, "envs", []), env]
         for prefix, out in self.routes:
             if args[:len(prefix)] == list(prefix):
                 return out(args) if callable(out) else out
@@ -3346,3 +3347,86 @@ def test_65_fold_scores_only_pairs_keep_their_public_n(tmp_path, monkeypatch, ca
     out = capsys.readouterr().out
     assert re.search(r"(KEEP|DISCARD|INCONCLUSIVE)", out) and "ESTIMATED SD" in out
     assert "the fold scores carry no public-LB noise" in out
+
+
+# ----------------------------------------------------------------------------- #106 every registered account
+def _registry(tmp_path, monkeypatch, n=3):
+    tokens = tmp_path / "tokens"
+    tokens.mkdir()
+    reg = {"main": {"user": "me"}}
+    for i in range(2, n + 1):
+        (tokens / f"access_token_acc{i}").write_text("SECRET-TOKEN")
+        reg[f"acc{i}"] = {"user": f"u{i}", "token_file": str(tokens / f"access_token_acc{i}")}
+    f = tmp_path / "kg_accounts.json"
+    f.write_text(json.dumps(reg))
+    monkeypatch.setenv("KGKIT_ACCOUNTS_FILE", str(f))
+    monkeypatch.setenv("KAGGLE_USERNAME", "me")
+    for home in ("HOME", "USERPROFILE"):  # no ~/.kaggle/access_token: "main" runs on the CLI's own login
+        monkeypatch.setenv(home, str(tmp_path / "home"))
+    return tokens
+
+
+def _quota_json(left, refresh="2099-01-03T00:00:00"):
+    return json.dumps([{"resource": "GPU", "used": f"{30 - left}h", "remaining": f"{left}h", "total": "30h",
+                        "refreshAt": refresh},
+                       {"resource": "TPU", "used": "0h", "remaining": "20h", "total": "20h", "refreshAt": refresh}])
+
+
+def test_quota_all_reads_every_registered_account_as_itself(ws, tmp_path, monkeypatch):
+    tokens = _registry(tmp_path, monkeypatch)
+    left = {"me": 9.2, "u2": 6.2, "u3": 30.0}
+    envs = []
+
+    def fake(args, timeout=600, env=None):  # each account's call runs in its own thread
+        envs.append(env)
+        return _cp(_quota_json(left[env["KAGGLE_USERNAME"]]))
+
+    monkeypatch.setattr(G, "run_kaggle", fake)
+    txt = G.accounts_report(ws)
+    assert "Registered Kaggle accounts (3)" in txt
+    assert "main (active): GPU 9.2h of 30h, TPU 20.0h" in txt and "acc3: GPU 30.0h" in txt
+    assert "Total: GPU 45.4h, TPU 60.0h" in txt and "next reset 2099-01-03" in txt
+    assert "SECRET" not in txt and str(tokens) not in txt  # never a token, nor where it is
+    by_user = {e["KAGGLE_USERNAME"]: e.get("KAGGLE_API_TOKEN") for e in envs}
+    assert by_user["u2"] == str(tokens / "access_token_acc2") and by_user["me"] is None  # no default token file here
+    # a failed read keeps the last value, says so, and the cache serves --cached and the brief
+    monkeypatch.setattr(G, "run_kaggle", lambda args, timeout=600, env=None: _cp("", 1, "401 Unauthorized")
+                        if env["KAGGLE_USERNAME"] == "u3" else _cp(_quota_json(left[env["KAGGLE_USERNAME"]])))
+    txt = G.accounts_report(ws)
+    assert "acc3: GPU 30.0h of 30h" in txt and "read failed: 401 Unauthorized" in txt
+    assert "acc2: GPU 6.2h" in G.accounts_report(ws, refresh=False)
+    line = G.quota_line(ws)
+    assert "Registered Kaggle accounts, GPU hours left" in line and "main 9.2h · acc2 6.2h · acc3 30.0h = 45.4h" in line
+    # the brief names unread accounts too: a newly added one has no reading yet
+    reg = json.loads(Path(os.environ["KGKIT_ACCOUNTS_FILE"]).read_text())
+    reg["acc6"] = {"user": "u6", "token_file": str(tokens / "access_token_acc6")}
+    Path(os.environ["KGKIT_ACCOUNTS_FILE"]).write_text(json.dumps(reg))
+    assert "not read: acc6" in G.quota_line(ws)
+
+
+def test_brief_and_plan_with_accounts_never_read(ws, tmp_path, monkeypatch):
+    _registry(tmp_path, monkeypatch)
+    assert "3 Kaggle accounts are registered" in G.quota_line(ws) and "gpu quota --all" in G.quota_line(ws)
+    monkeypatch.delenv("KGKIT_ACCOUNTS_FILE")
+    monkeypatch.setenv("KGKIT_ACCOUNTS_FILE", str(tmp_path / "none.json"))
+    assert G.quota_line(ws) == "" and G.accounts_report(ws).startswith("No accounts registered")
+
+
+def test_plan_counts_the_other_accounts_hours_once_read(ws, tmp_path, monkeypatch):
+    _registry(tmp_path, monkeypatch)
+    st = S.load(ws)
+    st.deadline = (dt.date.today() + dt.timedelta(days=2)).isoformat()  # < 72 h of wall time
+    st.save(ws)
+    soon = G._iso(G._now() + dt.timedelta(days=5)).replace("Z", "")
+    _quota(ws, gpu_left=9.0, refresh=soon + "Z")
+    end = G._now() - dt.timedelta(days=1)
+    for i in range(3):
+        G.log_run(ws, {"kernel": f"me/l{i}", "accelerator": "NvidiaTeslaT4", "hours": 12, "status": "collected",
+                       "started_at": G._iso(end - dt.timedelta(hours=11)), "finished_at": G._iso(end)})
+    left = {"me": 9.0, "u2": 30.0, "u3": 30.0}
+    monkeypatch.setattr(G, "run_kaggle",
+                        lambda args, timeout=600, env=None: _cp(_quota_json(left[env["KAGGLE_USERNAME"]], soon)))
+    G.fetch_account_quotas(ws)
+    txt = G.plan(ws, refresh=False)
+    assert "Other registered accounts: 2 read (acc2 ~30h, acc3 ~30h until the deadline)" in txt
+    assert "Regime: TIME-BOUND. ~69 GPU-hours across 3 accounts" in txt and "Not counted" not in txt

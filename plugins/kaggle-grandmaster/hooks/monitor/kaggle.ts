@@ -8,7 +8,7 @@
 
 import type { EngineInterface } from 'claude-code'
 
-import type { Kernel, KernelLive, QuotaRow, Submission, Submissions } from '../../types'
+import type { Fetched, Kernel, KernelLive, QuotaRow, Submission, Submissions } from '../../types'
 import { oneLine } from './describe'
 import type { Platform } from './probe'
 
@@ -532,4 +532,51 @@ export function parseKgmon(line: string): Reading | undefined {
     gpus,
     doing: Array.isArray(j.doing) ? j.doing.slice(0, 8).map(d => oneLine(String(d), 80)) : undefined,
   }
+}
+
+const hoursText = (n: number) => (n >= 100 ? n.toFixed(0) : n.toFixed(1))
+/** '2026-11-21 00:00 UTC' */
+const stamp = (ms: number) => `${new Date(ms).toISOString().slice(0, 16).replace('T', ' ')} UTC`
+
+/**
+ * What the model is told of the registered accounts: each one's GPU (and TPU) hours left, when they were read and
+ * the next reset; `key` changes only when an alias, a whole hour or the reset does, so an unchanged line is not
+ * repeated. Never a token or its path. Undefined with fewer than two accounts.
+ */
+export function accountsBrief(
+  list: readonly { alias: string; user?: string }[],
+  activeAlias: string | undefined,
+  quotas: Record<string, Fetched<QuotaRow[]>>,
+): { key: string; text: string } | undefined {
+  if (list.length < 2) return undefined
+  const parts: string[] = []
+  const keys: string[] = []
+  let total = 0
+  let oldest: number | undefined
+  let reset: number | undefined
+  for (const a of list) {
+    const f = quotas[a.alias]
+    const gpu = f?.value?.find(r => r.resource === 'GPU')
+    const tpu = f?.value?.find(r => r.resource === 'TPU')
+    const name = `${a.alias}${a.alias === activeAlias ? ' (active)' : ''}`
+    if (!gpu) {
+      parts.push(`${name} not read yet${f?.error ? ` (${f.error.slice(0, 80)})` : ''}`)
+      keys.push(`${a.alias}:?`)
+      continue
+    }
+    parts.push(`${name} ${hoursText(gpu.remainingH)}h${tpu ? ` (TPU ${hoursText(tpu.remainingH)}h)` : ''}`)
+    keys.push(`${a.alias}:${Math.round(gpu.remainingH)}`)
+    total += gpu.remainingH
+    if (f?.fetchedAt !== undefined) oldest = oldest === undefined ? f.fetchedAt : Math.min(oldest, f.fetchedAt)
+    const r = utc(gpu.refreshAt)
+    if (r !== undefined) reset = reset === undefined ? r : Math.min(reset, r)
+  }
+  const when = [oldest !== undefined ? `read ${stamp(oldest)}` : '', reset !== undefined ? `next weekly reset ${stamp(reset)}` : '']
+    .filter(Boolean)
+    .join('; ')
+  const text =
+    `Registered Kaggle accounts (the Kaggle pane), GPU hours left${when ? ` (${when})` : ''}: ${parts.join(' · ')}; ` +
+    `${hoursText(total)}h in total. Runs go to the active account; the person switches it in the pane (/kaggle-monitor use <alias>). ` +
+    '`python -m kgkit gpu quota --all` reads them again.'
+  return { key: `${activeAlias}|${keys.join(',')}|${reset ?? ''}`, text }
 }

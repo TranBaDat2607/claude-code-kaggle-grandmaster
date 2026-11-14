@@ -1806,7 +1806,7 @@ def cmd_gpu(a):
     from . import gpu as G
 
     if a.gpu_cmd == "quota":
-        print(G.quota_report(refresh=not a.cached))
+        print(G.accounts_report(refresh=not a.cached) if a.all else G.quota_report(refresh=not a.cached))
     elif a.gpu_cmd == "plan":
         print(G.plan(refresh=not a.cached, deadline=a.deadline))
     elif a.gpu_cmd == "build":
@@ -2328,6 +2328,9 @@ def build_parser() -> argparse.ArgumentParser:
     s = gs.add_parser("quota", help="weekly GPU/TPU quota and reset countdown: live, or the cached value with its age "
                                     "when the API call fails twice")
     s.add_argument("--cached", action="store_true", help="do not call the API; use the cached value (shows its age)")
+    s.add_argument("--all", action="store_true",
+                   help="every account registered in the Kaggle pane (~/.kaggle/kg_accounts.json): GPU/TPU hours "
+                        "left on each and the total")
     s = gs.add_parser("plan", help="GPU-hour budget until the deadline")
     s.add_argument("--cached", action="store_true")
     s.add_argument("--deadline", help="YYYY-MM-DD (default: competition.json)")

@@ -112,6 +112,86 @@ def test_budget_prune_and_resume_curve(tmp_path):
     assert ok.end_epoch(4, 0.55) == "continue"
 
 
+class _FakeGroup:
+    """Two DDP ranks in one process: each rank's ``max`` call blocks nothing; the test feeds both ranks' values."""
+
+    def __init__(self, rank, peer_values):
+        self.rank, self.world, self.peer = rank, 2, peer_values
+
+    def max(self, values):
+        return [max(a, b) for a, b in zip(values, self.peer)]
+
+
+def test_budget_under_ddp_every_rank_gets_the_same_answer_and_only_rank0_writes(tmp_path):
+    from kgkit import budget as B
+
+    assert B.distributed() is None  # no process group: a plain single-process budget
+    assert TrainBudget(tmp_path / "solo", 0, total_epochs=5, env={}).is_main
+    # rank 1 is short of time, rank 0 is not: both time out (rank 0 sees rank 1's flag through the all-reduce)
+    r0 = TrainBudget(tmp_path, 0, total_epochs=10, env={"KG_DEADLINE": str(time.time() + 3600)},
+                     dist=_FakeGroup(0, [1.0, 0.0]))
+    r0.start_epoch()
+    assert r0.end_epoch(0, 0.5) == "timeout"
+    r1 = TrainBudget(tmp_path, 0, total_epochs=10, env={"KG_DEADLINE": str(time.time() + 30)},
+                     dist=_FakeGroup(1, [0.0, 0.0]))
+    r1.start_epoch()
+    assert r1.end_epoch(0, 0.5) == "timeout"
+    assert not r1.is_main and r1.write_status("timeout").name == "fold0_status.json"
+    # prune is rank 0's call: rank 1's own (placeholder) score would prune, rank 0's does not -> both continue
+    base = tmp_path / "base"
+    base.mkdir()
+    (base / "curve_fold0.json").write_text(json.dumps(
+        {"fold": 0, "epochs": 10, "points": [{"epoch": e, "score": 0.6 + 0.02 * e} for e in range(10)]}))
+    env = {"KG_PRUNE_BASELINE": str(base), "KG_PRUNE_MARGIN": "0.01"}
+    out = tmp_path / "ddp"
+    lone = TrainBudget(out, 0, total_epochs=10, env=env, dist=_FakeGroup(1, [0.0, 0.0]))
+    assert lone.end_epoch(4, 0.0) == "continue" and not (out / "curve_fold0.json").exists()
+    main = TrainBudget(out, 0, total_epochs=10, env=env, dist=_FakeGroup(0, [0.0, 0.0]))
+    assert main.end_epoch(4, 0.7) == "continue" and (out / "curve_fold0.json").is_file()
+    lagging = TrainBudget(tmp_path / "lag", 0, total_epochs=10, env=env, dist=_FakeGroup(1, [0.0, 1.0]))
+    assert lagging.end_epoch(4, 0.9) == "prune"  # rank 0 pruned: rank 1 stops too, whatever its own score
+    assert not (tmp_path / "lag" / "fold0_status.json").exists()
+
+
+DDP_SCRIPT = r'''
+import json, os, sys, time
+import torch
+import torch.distributed as dist
+from kgkit.budget import TrainBudget
+
+rank = int(sys.argv[1])
+dist.init_process_group("gloo", init_method="file://" + sys.argv[2], rank=rank, world_size=2)
+# rank 1 has 30 s left (less than an epoch + 60 s margin), rank 0 an hour
+os.environ["KG_DEADLINE"] = str(time.time() + (3600 if rank == 0 else 30))
+tb = TrainBudget(sys.argv[3], 0, total_epochs=10)
+acts = []
+for e in range(3):
+    tb.start_epoch()
+    acts.append(tb.end_epoch(e, 0.5))
+    if acts[-1] != "continue":
+        tb.write_status(acts[-1])
+        break
+dist.barrier()
+print(json.dumps({"rank": rank, "main": tb.is_main, "acts": acts}))
+dist.destroy_process_group()
+'''
+
+
+@pytest.mark.skipif(__import__("importlib").util.find_spec("torch") is None, reason="needs torch")
+def test_budget_ddp_two_real_gloo_ranks_stop_together(tmp_path, plugin_root):
+    script = tmp_path / "ddp.py"
+    script.write_text(DDP_SCRIPT)
+    env = dict(os.environ, PYTHONPATH=str(plugin_root), CUDA_VISIBLE_DEVICES="")
+    procs = [subprocess.Popen([sys.executable, str(script), str(r), str(tmp_path / "store"), str(tmp_path / "out")],
+                              stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env) for r in (0, 1)]
+    outs = [p.communicate(timeout=120) for p in procs]
+    assert all(p.returncode == 0 for p in procs), [o[1][-2000:] for o in outs]
+    recs = sorted((json.loads(o[0].strip().splitlines()[-1]) for o in outs), key=lambda r: r["rank"])
+    assert [r["acts"] for r in recs] == [["timeout"], ["timeout"]]  # rank 0 stops with rank 1, no hang
+    assert [r["main"] for r in recs] == [True, False]
+    assert json.loads((tmp_path / "out" / "fold0_status.json").read_text())["status"] == "timeout"
+
+
 # ----------------------------------------------------------------------------- quota
 QUOTA_JSON = json.dumps([
     {"resource": "GPU", "used": "19.55h", "remaining": "10.45h", "total": "30.00h", "refreshAt": "2099-01-03T00:00:00"},
@@ -372,6 +452,57 @@ def test_plan_mentions_reserve_and_reset(gws):
                                              "fetched_at": G._iso(G._now())}))
     txt = G.plan(gws, refresh=False)
     assert "USE IT OR LOSE IT" in txt and "Reserve" in txt and "GPU-hours in total" in txt
+
+
+def _long_runs(root, hours, n=3):
+    end = G._now() - dt.timedelta(days=1)
+    for i in range(n):
+        G.log_run(root, {"kernel": f"me/lora-{i}-train", "accelerator": "NvidiaTeslaT4", "hours": 12,
+                         "status": "collected", "started_at": G._iso(end - dt.timedelta(hours=hours)),
+                         "finished_at": G._iso(end), "gpu_hours": hours})
+    G.log_run(root, {"kernel": "me/smoke-train", "accelerator": "NvidiaTeslaT4", "hours": 0.5, "status": "complete",
+                     "started_at": G._iso(end - dt.timedelta(minutes=10)), "finished_at": G._iso(end)})
+
+
+def test_plan_names_the_regime_and_counts_registered_accounts(gws, monkeypatch, tmp_path):
+    reg = tmp_path / "kg_accounts.json"
+    monkeypatch.setattr(G, "accounts_file", lambda: reg)
+    monkeypatch.setenv("KAGGLE_USERNAME", "me")
+    st = S.load(gws)
+    st.deadline = (dt.date.today() + dt.timedelta(days=3)).isoformat()
+    st.save(gws)
+    reset = G._iso(G._now() + dt.timedelta(days=5))  # no reset before the deadline
+    G.quota_path(gws).write_text(json.dumps({"used_h": 21, "remaining_h": 9, "total_h": 30, "refresh_at": reset,
+                                             "fetched_at": G._iso(G._now())}))
+    _long_runs(gws, 11.0)
+    assert G.run_lengths(gws) == [11.0, 11.0, 11.0]  # the 10-minute smoke run is not an experiment
+    # one account, 9 h left, ~3.5 days of wall time: the quota binds
+    txt = G.plan(gws, refresh=False)
+    assert "Regime: QUOTA-BOUND." in txt and "one run takes ~11.0 h" in txt and "Not counted" not in txt
+    assert "Time-bound:" not in txt
+    # five more accounts in the Kaggle pane's registry (the active one is left out by its username): time-bound
+    reg.write_text(json.dumps({"main": {"user": "me"}, **{f"acc{i}": {"user": f"u{i}", "token_file": f"/secret/t{i}"}
+                                                          for i in range(2, 7)}}))
+    assert G.other_accounts("me") == ["acc2", "acc3", "acc4", "acc5", "acc6"]
+    txt = G.plan(gws, refresh=False)
+    assert "Not counted: 5 other registered account(s) (acc2, acc3, acc4, acc5, acc6" in txt
+    # no reset before the deadline: their hours this week decide it (acc6 may have its whole 30 h left)
+    assert "~9-159 GPU-hours" in txt and "QUOTA-BOUND at ~9 h, TIME-BOUND at ~159 h" in txt
+    assert "If time-bound: optimise time to the next result" in txt and "DDP" in txt and "put this trade-off" in txt
+    # with a reset before the deadline, their next week alone covers the wall time
+    G.quota_path(gws).write_text(json.dumps({"used_h": 21, "remaining_h": 9, "total_h": 30,
+                                             "refresh_at": G._iso(G._now() + dt.timedelta(days=1)),
+                                             "fetched_at": G._iso(G._now())}))
+    txt = G.plan(gws, refresh=False)
+    assert "With them the regime is TIME-BOUND" in txt and "Time-bound: optimise time" in txt
+    assert "/secret/" not in txt  # never a token path
+    # short runs with quota to spare: neither regime pushes DDP
+    G.runs_path(gws).unlink()
+    _long_runs(gws, 2.0)
+    txt = G.plan(gws, refresh=False)
+    assert "QUOTA TO SPARE" in txt and "Time-bound:" not in txt
+    reg.write_text("not json")
+    assert G.other_accounts("me") == []
 
 
 # ----------------------------------------------------------------------------- templates
