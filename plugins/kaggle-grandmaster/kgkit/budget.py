@@ -14,6 +14,12 @@ nothing is set and the guard only records the learning curve::
         if action == "timeout": save a resume checkpoint, tb.write_status("timeout", ...); stop
         if action == "prune":   tb.write_status("pruned", ...); stop
 
+Under DDP (``torchrun``, ``torch.distributed`` initialised with more than one rank) every rank builds its own
+``TrainBudget`` and calls ``end_epoch`` each epoch; the ranks get the same answer, so none waits forever for another
+in the next collective: "timeout" when any rank is short of time, "prune" as rank 0 decides from its own score
+(validate on rank 0, or pass every rank the all-reduced score). Only rank 0 (``tb.is_main``) writes the curve and the
+status file; gate your own checkpoints and OOF files on ``tb.is_main`` too.
+
 Env vars (all optional)
   KG_DEADLINE        unix time by which the process must have saved its state and exited
   KG_RESERVE_S       seconds kept free after the last epoch for test inference + saving (default 600)
@@ -21,13 +27,15 @@ Env vars (all optional)
   KG_PRUNE_MARGIN    prune when the best-so-far score trails the baseline's by more than this
   KG_PRUNE_MIN_FRAC  never prune before this fraction of the schedule has run (default 0.3)
 
-Standard library only: the remote runner and the hooks import this package without numpy.
+Standard library only: the remote runner and the hooks import this package without numpy. torch is used only when
+the training script has already imported it and initialised ``torch.distributed``.
 """
 
 from __future__ import annotations
 
 import json
 import os
+import sys
 import time
 from pathlib import Path
 
@@ -63,10 +71,46 @@ def baseline_best_at(curve: dict, frac: float, greater_is_better: bool) -> float
     return max(seen) if greater_is_better else min(seen)
 
 
+class _Dist:
+    """The running ``torch.distributed`` group, when the script started one with more than one rank."""
+
+    def __init__(self, torch, rank: int, world: int):
+        self.torch, self.rank, self.world = torch, rank, world
+
+    def max(self, values: list[float]) -> list[float]:
+        """Element-wise maximum over the ranks (a collective: every rank must call it)."""
+        torch, dist = self.torch, self.torch.distributed
+        dev = (torch.device("cuda", torch.cuda.current_device()) if dist.get_backend() == "nccl"
+               else torch.device("cpu"))
+        t = torch.tensor([float(v) for v in values], dtype=torch.float64, device=dev)
+        dist.all_reduce(t, op=dist.ReduceOp.MAX)
+        return [float(v) for v in t.tolist()]
+
+
+def distributed() -> _Dist | None:
+    """The DDP group this process is in, or None (no torch imported, not initialised, or a single rank). Never
+    imports torch itself: a script that runs DDP has imported it already."""
+    torch = sys.modules.get("torch")
+    try:
+        dist = torch.distributed if torch is not None else None
+        if dist is None or not (dist.is_available() and dist.is_initialized()):
+            return None
+        world = int(dist.get_world_size())
+        return _Dist(torch, int(dist.get_rank()), world) if world > 1 else None
+    except Exception:
+        return None
+
+
+_LOCAL = object()
+
+
 class TrainBudget:
     def __init__(self, out_dir: str | Path, fold: int, total_epochs: int, greater_is_better: bool = True,
-                 env=None):
+                 env=None, dist=_LOCAL):
         env = os.environ if env is None else env
+        self.dist = distributed() if dist is _LOCAL else dist
+        self.rank = self.dist.rank if self.dist is not None else 0
+        self.is_main = self.rank == 0
         self.out_dir = Path(out_dir)
         self.fold = int(fold)
         self.total_epochs = max(1, int(total_epochs))
@@ -113,15 +157,18 @@ class TrainBudget:
         self._save_curve()
         if epoch + 1 >= self.total_epochs:
             return "continue"
-        if self.should_prune(epoch):
-            return "prune"
+        prune, timeout = self.should_prune(epoch), False
         left, per_epoch = self.seconds_left(), self.epoch_seconds()
         if left is not None and per_epoch is not None:
             last = epoch + 2 >= self.total_epochs  # the next epoch is the final one: test inference follows it
             need = per_epoch * 1.15 + (self.reserve_s if last else 60.0)
-            if left < need:
-                return "timeout"
-        return "continue"
+            timeout = left < need
+        if self.dist is not None:  # every rank must take the same branch, or the others hang in the next collective
+            timeout_any, prune_main = self.dist.max([float(timeout), float(prune and self.is_main)])
+            timeout, prune = timeout_any > 0, prune_main > 0
+        if prune:
+            return "prune"
+        return "timeout" if timeout else "continue"
 
     def should_prune(self, epoch: int) -> bool:
         if self.baseline is None or self.margin is None or self.best is None:
@@ -137,6 +184,8 @@ class TrainBudget:
 
     # ------------------------------------------------------------------ files
     def _save_curve(self) -> None:
+        if not self.is_main:
+            return
         self.out_dir.mkdir(parents=True, exist_ok=True)
         data = {"fold": self.fold, "epochs": self.total_epochs, "greater_is_better": self.gib, "points": self.points}
         tmp = self.curve_path.with_suffix(".tmp")
@@ -144,9 +193,12 @@ class TrainBudget:
         tmp.replace(self.curve_path)
 
     def write_status(self, status: str, **info) -> Path:
-        """``status``: done | timeout | pruned | failed. Read by the remote runner and ``kgkit gpu collect``."""
-        self.out_dir.mkdir(parents=True, exist_ok=True)
+        """``status``: done | timeout | pruned | failed. Read by the remote runner and ``kgkit gpu collect``. Under
+        DDP only rank 0 writes it (the path is returned on every rank)."""
         p = self.out_dir / f"fold{self.fold}_status.json"
+        if not self.is_main:
+            return p
+        self.out_dir.mkdir(parents=True, exist_ok=True)
         rec = {"fold": self.fold, "status": status, "best": self.best, "epochs_run": len(self.points),
                "epoch_seconds": self.epoch_seconds(), "time": time.strftime("%Y-%m-%dT%H:%M:%S"), **info}
         p.write_text(json.dumps(rec), encoding="utf-8")
