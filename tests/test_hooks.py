@@ -244,6 +244,12 @@ def test_prompt_router_gpu(plugin_root, tmp_path_factory):
     out = hook(plugin_root, "prompt_router.py", {"hook_event_name": "UserPromptSubmit", "cwd": str(plain),
                "prompt": "How do I train my model on Kaggle GPUs without wasting my weekly quota?"})
     assert "kaggle-grandmaster:kaggle-gpu" in out["additionalContext"]
+    # time-bound planning (#107): several accounts, waiting for a result
+    for prompt in ("I have six Kaggle accounts now, how should I schedule the next LoRA runs before the deadline?",
+                   "Kaggle competition: each result takes a whole session; how do I cut the time to the next result?"):
+        out = hook(plugin_root, "prompt_router.py", {"hook_event_name": "UserPromptSubmit", "cwd": str(plain),
+                   "prompt": prompt})
+        assert "kaggle-grandmaster:kaggle-gpu" in out["additionalContext"], prompt
 
 
 def test_prompt_router_strategy_and_noise(plugin_root, tmp_path_factory):

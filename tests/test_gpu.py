@@ -454,6 +454,57 @@ def test_plan_mentions_reserve_and_reset(gws):
     assert "USE IT OR LOSE IT" in txt and "Reserve" in txt and "GPU-hours in total" in txt
 
 
+def _long_runs(root, hours, n=3):
+    end = G._now() - dt.timedelta(days=1)
+    for i in range(n):
+        G.log_run(root, {"kernel": f"me/lora-{i}-train", "accelerator": "NvidiaTeslaT4", "hours": 12,
+                         "status": "collected", "started_at": G._iso(end - dt.timedelta(hours=hours)),
+                         "finished_at": G._iso(end), "gpu_hours": hours})
+    G.log_run(root, {"kernel": "me/smoke-train", "accelerator": "NvidiaTeslaT4", "hours": 0.5, "status": "complete",
+                     "started_at": G._iso(end - dt.timedelta(minutes=10)), "finished_at": G._iso(end)})
+
+
+def test_plan_names_the_regime_and_counts_registered_accounts(gws, monkeypatch, tmp_path):
+    reg = tmp_path / "kg_accounts.json"
+    monkeypatch.setattr(G, "accounts_file", lambda: reg)
+    monkeypatch.setenv("KAGGLE_USERNAME", "me")
+    st = S.load(gws)
+    st.deadline = (dt.date.today() + dt.timedelta(days=3)).isoformat()
+    st.save(gws)
+    reset = G._iso(G._now() + dt.timedelta(days=5))  # no reset before the deadline
+    G.quota_path(gws).write_text(json.dumps({"used_h": 21, "remaining_h": 9, "total_h": 30, "refresh_at": reset,
+                                             "fetched_at": G._iso(G._now())}))
+    _long_runs(gws, 11.0)
+    assert G.run_lengths(gws) == [11.0, 11.0, 11.0]  # the 10-minute smoke run is not an experiment
+    # one account, 9 h left, ~3.5 days of wall time: the quota binds
+    txt = G.plan(gws, refresh=False)
+    assert "Regime: QUOTA-BOUND." in txt and "one run takes ~11.0 h" in txt and "Not counted" not in txt
+    assert "Time-bound:" not in txt
+    # five more accounts in the Kaggle pane's registry (the active one is left out by its username): time-bound
+    reg.write_text(json.dumps({"main": {"user": "me"}, **{f"acc{i}": {"user": f"u{i}", "token_file": f"/secret/t{i}"}
+                                                          for i in range(2, 7)}}))
+    assert G.other_accounts("me") == ["acc2", "acc3", "acc4", "acc5", "acc6"]
+    txt = G.plan(gws, refresh=False)
+    assert "Not counted: 5 other registered account(s) (acc2, acc3, acc4, acc5, acc6" in txt
+    # no reset before the deadline: their hours this week decide it (acc6 may have its whole 30 h left)
+    assert "~9-159 GPU-hours" in txt and "QUOTA-BOUND at ~9 h, TIME-BOUND at ~159 h" in txt
+    assert "If time-bound: optimise time to the next result" in txt and "DDP" in txt and "put this trade-off" in txt
+    # with a reset before the deadline, their next week alone covers the wall time
+    G.quota_path(gws).write_text(json.dumps({"used_h": 21, "remaining_h": 9, "total_h": 30,
+                                             "refresh_at": G._iso(G._now() + dt.timedelta(days=1)),
+                                             "fetched_at": G._iso(G._now())}))
+    txt = G.plan(gws, refresh=False)
+    assert "With them the regime is TIME-BOUND" in txt and "Time-bound: optimise time" in txt
+    assert "/secret/" not in txt  # never a token path
+    # short runs with quota to spare: neither regime pushes DDP
+    G.runs_path(gws).unlink()
+    _long_runs(gws, 2.0)
+    txt = G.plan(gws, refresh=False)
+    assert "QUOTA TO SPARE" in txt and "Time-bound:" not in txt
+    reg.write_text("not json")
+    assert G.other_accounts("me") == []
+
+
 # ----------------------------------------------------------------------------- templates
 @pytest.mark.skipif(__import__("importlib").util.find_spec("timm") is None, reason="needs torch + timm")
 def test_image_template_timeout_resume_and_assemble(tmp_path, plugin_root):

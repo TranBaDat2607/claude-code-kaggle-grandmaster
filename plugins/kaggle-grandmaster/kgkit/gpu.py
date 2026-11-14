@@ -2199,6 +2199,88 @@ def run_table(root: str | Path | None = None, n: int = 20) -> str:
     return "\n".join(lines)
 
 
+def accounts_file() -> Path:
+    """The Kaggle pane's account registry (``/kaggle-monitor``): alias -> username and token file."""
+    return Path.home() / ".kaggle" / "kg_accounts.json"
+
+
+def other_accounts(me: str | None) -> list[str]:
+    """Aliases of the registered Kaggle accounts other than ``me`` (the active username, when known). Reads only the
+    aliases and usernames, never a token file; [] when there is no registry or it cannot be read."""
+    try:
+        reg = json.loads(accounts_file().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    if not isinstance(reg, dict):
+        return []
+    users = {a: (v.get("user") if isinstance(v, dict) else None) for a, v in reg.items()}
+    if me and me in users.values():
+        return [a for a, u in users.items() if u != me]
+    return list(users)
+
+
+def run_lengths(root: str | Path, n: int = 5) -> list[float]:
+    """Session hours of the last ``n`` ended GPU runs that trained for at least an hour (smoke and bench runs left
+    out): how long one experiment keeps a session busy."""
+    hs = [session_hours(r) for r in runs(root) if run_resource(r) == "GPU" and r.get("status") in ENDED]
+    return [h for h in hs if h is not None and h >= 1.0][-n:]
+
+
+TIME_BOUND_RUN_H = 6.0  # a run this long on one T4 leaves only a few decide-then-run cycles a week
+
+
+def regime_lines(root: str | Path, hours: float, days: float, others: list[str], weekly: float,
+                 resets: int) -> list[str]:
+    """Quota-bound or time-bound (skill kaggle-gpu, section 1): can the GPU-hours until the deadline keep a session
+    running nonstop, and does one run fill most of a session? ``hours`` counts the active account only; ``others``
+    are registered accounts whose quota this cannot read."""
+    lens = sorted(run_lengths(root))
+    run_h = lens[len(lens) // 2] if lens else None
+    nonstop = max(0.0, days * 24)
+
+    def bound(h: float) -> str:
+        if h < nonstop:
+            return "QUOTA-BOUND"
+        return "TIME-BOUND" if run_h is None or run_h >= TIME_BOUND_RUN_H else "QUOTA TO SPARE"
+
+    reg = bound(hours)
+    if run_h is None:
+        run = "no GPU run of an hour or more measured yet"
+    else:
+        cycles = nonstop / run_h if run_h else 0
+        run = (f"one run takes ~{run_h:.1f} h (median of {len(lens)} measured GPU session(s)), "
+               f"so ~{cycles:.0f} decide-then-run cycle(s) are left")
+    scope = " (this account only)" if others else ""
+    lines = [f"Regime{scope}: {reg}. ~{hours:.0f} GPU-hours on this account vs {nonstop:.0f} h of wall time to the "
+             f"deadline (one session running nonstop); {run}."]
+    if others:
+        low, high = hours + len(others) * resets * weekly, hours + len(others) * (resets + 1) * weekly
+        shown = ", ".join(others[:8]) + (", ..." if len(others) > 8 else "")
+        lines.append(f"Not counted: {len(others)} other registered account(s) ({shown}, from "
+                     "~/.kaggle/kg_accounts.json). "
+                     f"With them it is ~{low:.0f}-{high:.0f} GPU-hours (their future weeks, plus this week's if "
+                     "unused): read their quota (the Kaggle pane's Quota tab, or `kaggle quota` with each account's "
+                     "token) before planning." +
+                     (f" With them the regime is {bound(low)}." if bound(low) == bound(high) != reg else
+                      f" The regime depends on them: {bound(low)} at ~{low:.0f} h, {bound(high)} at ~{high:.0f} h."
+                      if bound(low) != bound(high) else ""))
+        reg = bound(low) if bound(low) == bound(high) else f"{bound(low)} or {bound(high)}"
+    if "TIME-BOUND" in reg:
+        lines.append(("Time-bound" if reg == "TIME-BOUND" else "If time-bound") +
+                     ": optimise time to the next result, not score per GPU-hour. Run each screen (or final-week "
+                     "model) as one model on both T4s (DDP, `torchrun --nproc_per_node 2`: the result 1.6-1.9x "
+                     "sooner for the same GPU-hours), keep the effective batch of the one-GPU recipe, train extra "
+                     "copies/seeds only for promoted ideas, and put this trade-off to the user (skill kaggle-gpu, "
+                     "section 3 item 10).")
+    elif "QUOTA TO SPARE" in reg:
+        lines.append("Quota to spare and short runs: wall time is not the limit either. Run more screens side by "
+                     "side (both T4s, two sessions per account), not longer ones.")
+    elif run_h is not None and run_h >= TIME_BOUND_RUN_H:
+        lines.append("Quota-bound: score per GPU-hour, both T4s on separate folds/screens. Re-check the regime when an "
+                     "account is added or the quota resets.")
+    return lines
+
+
 def plan(root: str | Path | None = None, refresh: bool = True, deadline: str | None = None) -> str:
     """Budget the GPU hours left until the deadline (weekly resets, final-week reserve, measured costs)."""
     root = _root(root)
@@ -2219,6 +2301,7 @@ def plan(root: str | Path | None = None, refresh: bool = True, deadline: str | N
         days = (dl - now).total_seconds() / 86400
         lines.append(f"Until the deadline ({dl.date()}, {days:.1f} days): {avail_now:.1f}h now + {resets} weekly "
                      f"reset(s) x {weekly:.0f}h = ~{total:.0f} GPU-hours in total.")
+        lines += regime_lines(root, total, days, other_accounts(kaggle_username(probe=refresh)), weekly, resets)
         if st and st.code_competition:
             lines.append("Code competition: committing each GPU inference notebook version spends your quota "
                          "(it runs on the public test) - keep a few hours for the final inference kernels and "
