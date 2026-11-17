@@ -34,4 +34,6 @@ blended OOF → validate the submission.
 Blends that include public submission files (no OOF) cannot be scored this way: log them LB-only
 (`kgkit ledger add <name> lb-only --sub <file>`, then `kgkit ledger lb`) and follow `ensembling` §6.
 
-Report members, weights, single vs blended (honest) CV, and whether it deserves a submission slot.
+Report members, weights, single vs blended (honest) CV, and whether it deserves a submission slot. A new single
+model kept for its diversity is recorded `kgkit ledger decide <id> keep --member`: a plain keep would make it the
+accepted baseline, and the next `ledger compare` of an ensemble would run against it.

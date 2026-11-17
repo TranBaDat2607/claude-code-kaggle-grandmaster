@@ -98,7 +98,12 @@ export type KernelLive = {
   tmp?: [number, number]
   /** [index, util %, memory used MB, memory total MB, name]. */
   gpus?: [number, number, number, number, string][]
+  /** The GPUs its machine shape promises (the runner, or the cell kgkit filled in). */
+  want?: number
   doing?: string[]
+  /** What is wrong with its machine, when its log shows it: fewer GPUs than `want`, a KG_BAD_MACHINE line, or a
+   * process that found no CUDA GPU (#113). */
+  machine?: string
   /** The newest other line of its log. */
   lastLine?: string
   /** The newest other lines of its log, oldest first (up to 3). */

@@ -10,7 +10,7 @@ import subprocess
 
 import pytest
 
-KGMON_KEYS = {"v", "t", "t0", "cores", "cpu", "ram", "disk", "tmp", "gpus", "doing"}
+KGMON_KEYS = {"v", "t", "t0", "cores", "cpu", "ram", "disk", "tmp", "gpus", "want", "doing"}
 
 
 def _mod(plugin_root):
@@ -45,10 +45,11 @@ def test_the_pane_reads_every_field_the_runner_prints(plugin_root, monkeypatch, 
     monkeypatch.setattr(runner, "RUN", tmp_path / "run")
     monkeypatch.setattr(runner, "_gpus", lambda: [[0, 50, 1000, 15360, "Tesla T4"]])
     runner.doing(0, "exp/f0 on gpu0")
+    monkeypatch.setattr(runner, "WANT_GPUS", [2])  # the GPUs the pushed shape promises
     first, prev = runner.snapshot(None)
     snap, _ = runner.snapshot((prev[0] - 1, prev[1]))
     assert set(first) | set(snap) <= KGMON_KEYS, set(snap) - KGMON_KEYS
-    assert {"v", "t", "t0", "cores", "disk", "tmp", "gpus", "doing"} <= set(snap)
+    assert {"v", "t", "t0", "cores", "disk", "tmp", "gpus", "want", "doing"} <= set(snap)
     parser = (_mod(plugin_root) / "kaggle.ts").read_text(encoding="utf-8")
     body = parser[parser.index("export function parseKgmon"):]
     assert {k for k in KGMON_KEYS if f"j.{k}" in body} == KGMON_KEYS

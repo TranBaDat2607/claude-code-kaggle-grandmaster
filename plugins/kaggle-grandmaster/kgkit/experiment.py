@@ -91,7 +91,7 @@ ID_RANGE_RE = re.compile(r"^\s*(\d+)\s*\.\.\s*(\d+)\s*$")
 
 
 DECISIONS = ("baseline", "keep", "discard", "inconclusive")
-ACCEPTED = ("baseline", "keep")
+ACCEPTED = E.ACCEPTED
 LB_ONLY_TAGS = E.LB_ONLY_TAGS  # LB score only: blends with public files, forks of public inference notebooks
 MIN_DISTINCT_CV = 4
 KEY_FIELDS = ("folds_hash", "eval_hash")  # fingerprints of the evaluation set a record was scored on
@@ -118,6 +118,24 @@ def score_preds(metric: str, y_true, pred, folds=None) -> tuple[float, list[floa
 
 def fmt_cv(r: dict, digits: int = 5) -> str:
     return f"{r['cv']:.{digits}f}" if isinstance(r.get("cv"), (int, float)) else "LB-only"
+
+
+def selection_note(new: dict, base: dict) -> str | None:
+    """Why two records' OOF scores are not like for like, or None. ``oof_selection`` says whether anything about a
+    model (stopping round, epoch, checkpoint) was chosen on the fold it then predicts ("scored-fold": an optimistic
+    OOF) or not ("independent"); the training templates record it (#109). Older records do not say."""
+    a, b = new.get("oof_selection"), base.get("oof_selection")
+    if a == b or (a is None and b is None):
+        return None
+    if "scored-fold" in (a, b):
+        biased = new if a == "scored-fold" else base
+        return (f"{biased['id']} chose its stopping round / epoch on the scored fold: its OOF is optimistic, so the "
+                f"gain is biased {'up' if biased is new else 'down'}. Re-run it with selection off the scored fold "
+                f"(the templates' default) before deciding a small gain.")
+    old = new if a is None else base
+    return (f"{old['id']} was logged before kgkit recorded how an OOF was selected. If its template early-stopped "
+            f"or picked its best epoch on the scored fold, its OOF is optimistic: re-run it with this kgkit's "
+            f"template before deciding a small gain.")
 
 
 def _check_decision(d: str) -> str:
@@ -291,6 +309,7 @@ class Ledger:
             "recheck": os.environ.get("KG_RECHECK") or None,  # set by `kgkit recheck`: not on the frozen folds
             "parent": self._resolve_id(parent) if parent else None,
             "decision": _check_decision(decision) if decision else None,
+            **({"decision_seq": self._next_decision_seq()} if decision else {}),
             "phase": (st.phase or None) if st else None,
             "cmd": _command(self.root),
             **_git_info(self.root, exp_id),
@@ -352,21 +371,34 @@ class Ledger:
         new = [t for t in have if t not in tags] if remove else have + [t for t in dict.fromkeys(tags) if t not in have]
         return self.update(exp_id, tags=new)
 
-    def decide(self, exp_id: str, decision: str, note: str = "", parent: str | None = None) -> dict:
-        """Record the keep/discard decision (and optionally the baseline it was compared against). A
-        ``public-lb-fitted`` record can be discarded but never accepted: it would become the baseline new ideas are
-        compared against."""
+    def decide(self, exp_id: str, decision: str, note: str = "", parent: str | None = None,
+               member: bool = False) -> dict:
+        """Record the keep/discard decision (and optionally the baseline it was compared against). The accepted
+        decision made last sets the baseline, whatever the ledger order. ``member``: kept as an ensemble member,
+        without becoming the baseline. A ``public-lb-fitted`` record can be discarded but never accepted: it would
+        become the baseline new ideas are compared against."""
         decision, rec = _check_decision(decision), self.get(exp_id)
+        if member and decision != "keep":
+            raise ValueError(f"--member keeps a record as an ensemble member without making it the baseline: it goes "
+                             f"with keep, not {decision}")
         if decision in ACCEPTED and E.lb_fitted(rec):
             raise ValueError(f"{rec['id']} is tagged public-lb-fitted (tilted toward the public labels): it is display "
                              f"only and cannot be {decision}; decide discard, or remove the tag with "
                              f"`ledger tag {rec['id']} public-lb-fitted --remove` if it is not fitted")
-        fields: dict[str, Any] = {"decision": decision, "decided_at": time.strftime("%Y-%m-%dT%H:%M:%S")}
+        fields: dict[str, Any] = {"decision": decision, "decided_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                                  "decision_seq": self._next_decision_seq()}
+        if member or rec.get("member"):
+            fields["member"] = bool(member)
         if note:
             fields["decision_note"] = note
         if parent:
             fields["parent"] = self.get(parent)["id"]  # locally the baseline must exist
         return self.update(exp_id, **fields)
+
+    def _next_decision_seq(self) -> int:
+        """A counter that orders decisions: clocks tie within a second (a script, a sweep) and differ across
+        machines."""
+        return 1 + max([int(r.get("decision_seq") or 0) for r in self.records()] or [0])
 
     def import_preds(self, name: str, oof: np.ndarray, test_pred: np.ndarray | None, y_true=None,
                      folds: Sequence[int] | None = None, metric: str | None = None, cv: float | None = None,
@@ -389,12 +421,12 @@ class Ledger:
 
     # ------------------------------------------------------------------ read
     def baseline(self, fallback: bool = True) -> dict | None:
-        """The accepted baseline: the most recent experiment decided ``keep`` or ``baseline``.
-        Falls back to the highest CV only when nothing has been accepted yet."""
-        recs = self.records()
-        for r in reversed(recs):
-            if r.get("decision") in ACCEPTED and not r.get("recheck") and not E.lb_fitted(r):
-                return r
+        """The accepted baseline: the experiment decided ``keep`` or ``baseline`` most recently (not the last one in
+        the ledger), leaving out members kept with ``--member`` (``evalset.accepted_baseline``). Falls back to the
+        highest CV only when nothing has been accepted yet."""
+        r = E.accepted_baseline(self.records())
+        if r is not None:
+            return r
         if fallback:
             best = self.best(1)
             return best[0] if best else None

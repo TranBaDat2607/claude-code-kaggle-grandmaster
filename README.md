@@ -68,6 +68,7 @@ auto-update under `/plugin` → **Marketplaces**.
 | `/kg-kernel` | Package an offline notebook for a code competition |
 | `/kg-final` | Choose the final submissions most likely to hold up on the private leaderboard |
 | `/kaggle-monitor` | Open the Kaggle pane |
+| `/kg-update` | Update the plugin to its latest release, then `/reload-plugins`: the conversation stays |
 
 Also `kg-recon`, `kg-eda`, `kg-cv`, `kg-baseline`, `kg-status`, `kg-debug`, `kg-ideas`, `kg-postmortem` and
 `kg-showcase`. In Claude Code, commands are written with the plugin's name (`/kaggle-grandmaster:kg-status`); the
@@ -75,7 +76,7 @@ short form works when no other plugin uses the name.
 
 ## What's inside
 
-**22 playbook skills**, Claude loads them on its own when relevant · **18 slash commands** · **9 specialist agents** ·
+**22 playbook skills**, Claude loads them on its own when relevant · **19 slash commands** · **9 specialist agents** ·
 **5 safety hooks** · **`kgkit`**, a tested Python toolkit (folds, 35+ metrics, ensembling, experiment ledger, Kaggle
 GPU pipeline) · **training templates** for GBDTs, timm and Hugging Face transformers · **the Kaggle pane**.
 

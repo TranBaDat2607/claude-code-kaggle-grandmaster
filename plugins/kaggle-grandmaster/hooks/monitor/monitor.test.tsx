@@ -958,3 +958,60 @@ test('with the pane hidden every account is read and the model told once, then a
   expect(await told()).toEqual([])
   await $.session.end({ reason: 'other', sessionId: 's1', resume: { id: 's1' } })
 })
+
+test('a bad machine: fewer GPUs than the shape promises, a KG_BAD_MACHINE line, or no CUDA GPU (#113)', async () => {
+  expect(parseKgmon('[kgmon] {"v":1,"t":5,"cores":4,"gpus":[[0,0,300,15360,"Tesla T4"]],"want":2}')?.want).toBe(2)
+  const t4 = (i: number): [number, number, number, number, string] => [i, 0, 300, 15360, 'Tesla T4']
+  const tr = new LiveTracker()
+  tr.reading({ t: 5, gpus: [t4(0), t4(1)], want: 2 })
+  expect(tr.machine).toBeUndefined()
+  tr.reading({ t: 35, gpus: [t4(0)], want: 2 })
+  expect(tr.machine).toBe('the session got 1 GPU where its shape promises 2')
+  const b = new LiveTracker()
+  b.line('[kg    0.1m] KG_BAD_MACHINE: NvidiaTeslaT4 promises 2 GPUs, nvidia-smi lists 0. Kaggle sometimes starts')
+  expect(b.machine).toBe('the session got 0 GPUs where NvidiaTeslaT4 promises 2')
+  const c = new LiveTracker()
+  c.line('[gpu1] RuntimeError: No CUDA GPUs are available')
+  expect(c.machine).toBe('a process of the kernel found no GPU (No CUDA GPUs are available)')
+  // the first diagnosis stands; a reading without `want` (a CPU kernel, an older cell) says nothing
+  c.reading({ t: 40, gpus: [t4(0)], want: 1 })
+  expect(c.machine).toMatch(/found no GPU/)
+  const d = new LiveTracker()
+  d.reading({ t: 5, gpus: [] })
+  expect(d.machine).toBeUndefined()
+})
+
+test('a card on a bad machine says so, open or closed, and how to get a healthy one', async ($, on) => {
+  const now = Date.UTC(2026, 10, 6, 12)
+  on('clock.now', () => ({ value: now }))
+  const seeded = runningKernels(now, ['u2/train-a']) as unknown as Record<string, { value: Record<string, KernelLive> }>
+  seeded.live!.value['u2/train-a']!.machine = 'the session got 1 GPU where its shape promises 2'
+  on('state.get', ($, e, next) => (e.key in seeded ? { value: { value: seeded[e.key], version: 1 } } : next(e)))
+  on('store.set', () => ({ value: undefined }))
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect((await ui.find({ type: 'Text', text: /Bad machine: the session got 1 GPU where its shape promises 2/ }))?.text).toBeDefined()
+  expect((await ui.find({ type: 'Text', text: /gpu repush u2\/train-a --yes/ }))?.text).toBeDefined()
+  await ui.press({ key: 'card-u2/train-a' })
+  expect((await ui.find({ type: 'Text', text: /Bad machine/ }))?.text).toBeDefined()
+  await ui.unmount()
+})
+
+test('a log without readings points at the monitor cell in kgkit', async ($, on) => {
+  const now = Date.UTC(2026, 10, 6, 12)
+  on('clock.now', () => ({ value: now }))
+  const seeded: Record<string, unknown> = {
+    accounts: { shape: 'accounts-1', value: [{ alias: 'acc2', user: 'u2', tokenPath: '~/.kaggle/t', hasToken: true, isActive: true }] },
+    kernels: {
+      shape: 'kernels-2',
+      value: { acc2: { value: [{ ref: 'u2/hand', title: 'hand', status: 'RUNNING', lastRunTime: '2026-11-06T11:00:00' }], fetchedAt: now } },
+    },
+    live: { shape: 'live-3', value: { 'u2/hand': { ref: 'u2/hand', alias: 'acc2', isFollowing: true, heardAt: now, lastLine: 'epoch 1' } } },
+  }
+  on('state.get', (_, e) => ({ value: e.key in seeded ? { value: seeded[e.key], version: 1 } : { value: undefined, version: 0 } }))
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  const text = (await ui.find({ type: 'Text', text: /no resource readings/ }))?.text ?? ''
+  expect(text).toMatch(/gpu build/)
+  expect(text).toMatch(/kgkit\/kaggle_monitor_cell\.py/)
+  expect(text).not.toMatch(/templates\//)
+  await ui.unmount()
+})

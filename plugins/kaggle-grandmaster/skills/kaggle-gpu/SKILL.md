@@ -38,6 +38,16 @@ Re-check the regime whenever an account is added, the quota resets, or the deadl
 - Batch sessions at once per account: **2 GPU, 1 TPU**, across all competitions. A push beyond that
   prints `Maximum batch GPU session count of 2 reached` and exits 0. `kgkit gpu push` checks your busy
   sessions first.
+- **A GPU job starts within a minute or two of its push.** Queued for more than 5 minutes with the session
+  slots free, it is usually stuck, not waiting: `gpu wait` and `gpu status` say so. Deleting and pushing it
+  again starts it at once (`gpu repush <kernel> --yes`; deleting is irreversible, so ask the user first), or
+  build it for the P100 pool. TPU jobs are different: they queue for 10-24 h by design.
+- **A 2×T4 push sometimes lands on a bad machine**: one T4 (or none) visible, often several times slower. A
+  `gpu build` kernel, and a hand-written one `gpu push` added the hardware monitor to, stop within seconds with
+  a `KG_BAD_MACHINE` line; `gpu wait` reads a running GPU kernel's log in its first minutes and says so (also
+  for `No CUDA GPUs are available`). The first log lines should list both GPUs. Pushing again usually gets a
+  healthy machine at once: `gpu repush <kernel> --yes`, after asking the user (deleting is irreversible).
+  `KG_EXPECT_GPUS=0` / `KGMON_EXPECT_GPUS = 0` turns the check off for code that needs one GPU only.
 - **Inputs are bound at push time.** `kernel_sources` resolve to the outputs that exist when the kernel is
   pushed, not when it starts. A job queued behind a run that is still going starts without that run's new
   output. `kgkit gpu push` refuses when an attached kernel is still queued or running.
@@ -83,6 +93,8 @@ collect             ->  outputs (no weights by default) -> ledger import, artefa
 release <kernel>    ->  drop a reservation by hand (a run that was deleted or never started)
 cancel <kernel>     ->  how to stop it: running = website "Stop session"; queued = only `kaggle kernels
                         delete` frees the slot (irreversible: ask the user)
+repush <kernel>     ->  delete a stuck kernel and push its folder again; prints the plan, --yes does it
+                        (ask the user first). A deleted kernel's runs stay in the log as deleted
 log                 ->  every remote run with its cost and result
 ```
 Raw `kaggle kernels push` calls are logged by the plugin's hook too (every push in a compound command,

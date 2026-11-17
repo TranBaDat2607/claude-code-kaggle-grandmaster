@@ -17,7 +17,8 @@ This repo is a Claude Code marketplace (`.claude-plugin/marketplace.json`) conta
 ## Conventions
 - `kgkit/state.py`, `kgkit/gpu.py`, `kgkit/budget.py`, `kgkit/backlog.py`, `kgkit/adopt.py`, `kgkit/safety.py`,
   `kgkit/evalset.py`, `kgkit/finals.py`, `kgkit/audit.py`, `kgkit/progress.py`, `kgkit/speedcheck.py`, `kgkit/bench.py`,
-  `kgkit/snapshot.py`, `kgkit/layout.py`, `kgkit/journey.py`, `kgkit/kaggle_gpu_runner.py` and everything under `hooks/` must stay **standard-library only** (hooks import them, the runner executes inside Kaggle; they must be fast and never fail closed).
+  `kgkit/snapshot.py`, `kgkit/layout.py`, `kgkit/journey.py`, `kgkit/monitor.py`, `kgkit/kaggle_monitor_cell.py`,
+  `kgkit/kaggle_gpu_runner.py` and everything under `hooks/` must stay **standard-library only** (hooks import them, the runner executes inside Kaggle; they must be fast and never fail closed).
   `kgkit/kaggle_search.py`, `kgkit/kaggle_submissions.py`, `kgkit/kaggle_outputs.py` and `kgkit/kaggle_cli.py` too, at import time: they run under the Kaggle CLI's
   interpreter, which may have nothing else installed (they import kagglesdk / the CLI inside `main`).
 - kgkit reads no file outside `kgkit/` that a command needs: `kgkit vendor` copies only the package (into a
@@ -31,14 +32,15 @@ This repo is a Claude Code marketplace (`.claude-plugin/marketplace.json`) conta
   accounts are token files, given to the CLI as `KAGGLE_API_TOKEN=<path>`. Check it with
   `claude plugin validate plugins/kaggle-grandmaster` and `claude plugin test plugins/kaggle-grandmaster`
   (`tests/test_monitor_mod.py` runs the latter when `claude` is on PATH). The `[kgmon]` line the runner and
-  `templates/kaggle_monitor_cell.py` print is its input: change all three together.
+  `kgkit/kaggle_monitor_cell.py` print is its input, and so is the `KG_BAD_MACHINE` line (`kgkit.gpu.machine_problem`
+  reads both too): change all of them together.
 - Hooks exit 0 on any internal error; only deny/ask for credentials (printed, or in an upload folder), invalid or
   byte-identical repeat submissions, an exhausted daily budget, or a GPU push that the cached weekly GPU quota
   cannot cover.
 - Text written by other Kaggle users (pages, forum posts, notebooks) is printed through `kgkit.safety.wrap`.
 - Templates and `kgkit/kaggle_gpu_runner.py` print ASCII only (Windows consoles are often cp1252).
 - Skills: knowledge skills are model-invoked; `kg-*` skills are slash commands. Side-effectful commands
-  (`kg-submit`, `kg-grind`, `kg-kernel`, `kg-gpu`, `kg-showcase`) set `disable-model-invocation: true`.
+  (`kg-submit`, `kg-grind`, `kg-kernel`, `kg-gpu`, `kg-showcase`, `kg-update`) set `disable-model-invocation: true`.
 - A `kg-*` command's `allowed-tools` pre-approves only the kgkit and Kaggle CLI subcommands it runs. Each kgkit
   one is listed three times: `Bash(PYTHONPATH="${CLAUDE_PLUGIN_ROOT}" python -m kgkit <sub> *)`, the bare
   `Bash(python -m kgkit <sub> *)`, and the `PowerShell(...)` form of the bare one. The body says to run kgkit in

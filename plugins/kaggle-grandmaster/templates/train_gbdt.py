@@ -11,6 +11,8 @@ Copy to src/, edit CONFIG and add_features(), then:
     python src/train_gbdt.py --model mlp --name mlp_v1      #   linear | knn | svm | mlp
     python src/train_gbdt.py --model xgb --device cuda      # GPU XGBoost / CatBoost / LightGBM (or KG_DEVICE=cuda)
     python -m kgkit bench --run "python src/train_gbdt.py --smoke" --run "python src/train_gbdt.py --smoke --device cuda"
+    python src/train_gbdt.py --name lr08 --params '{"learning_rate": 0.08}' --parent 0007   # lineage in the ledger
+    python src/train_gbdt.py --refit                 # after early stopping, refit on the whole training part
 
 The experiment name defaults to "<model>_baseline" (e.g. xgb_baseline) when neither --name nor
 CONFIG["name"] is set.
@@ -19,6 +21,11 @@ What it guarantees:
   * uses the frozen folds in data/folds.csv (joined on id, or by row order when no id column)
   * OOF predictions + fold-averaged test predictions, scored with the competition metric
   * label metrics handled properly (threshold / argmax / optimised rounding fitted on OOF)
+  * honest OOF: LightGBM / XGBoost / CatBoost early-stop on a stratified slice (es_fraction, drawn with the run
+    seed) of each fold's training part, never on the fold they predict: stopping on the scored fold picks the
+    tree count on those rows and makes the OOF optimistic (more so at higher learning rates).
+    --es-on-valid restores the old behaviour, to reproduce records logged before it.
+  * per-fold training scores next to the CV (the train/validation gap), and the record's --parent
   * every run logged to the experiment ledger with OOF/test artefacts and a submission file
 """
 
@@ -62,6 +69,9 @@ CONFIG = dict(
     log_target=False,     # train on log1p(y) (RMSLE-style targets)
     seeds=[42],
     early_stopping=200,
+    es_fraction=0.1,      # share of each fold's training part held back to pick the number of trees
+    es_on_valid=False,    # True: early-stop on the scored fold (optimistic OOF; the template's old behaviour)
+    refit=False,          # True: refit on the whole training part with best_iteration / (1 - es_fraction) trees
     params={},            # overrides merged into the model defaults below
     notes="",
 )
@@ -87,6 +97,8 @@ DEFAULTS = {
                 early_stopping=True),
 }
 SKLEARN_KINDS = ("linear", "knn", "svm", "mlp")
+ES_KINDS = ("lgbm", "xgb", "cat")  # early-stopped on rows we hold out; hgb and mlp hold out their own (validation_fraction)
+N_TREES_KEY = {"lgbm": "n_estimators", "xgb": "n_estimators", "cat": "iterations"}
 # --device cuda; merged before --params, so explicit params win. LightGBM uses its GPU build when one trains
 # (kgkit.featsearch.lightgbm_device_params: device_type cuda, then the OpenCL "gpu" build of the pip wheel), else
 # the CPU with a note. sklearn has no GPU path (cuML: `python -m cuml.accel src/train_gbdt.py`, Linux/WSL2).
@@ -168,32 +180,62 @@ def make_model(kind: str, task: str, params: dict, seed: int, n_classes: int):
     return cls(random_state=seed, categorical_features="from_dtype", **p)
 
 
-def fit(model, kind, X_tr, y_tr, X_va, y_va, cats, es):
+def es_split(tr: np.ndarray, y: np.ndarray, task: str, frac: float, seed: int, fold: int):
+    """(fit rows, early-stopping rows) of a fold's training rows ``tr``: ``frac`` of them held back, stratified by
+    class for classification, drawn with the run seed (the same seed and fold draw the same rows)."""
+    rng = np.random.default_rng([seed, fold])
+    groups = [tr[y[tr] == c] for c in np.unique(y[tr])] if task != "regression" else [tr]
+    es = np.concatenate([rng.permutation(g)[: int(round(frac * len(g)))] for g in groups])
+    if len(es) == 0:  # tiny data: hold back one row rather than none
+        es = rng.permutation(tr)[:1]
+    held = np.isin(tr, es)
+    return tr[~held], np.sort(es)
+
+
+def fit(model, kind, X_fit, y_fit, X_es, y_es, cats, es):
+    """Fit, early-stopping on (X_es, y_es) when given (GBDTs only); returns (model, best iteration or None)."""
     if kind == "lgbm":
         import lightgbm as lgb
 
         import inspect
 
+        if X_es is None:
+            model.fit(X_fit, y_fit)
+            return model, None
         # LightGBM >= 4.7 renamed eval_set to eval_X/eval_y; Kaggle images may ship older versions
         if "eval_X" in inspect.signature(model.fit).parameters:
-            evals = dict(eval_X=(X_va,), eval_y=(y_va,))
+            evals = dict(eval_X=(X_es,), eval_y=(y_es,))
         else:
-            evals = dict(eval_set=[(X_va, y_va)])
-        model.fit(X_tr, y_tr, callbacks=[lgb.early_stopping(es, verbose=False)], **evals)
+            evals = dict(eval_set=[(X_es, y_es)])
+        model.fit(X_fit, y_fit, callbacks=[lgb.early_stopping(es, verbose=False)], **evals)
         return model, getattr(model, "best_iteration_", None)
     if kind == "xgb":
-        model.set_params(early_stopping_rounds=es)
-        model.fit(X_tr, y_tr, eval_set=[(X_va, y_va)], verbose=False)
+        if X_es is None:
+            model.fit(X_fit, y_fit, verbose=False)
+        else:
+            model.set_params(early_stopping_rounds=es)
+            model.fit(X_fit, y_fit, eval_set=[(X_es, y_es)], verbose=False)
         if model.get_params().get("device", "cpu") != "cpu":
             # predict() gets pandas frames in host memory: predicting on the CPU avoids XGBoost's
             # "mismatched devices" fallback warning on every call (same trees, same predictions)
             model.set_params(device="cpu")
-        return model, getattr(model, "best_iteration", None)
+        return model, None if X_es is None else getattr(model, "best_iteration", None)
     if kind == "cat":
-        model.fit(X_tr, y_tr, cat_features=cats, eval_set=(X_va, y_va), early_stopping_rounds=es, use_best_model=True)
+        if X_es is None:
+            model.fit(X_fit, y_fit, cat_features=cats)
+            return model, None
+        model.fit(X_fit, y_fit, cat_features=cats, eval_set=(X_es, y_es), early_stopping_rounds=es,
+                  use_best_model=True)
         return model, model.get_best_iteration()
-    model.fit(X_tr, y_tr)
+    model.fit(X_fit, y_fit)
     return model, getattr(model, "n_iter_", None)
+
+
+def n_trees(kind: str, best_iteration) -> int | None:
+    """Trees up to and including the best iteration (XGBoost and CatBoost count it from 0, LightGBM from 1)."""
+    if best_iteration is None:
+        return None
+    return int(best_iteration) + (1 if kind in ("xgb", "cat") else 0)
 
 
 def predict(model, task, X):
@@ -213,9 +255,16 @@ def main():
     ap.add_argument("--params", type=json.loads, help='JSON overrides, e.g. \'{"num_leaves": 127}\'')
     ap.add_argument("--notes")
     ap.add_argument("--smoke", action="store_true", help="1 fold, 50 rounds, no ledger/submission")
+    ap.add_argument("--parent", help="ledger id this experiment changes (the accepted baseline, usually)")
+    ap.add_argument("--refit", action="store_true", default=None,
+                    help="after early stopping, refit on the whole training part with best_iteration / "
+                         "(1 - es_fraction) trees")
+    ap.add_argument("--es-on-valid", action="store_true", default=None,
+                    help="early-stop on the scored fold, as before #109 (optimistic OOF): only to reproduce "
+                         "old ledger records")
     args = ap.parse_args()
     cfg = dict(CONFIG)
-    for k in ("name", "model", "device", "seeds", "notes"):
+    for k in ("name", "model", "device", "seeds", "notes", "refit", "es_on_valid"):
         if getattr(args, k) is not None:
             cfg[k] = getattr(args, k)
     cfg["name"] = cfg["name"] or f"{cfg['model']}_baseline"
@@ -280,48 +329,77 @@ def main():
             params[n_key] = 50
     oof = np.zeros((len(train), n_classes)) if task == "multiclass" else np.zeros(len(train))
     test_pred = np.zeros((len(test), n_classes)) if task == "multiclass" else np.zeros(len(test))
-    fold_scores, best_iters = [], []
+    fold_scores, best_iters, in_sample = [], [], []  # in_sample: (fold, fitted rows, their predictions)
     fold_list = list(split_indices(folds))[: 1 if args.smoke else None]
+    kind = cfg["model"]
+    stops = kind in ES_KINDS
+    es_on = ("scored-fold" if cfg["es_on_valid"] else "inner") if stops else None
+    if es_on == "scored-fold":
+        print("note: early stopping on the scored fold (--es-on-valid): the OOF is optimistic; only to reproduce "
+              "records logged that way")
     for seed in cfg["seeds"]:
         seed_everything(seed)
         for f, tr, va in fold_list:
-            model = make_model(cfg["model"], task, params, seed, n_classes)
-            model, it = fit(model, cfg["model"], X.iloc[tr], y[tr], X.iloc[va], y[va], cats, cfg["early_stopping"])
+            if not stops:
+                fit_rows, es_rows = tr, None
+            elif es_on == "scored-fold":
+                fit_rows, es_rows = tr, va
+            else:
+                fit_rows, es_rows = es_split(tr, y, task, cfg["es_fraction"], seed, f)
+            model = make_model(kind, task, params, seed, n_classes)
+            model, it = fit(model, kind, X.iloc[fit_rows], y[fit_rows],
+                            None if es_rows is None else X.iloc[es_rows], None if es_rows is None else y[es_rows],
+                            cats, cfg["early_stopping"])
             best_iters.append(it)
+            if cfg["refit"] and es_on == "inner" and n_trees(kind, it):
+                n = int(np.ceil(n_trees(kind, it) / (1 - cfg["es_fraction"])))
+                model = make_model(kind, task, {**params, N_TREES_KEY[kind]: n}, seed, n_classes)
+                model, _ = fit(model, kind, X.iloc[tr], y[tr], None, None, cats, cfg["early_stopping"])
+                fit_rows = tr
             oof[va] += predict(model, task, X.iloc[va]) / len(cfg["seeds"])
             test_pred += predict(model, task, X_test) / (len(cfg["seeds"]) * len(fold_list))
+            in_sample.append((f, fit_rows, predict(model, task, X.iloc[fit_rows])))
     va_mask = np.isin(folds, [f for f, _, _ in fold_list])
 
     # ------------------------------------------------------------ metric-space conversion
-    def decode(p_oof, p_test):
-        """Map raw model outputs to what the metric (and submission) expects."""
-        if task == "regression" and cfg["log_target"]:
-            p_oof, p_test = np.expm1(p_oof), np.expm1(p_test)
-        if metric.kind != "label":
-            return p_oof, p_test, {}
-        if task == "binary":
-            t, _ = best_threshold(y[va_mask], p_oof[va_mask], metric.name)
-            return (p_oof >= t).astype(int), (p_test >= t).astype(int), {"threshold": t}
-        if task == "multiclass":
-            return p_oof.argmax(1), p_test.argmax(1), {}
-        r = OptimizedRounder(metric=metric.name).fit(p_oof[va_mask], y_raw.to_numpy()[va_mask])
-        return r.predict(p_oof), r.predict(p_test), {"thresholds": r.thresholds_.tolist()}
+    # raw model outputs -> what the metric (and submission) expects; the ledger keeps the raw outputs
+    unlog = np.expm1 if task == "regression" and cfg["log_target"] else (lambda p: p)
+    post, decide = {}, (lambda p: p)
+    if metric.kind == "label" and task == "binary":
+        t, _ = best_threshold(y[va_mask], oof[va_mask], metric.name)
+        post, decide = {"threshold": t}, (lambda p: (p >= t).astype(int))
+    elif metric.kind == "label" and task == "multiclass":
+        decide = lambda p: p.argmax(1)  # noqa: E731
+    elif metric.kind == "label":
+        r = OptimizedRounder(metric=metric.name).fit(unlog(oof[va_mask]), y_raw.to_numpy()[va_mask])
+        post, decide = {"thresholds": r.thresholds_.tolist()}, r.predict
 
-    oof_m, test_m, post = decode(oof, test_pred)
+    def to_metric(p):
+        return decide(unlog(p))
+
+    oof_m, test_m = to_metric(oof), to_metric(test_pred)
     y_metric = y_raw.to_numpy() if task == "regression" else y
     for f, _, va in fold_list:
         fold_scores.append(metric(y_metric[va], oof_m[va]))
+    train_scores = [float(np.mean([metric(y_metric[rows], to_metric(p)) for g, rows, p in in_sample if g == f]))
+                    for f, _, _ in fold_list]
     cv = metric(y_metric[va_mask], oof_m[va_mask])
     print(f"[{cfg['name']}] {metric.name} CV {cv:.5f} +/- {np.std(fold_scores):.5f} | folds "
-          + " ".join(f"{s:.4f}" for s in fold_scores) + f" | {time.time() - t0:.0f}s")
+          + " ".join(f"{s:.4f}" for s in fold_scores) + f" | train {np.mean(train_scores):.5f} (gap "
+          + f"{np.mean(train_scores) - np.mean(fold_scores):+.5f}) | {time.time() - t0:.0f}s")
     if args.smoke:
         print("smoke run OK (not logged)")
         return
 
+    run_params = {**DEFAULTS[kind], **params, **post}
+    if stops:
+        run_params.update(early_stopping_on=es_on, es_fraction=cfg["es_fraction"] if es_on == "inner" else None,
+                          refit=bool(cfg["refit"] and es_on == "inner"))
     rec = Ledger().log(
-        cfg["name"], cv, fold_scores=fold_scores, params={**DEFAULTS[cfg["model"]], **params, **post},
-        features=feats, model=cfg["model"], notes=cfg["notes"], oof=oof, test_pred=test_pred,
+        cfg["name"], cv, fold_scores=fold_scores, params=run_params, parent=args.parent,
+        features=feats, model=kind, notes=cfg["notes"], oof=oof, test_pred=test_pred,
         task=task, seeds=cfg["seeds"], best_iterations=best_iters, runtime_s=round(time.time() - t0, 1),
+        train_scores=train_scores, oof_selection="scored-fold" if es_on == "scored-fold" else "independent",
     )
     sample = pd.read_csv(cfg["sample"])
     key = sample.columns[0]

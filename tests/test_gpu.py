@@ -365,9 +365,31 @@ def test_runner_reports_live_resources(gws, tmp_path):
     assert _kgmon(out) == []
 
 
+@pytest.mark.parametrize("found,stops", [("1", True), ("0", True), ("2", False)])
+def test_runner_stops_on_fewer_gpus_than_its_shape_promises(gws, tmp_path, found, stops):
+    """#113: a 2x T4 push that lands on a 1-GPU machine stops within seconds, saying why and what helps."""
+    kdir = G.build_kernel(gws, "fk", _cmd("fk"), hours=2, user="tester")
+    base = tmp_path / f"b{found}"
+    _kaggle_input(base, gws)
+    meta = json.loads((kdir / "kernel-metadata.json").read_text())
+    env = dict(os.environ, KAGGLE_INPUT=str(base / "input"), KAGGLE_WORKING=str(base / "working"),
+               KG_RUN_DIR=str(base / "run"), KG_FAKE_GPUS=found, KG_MONITOR_S="0")
+    env.pop("PYTHONPATH", None)
+    r = subprocess.run([sys.executable, str(kdir / meta["code_file"])], env=env, capture_output=True, text=True,
+                       timeout=300)
+    if stops:
+        assert r.returncode != 0
+        assert f"KG_BAD_MACHINE: NvidiaTeslaT4 promises 2 GPUs, nvidia-smi lists {found}" in r.stdout
+        assert "gpu repush" in r.stdout and "KG_RUN_STATUS" not in r.stdout
+        assert G.machine_problem(r.stdout, "NvidiaTeslaT4") is not None
+    else:
+        assert r.returncode == 0, r.stdout[-2000:] + r.stderr[-2000:]
+        assert "KG_BAD_MACHINE" not in r.stdout
+
+
 def test_monitor_cell_prints_the_runner_reading(plugin_root, tmp_path):
     """The notebook cell prints the same [kgmon] line as the runner, so the pane reads either."""
-    cell = plugin_root / "templates" / "kaggle_monitor_cell.py"
+    cell = plugin_root / "kgkit" / "kaggle_monitor_cell.py"
     assert cell.read_text(encoding="utf-8").isascii()
     env = dict(os.environ, KAGGLE_WORKING=str(tmp_path))
     r = subprocess.run([sys.executable, str(cell)], env=env, capture_output=True, text=True, timeout=60)
@@ -392,7 +414,7 @@ def test_runner_resume_skips_done_folds(gws, tmp_path):
     meta = json.loads((kdir / "kernel-metadata.json").read_text())
     assert meta["kernel_sources"] == ["tester/fk-train"] and meta["id"] == "tester/fk-train-r2"
     _kaggle_input(tmp_path / "k2", gws)
-    out, work = _run_kernel(kdir, tmp_path / "k2", gpus="1")
+    out, work = _run_kernel(kdir, tmp_path / "k2", gpus="1", KG_EXPECT_GPUS="0")  # one GPU: the check off
     job = json.loads((work / "kg_run.json").read_text())["jobs"][0]
     assert "fk fold 0 already done (resumed)" in out
     assert job["folds_done"] == [0, 1, 2, 3] and job["fold_status"]["0"].get("seconds") is None
@@ -558,7 +580,8 @@ def test_image_template_timeout_resume_and_assemble(tmp_path, plugin_root):
 
 @pytest.mark.parametrize("rel", ["kgkit/gpu.py", "kgkit/budget.py", "kgkit/state.py", "kgkit/backlog.py", "kgkit/adopt.py",
                                  "kgkit/evalset.py", "kgkit/finals.py", "kgkit/audit.py", "kgkit/progress.py",
-                                 "kgkit/kaggle_gpu_runner.py"])
+                                 "kgkit/kaggle_gpu_runner.py", "kgkit/monitor.py", "kgkit/kaggle_monitor_cell.py",
+                                 "kgkit/update.py"])
 def test_stdlib_only(plugin_root, rel):
     """Hooks import gpu/budget/state, and the runner executes inside Kaggle: standard library only."""
     import ast

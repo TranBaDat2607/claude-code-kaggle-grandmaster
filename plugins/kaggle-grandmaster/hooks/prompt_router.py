@@ -137,6 +137,14 @@ HINTS: list[tuple[str, str, str]] = [
      "figures, a public notebook and weights, a Kaggle write-up draft), suggest the user run "
      "`/kg-showcase`, a slash command: it audits the repo first and asks before each public step. Make nothing "
      "public from here."),
+    ("kg-update",
+     r"\b(update|upgrade)\b.{0,30}\b(kaggle[- ]?grandmaster|kgkit|(this|the|your) plugin)\b|"
+     r"\b(kaggle[- ]?grandmaster|kgkit|(this|the) plugin)\b.{0,30}\b(update|upgrade)|"
+     r"\b(newer|latest|new) (version|release) of (kaggle[- ]?grandmaster|kgkit|(this|the) plugin)\b",
+     "To update the kaggle-grandmaster plugin to its latest release without leaving the conversation, suggest the "
+     "user run `/kg-update`, a slash command: it checks the latest release, shows what changed, runs "
+     "`claude plugin update` (the user approves it), and then the user types /reload-plugins. "
+     "`python -m kgkit update-check` answers whether a newer release exists."),
     ("kaggle-monitor",
      r"\b(gpu|tpu) (quota|hours)\b|how many (gpu|tpu) hours|quota (left|remaining)|"
      r"\b(is|are) (my|the|our) (kaggle )?(kernels?|notebooks?|runs?|training) (still )?(running|done|finished)|"

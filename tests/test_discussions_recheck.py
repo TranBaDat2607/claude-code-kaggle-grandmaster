@@ -261,3 +261,86 @@ def test_recheck_report_verdicts():
     assert "did NOT survive" in gone
     none = report(rec("orc", 0.80, [0.80] * 5), rec("nrc", 0.81, [0.81] * 5), True, (new, old))
     assert "nothing to recheck" in none
+
+
+# ----------------------------------------------------------------------------- #115 another competition's threads
+def _other_comp_kaggle(calls, home="other-comp"):
+    """The fake CLI, where topic-messages answers only for ``home`` (Kaggle 404s a topic of another competition)."""
+    writeup = {**LIVE_TOPICS[0], "id": 200, "title": "1st place solution", "votes": 99}
+    inner = fake_kaggle(calls, topics=[writeup, *LIVE_TOPICS])
+
+    def run_(args, **kw):
+        if args[1:3] == ["competitions", "topic-messages"] and args[3] != home:
+            calls.append(args)
+            return subprocess.CompletedProcess(args, 1, "", "404 Client Error: Not Found for url")
+        return inner(args, **kw)
+    return run_
+
+
+@pytest.fixture
+def live_ws(meta, tmp_path, monkeypatch, capsys):
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    monkeypatch.chdir(ws)
+    monkeypatch.setenv("KGKIT_META_DIR", str(meta))
+    cli.main(["init", "live-comp", "--metric", "auc"])
+    calls = []
+    monkeypatch.setattr(D.shutil, "which", lambda _: "kaggle")
+    monkeypatch.setattr(D.subprocess, "run", _other_comp_kaggle(calls))
+    capsys.readouterr()
+    return ws
+
+
+def test_the_read_hint_names_another_competition(live_ws, capsys):
+    """`solutions` / `search` / `top` of a past competition print the read command with its --competition."""
+    for action in (["search", "leak"], ["top"], ["solutions"]):
+        cli.main(["discussions", *action, "--competition", "other-comp"])
+        out = capsys.readouterr().out
+        assert "read one: python -m kgkit discussions read <id> --competition other-comp" in out, (action, out[-400:])
+    cli.main(["discussions", "search", "leak", "--competition", "live-comp"])  # the workspace's own: no flag needed
+    assert "read one: python -m kgkit discussions read <id>   (" in capsys.readouterr().out
+    # the printed command works
+    cli.main(["discussions", "read", "103", "--competition", "other-comp"])
+    assert "Opening post" in capsys.readouterr().out
+
+
+def test_read_of_a_topic_listed_for_another_competition_says_where_it_is(live_ws, capsys):
+    cli.main(["discussions", "search", "leak", "--competition", "other-comp"])  # lists topic 103
+    capsys.readouterr()
+    cli.main(["discussions", "read", "103"])  # as the old hint printed it: the workspace's slug, a 404
+    out = capsys.readouterr().out
+    assert "topic 103 was listed for other-comp" in out
+    assert "python -m kgkit discussions read 103 --competition other-comp" in out
+    assert "/other-comp/discussion/103" in out and "/live-comp/discussion/103" not in out
+    with pytest.raises(SystemExit, match="--competition other-comp"):
+        cli.main(["discussions", "read", "103", "--source", "live"])
+
+
+def test_read_of_an_unknown_topic_asks_whether_it_is_another_competitions(live_ws, capsys):
+    cli.main(["discussions", "read", "777"])
+    out = capsys.readouterr().out
+    assert "topic 777 not found" in out and "from another competition" in out and "--competition <" in out
+
+
+def test_read_says_when_it_cut_a_message(live_ws, capsys):
+    cli.main(["discussions", "read", "103", "--competition", "other-comp", "--max-chars", "8"])
+    out = capsys.readouterr().out
+    longest = len("Opening post \U0001f680 & data")
+    assert f"1 message(s) cut at 8 characters: --max-chars {longest} for all of it" in out
+    cli.main(["discussions", "read", "103", "--competition", "other-comp"])
+    assert "cut at" not in capsys.readouterr().out
+
+
+def test_pages_and_kernels_hints_name_another_competition(live_ws, monkeypatch, capsys):
+    from kgkit import kernels as K
+    from kgkit import pages as P
+
+    monkeypatch.setattr(P, "fetch", lambda slug: [{"name": "overview", "text": "x"}, {"name": "rules", "text": "y"}])
+    cli.main(["pages", "--competition", "other-comp"])
+    assert "read one: python -m kgkit pages <name> --competition other-comp" in capsys.readouterr().out
+    cli.main(["pages"])
+    assert "read one: python -m kgkit pages <name>   (" in capsys.readouterr().out
+    monkeypatch.setattr(K, "top", lambda slug, n, sort_by: [])
+    monkeypatch.setattr(K, "format_top", lambda rows, scores=True: "(none)")
+    cli.main(["kernels", "top", "--competition", "other-comp", "--no-score"])
+    assert "next: python -m kgkit kernels pull <ref> --competition other-comp" in capsys.readouterr().out

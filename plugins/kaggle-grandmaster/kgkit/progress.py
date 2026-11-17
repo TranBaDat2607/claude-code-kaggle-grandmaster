@@ -22,7 +22,6 @@ import statistics
 from . import evalset as E
 from . import state as S
 
-ACCEPTED = ("baseline", "keep")
 PLATEAU_DAYS = 3        # at least this many days without a gain beyond noise ...
 PLATEAU_SHARE = 0.1     # ... and at least this share of the competition's span (first ledger record to deadline)
 PLATEAU_TRIES = 3       # honest experiments logged since the last gain: fewer is a pause, not a plateau
@@ -58,7 +57,7 @@ def plateau(root, st, recs: list[dict], now: dt.datetime | None = None) -> dict 
     no accepted baseline with a score of its own, or no timestamps to tell."""
     holdout = st.holdout
     honest = [r for r in recs if E.own_score(r, holdout) and not r.get("recheck")]
-    accepted = sorted((r for r in honest if r.get("decision") in ACCEPTED),
+    accepted = sorted((r for r in honest if E.accepted(r)),
                       key=lambda r: _time(r, "decided_at") or _time(r, "time") or dt.datetime.min)
     if not accepted:
         return None
