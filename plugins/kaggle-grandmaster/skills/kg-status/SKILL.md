@@ -41,7 +41,7 @@ PowerShell `$env:` assignment).
    the latest scores not yet attached to the ledger. Offer to attach them: `python -m kgkit ledger sync-lb` does
    it for every submission that names its record; `python -m kgkit ledger lb` does one by hand.
 3. If the GPU quota is stale or missing and remote runs are planned: `python -m kgkit gpu quota`.
-4. `python -m kgkit backlog list` and the CLAUDE.md notes. Flag experiments that were run but never
+4. `python -m kgkit backlog list` and CLAUDE.md `## Current state` (`reports/journal.md` for the history). Flag experiments that were run but never
    decided (no `decision` in the ledger table) and offer to compare/decide them.
 5. If `status` warned about many decisions on the same folds, recommend the CV re-check
    (`grandmaster-playbook`, "Guarding against overfitting the CV itself").

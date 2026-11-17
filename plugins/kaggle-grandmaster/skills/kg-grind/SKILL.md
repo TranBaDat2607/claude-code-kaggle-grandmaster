@@ -46,7 +46,7 @@ baseline beyond the paired noise, which `kgkit status` reports. The loop never f
 
 ## Loop
 1. **Orient**: `python -m kgkit status` (accepted baseline, decisions on these folds, backlog top),
-   CLAUDE.md notes, `reports/` (recon, eda, error analyses).
+   CLAUDE.md `## Current state`, `reports/` (recon, eda, error analyses, `journal.md`).
 2. **Backlog**: `python -m kgkit backlog list`. Refill it when fewer than ~5 open ideas by
    (a) dispatching `error-analyst` on the accepted baseline, (b) the domain skill's untried levers,
    (c) `solution-researcher` / `kgkit kernels pull` for prior art, (d) when runs are long or `gpu collect` reports
@@ -61,8 +61,10 @@ baseline beyond the paired noise, which `kgkit status` reports. The loop never f
 4. **Run** it via the `/kg-experiment` protocol (or delegate to `experiment-runner`): parent = accepted
    baseline, `kgkit ledger compare`, `kgkit ledger decide`. For a promoted screen, record both gains on
    the backlog item (`--screen-gain`, `--full-gain`).
-5. **Update**: `kgkit backlog set <n> --status done --exp <id> --result ...`, CLAUDE.md notes (one line per
-   experiment), commit. `kgkit backlog render` at the end of the loop.
+5. **Update**: `kgkit backlog set <n> --status done --exp <id> --result ...` (the learning goes there and in
+   the decision's "why"), commit. Rewrite CLAUDE.md `## Current state` only when it changed; never one line
+   per experiment (it loads into every session). At the end of the loop: `kgkit backlog render`, and a dated
+   entry in `reports/journal.md` for what the loop tried and learned.
 6. Every ~3 kept improvements: refresh the ensemble (`ensemble-architect`) and prepare a candidate
    submission file with its honest CV.
 7. When `status` warns about many decisions on the same folds, or every ~20 decisions: run

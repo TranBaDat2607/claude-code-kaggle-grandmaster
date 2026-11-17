@@ -60,7 +60,10 @@ Follow the experiment protocol (`grandmaster-playbook` §2):
    --parent <baseline>`; KEEP makes it the new baseline (the accepted decision made last is the baseline;
    `decide <id> baseline` restores any record). A model kept only as a member of the accepted ensemble:
    `decide <new> keep --member`, which leaves the baseline alone. `python -m kgkit backlog set <n> --status done
-   --exp <new> --result "<decision + gain>"`. Add one line of learning to the CLAUDE.md notes. Commit code. A sweep of runs is decided at once: `python -m
+   --exp <new> --result "<decision + gain>"`: the learning goes in these two (the decision's "why" and the
+   result), not in CLAUDE.md, which loads into every session. Rewrite `## Current state` in CLAUDE.md only when
+   this decision changes it (the plan, a direction now closed, a new standing gotcha); a longer narrative goes in
+   `reports/journal.md`. Commit code. A sweep of runs is decided at once: `python -m
    kgkit ledger decide 12..20 discard "<why>"`.
 7. Suggest the next experiment based on what was learned. When it changes direction (a new model family, new data,
    ensembling, the final week), name the new phase first: `python -m kgkit ledger phase "<name>"`.

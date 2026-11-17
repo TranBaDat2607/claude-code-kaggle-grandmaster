@@ -59,7 +59,7 @@ or a simple signal, and the blend needs them later anyway.
 ```
 backlog top idea → hypothesis → smallest change that tests it → run on frozen folds
 → log to ledger (parent = accepted baseline) → kgkit ledger compare <new>
-→ KEEP / DISCARD / INCONCLUSIVE → kgkit ledger decide → backlog set → one line in CLAUDE.md notes
+→ KEEP / DISCARD / INCONCLUSIVE → kgkit ledger decide → backlog set --result → CLAUDE.md Current state if it changed
 ```
 
 - **Compare against the accepted baseline, not the best CV.** The baseline is the last experiment
@@ -154,7 +154,9 @@ plugin's `templates/` folder.
    long runs, use the day for analysis and fast experiments.
 4. Use the daily submissions deliberately: to verify CV-LB agreement on *different kinds*
    of changes, not to hill-climb the public LB.
-5. End the day by updating the notes in CLAUDE.md: learnings, next experiments.
+5. End the day by rewriting `## Current state` in CLAUDE.md (the plan, closed directions, standing gotchas: under
+   ~20 lines, rewritten, never appended; it loads into every session) and putting the day's narrative in
+   `reports/journal.md`, which loads only when opened. Results are already in the ledger and the backlog.
 6. Keep the repo readable, since it goes public when the competition ends (`/kg-showcase` writes `solution/`
    and `journey/` from it): a variant is a flag of its script, not a copy; probes and logs go in `work/`
    (ignored), an analysis that decides something in `studies/<name>/`; name the phase when the direction

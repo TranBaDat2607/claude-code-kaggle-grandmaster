@@ -4,6 +4,7 @@ under refs/kg/), its command and phase, `ledger phase` / `ledger journey`, decis
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -409,6 +410,69 @@ def test_status_prints_the_phase_and_the_drift(repo, capsys):
     assert "Repo layout (it goes public" in out and "train_v2.py (of train.py)" in out
 
 
+# ----------------------------------------------------------------------------- the workspace CLAUDE.md
+def _claude_md(root, n, name="CLAUDE.md"):
+    path = root / name
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("# rules\n" + "".join(f"- line {i}\n" for i in range(n - 1)))
+    return path
+
+
+def test_dated_entries():
+    text = ("## Current state\n### 2026-11-14 stack v3\n- 2026-11-15: blend\n- **2026-11-16** seeds\n## Day 3\n"
+            "#### Notes\n- see 2026-11-14 for the run\nCV 2026-11-14\n")
+    assert LY.dated_entries(text) == 4 and LY.dated_entries("") == 0 and LY.dated_entries(None) == 0
+
+
+def test_claude_md_line_warns_only_past_the_limit(repo):
+    assert LY.claude_md_lines(repo) is None and LY.claude_md_line(repo) == ""
+    _claude_md(repo, LY.CLAUDE_MD_MAX_LINES)
+    assert LY.claude_md_lines(repo) == ("CLAUDE.md", LY.CLAUDE_MD_MAX_LINES) and LY.claude_md_line(repo) == ""
+    assert LY.brief_line(repo) == ""
+    _claude_md(repo, 224)
+    line = LY.claude_md_line(repo)
+    assert line.startswith("CLAUDE.md is 224 lines") and "reports/journal.md" in line and "never an @import" in line
+    assert "## Current state" in line and LY.brief_line(repo) == line  # no layout drift: the CLAUDE.md line alone
+    (repo / "src" / "train_v2.py").write_text("")
+    first, second = LY.brief_line(repo).split("\n")
+    assert first.startswith("Repo layout") and second == line
+    (repo / "CLAUDE.md").unlink()
+    _claude_md(repo, 200, ".claude/CLAUDE.md")  # the other place Claude Code loads a project's CLAUDE.md from
+    assert LY.claude_md_line(repo).startswith(".claude/CLAUDE.md is 200 lines")
+
+
+def test_status_and_session_brief_show_a_grown_claude_md(plugin_root, repo, capsys):
+    _claude_md(repo, 224)
+    cli.main(["status", "--offline"])
+    assert "CLAUDE.md is 224 lines" in capsys.readouterr().out
+    if SH is not None:
+        ctx = _hook(plugin_root, "session_start.py", {"hook_event_name": "SessionStart", "cwd": str(repo)})[
+            "additionalContext"]
+        assert "CLAUDE.md is 224 lines" in ctx
+
+
+def test_template_keeps_a_short_current_state_and_no_journal(tmp_path, capsys):
+    cli.main(["init", "demo", "--dir", str(tmp_path), "--metric", "auc"])
+    text = (tmp_path / "CLAUDE.md").read_text(encoding="utf-8")
+    assert "## Current plan" not in text and "running log" not in text
+    state = text.split("## Current state", 1)[1]
+    # Claude Code strips block-level HTML comments before CLAUDE.md reaches the model: the rule must be plain text
+    assert "<!--" not in state and "Rewrite this section in place; never append to it" in state
+    assert "`reports/journal.md`" in state and "@reports" not in text  # an @import would load the journal at launch
+    assert LY.dated_entries(text) == 0
+    assert len(text.splitlines()) <= LY.CLAUDE_MD_MAX_LINES - 40  # room for Current state and the repo's own lines
+    assert LY.claude_md_line(tmp_path) == ""
+
+
+def test_no_skill_or_agent_says_to_append_notes_to_claude_md(plugin_root):
+    bad = re.compile(r"CLAUDE\.md notes|notes (?:section )?(?:in|of) (?:the )?(?:workspace )?`?CLAUDE\.md|"
+                     r"append[^.\n]*CLAUDE\.md", re.IGNORECASE)
+    found = [f"{p.relative_to(plugin_root)}: {m.group(0)}"
+             for p in [*plugin_root.glob("skills/**/*.md"), *plugin_root.glob("agents/*.md")]
+             for m in bad.finditer(p.read_text(encoding="utf-8"))]
+    assert found == []
+
+
 # ----------------------------------------------------------------------------- hooks
 def _hook(plugin_root, script, payload):
     r = subprocess.run([SH, str(plugin_root / "hooks" / "run.sh"), script], input=json.dumps(payload),
@@ -457,3 +521,29 @@ def test_session_brief_asks_for_a_phase_and_shows_the_drift(plugin_root, repo):
         "additionalContext"]
     assert "No phase named" in ctx and "3 record(s) have no decision" in ctx
     assert "Repo layout (it goes public when the competition ends" in ctx
+
+
+@pytest.mark.skipif(SH is None, reason="needs a POSIX sh")
+def test_post_write_notes_a_journal_in_claude_md_once(plugin_root, repo):
+    path = _claude_md(repo, 60)
+    run = uuid.uuid4().hex  # the hook's once-per-session state lives in the temp dir and outlives this test
+
+    def edit(new, old="- line 3\n", sid="s1", tool="Edit", file=path):
+        ti = {"file_path": str(file), "old_string": old, "new_string": new} if tool == "Edit" else {
+            "file_path": str(file), "content": file.read_text()}
+        return _hook(plugin_root, "post_write.py", {"hook_event_name": "PostToolUse", "tool_name": tool,
+                                                    "session_id": f"{run}-{sid}", "cwd": str(repo),
+                                                    "tool_input": ti})
+
+    assert edit("- line 3\n- Plan: try seeds\n") is None  # an edit of Current state: no note
+    out = edit("- line 3\n### 2026-11-14 stack v3\n- CV 0.7389 (+0.0004)\n")
+    assert out and "adds a dated entry to CLAUDE.md" in out["additionalContext"]
+    assert "reports/journal.md" in out["additionalContext"]
+    assert edit("- line 3\n### 2026-11-15 seeds\n") is None  # once per session
+    assert edit("### 2026-11-14 stack v3\n- revised\n", old="### 2026-11-14 stack v3\n", sid="s2") is None  # rewords
+    _claude_md(repo, 224)
+    out = edit("", tool="Write", sid="s3")
+    assert out and out["additionalContext"].startswith("[kaggle-grandmaster] CLAUDE.md is 224 lines")
+    assert edit("", tool="Write", sid="s3") is None
+    sub = _claude_md(repo, 300, "src/CLAUDE.md")  # a subfolder's CLAUDE.md loads only on demand
+    assert edit("### 2026-11-14 x\n", tool="Edit", sid="s4", file=sub) is None

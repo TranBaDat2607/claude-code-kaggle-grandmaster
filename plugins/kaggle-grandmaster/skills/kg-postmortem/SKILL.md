@@ -70,8 +70,8 @@ workspace docs: the endgame often left them wrong.
 7. Fix what the endgame left stale:
    - Append the outcome from step 2 to `reports/final-selection.md`: what was selected or auto-selected, and
      their private scores.
-   - Update the notes in the workspace `CLAUDE.md`: the competition is over, the result, and a pointer to the
-     post-mortem.
+   - Rewrite `## Current state` in the workspace `CLAUDE.md`: the competition is over, the result, and a pointer
+     to the post-mortem.
    - Correct any claim that `kgkit final` contradicts.
 8. Showing the work is the next step, and it is the user's to start: the repo made public with two ways in,
    `solution/` (the final pipeline and the commands that reproduce it) and `journey/` (how the ideas developed,

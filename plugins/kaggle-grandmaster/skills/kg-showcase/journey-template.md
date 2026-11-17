@@ -22,7 +22,7 @@ What makes a journey worth reading:
   the main README does.
 
 Fill it from the local sources only (the ledger, `experiments.md`, the backlog with its evidence and results, the
-commit messages, the workspace `CLAUDE.md` notes, `studies/*/README.md`, `reports/`). Leave out a section with
+commit messages, `reports/journal.md`, the workspace `CLAUDE.md`, `studies/*/README.md`, `reports/`). Leave out a section with
 nothing true to say. Quote numbers as the ledger has them.
 
 ```markdown
