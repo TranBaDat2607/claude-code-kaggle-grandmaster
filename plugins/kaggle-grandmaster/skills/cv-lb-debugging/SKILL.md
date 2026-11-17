@@ -36,7 +36,8 @@ description: Systematic diagnosis when cross-validation and leaderboard disagree
 6. **CV-LB correlation across subs**: `python -m kgkit status`. Low correlation with several diverse
    submissions → the validation doesn't mirror the test; rebuild it (time split? grouping?
    test-like holdout via adversarial p(test)).
-7. Record the conclusion in the ledger notes and CLAUDE.md — this knowledge drives final picks.
+7. Record the conclusion in the ledger notes, and one line in CLAUDE.md `## Current state` (rewritten, not
+   appended) on how far CV and the public LB can be trusted now — this knowledge drives final picks.
 
 ## Snippet (public LB noise, outside the CLI)
 

@@ -32,4 +32,6 @@ Run kgkit with the absolute "kgkit home" path from the session context (or `$KGK
    `data-detective` agent with the dataset description.
 3. Interpret every red flag for the user: what it means for validation, features, and leaks; the
    concrete action for each.
-4. Append the key findings to the notes section of the workspace CLAUDE.md.
+4. The findings stay in `reports/eda.md`. In the workspace CLAUDE.md, add only what every session
+   must keep in mind (a leak, a shift, a trap in the data) to `## Current state`, one line each with a pointer
+   to the report: CLAUDE.md loads into every session, so it holds the conclusions, not the analysis.

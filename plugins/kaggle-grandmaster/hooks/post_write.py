@@ -1,6 +1,8 @@
 """PostToolUse (Write|Edit): when model code is written in a competition workspace, put the compute defaults in front
 of Claude; when a new script is a copy of one beside it (``train_v2.py`` next to ``train.py``), say that a variant
-belongs behind a flag of the script it varies (``kgkit.layout``), once per file and session.
+belongs behind a flag of the script it varies (``kgkit.layout``), once per file and session; when the workspace
+``CLAUDE.md`` gets a dated journal entry or grows past ``kgkit.layout.CLAUDE_MD_MAX_LINES``, say that the narrative
+goes in ``reports/journal.md`` and ``## Current state`` is rewritten in place, once per session.
 
 A skill loads when the model decides to load it; this hook makes the compute-efficiency guidance arrive whenever a
 training or inference script is written, by the main session or by a subagent (which may have no Skill tool, so
@@ -83,6 +85,12 @@ def main() -> None:
     payload = C.read_input()
     ti = payload.get("tool_input") or {}
     name = ti.get("file_path") or ti.get("path") or ""
+    if Path(str(name)).name == "CLAUDE.md":
+        root = C.workspace(payload)
+        note = claude_md_note(payload, root, Path(name)) if root is not None else ""
+        if note:
+            C.emit("PostToolUse", additionalContext="[kaggle-grandmaster] " + note)
+        return
     if not str(name).lower().endswith(".py"):
         return
     root = C.workspace(payload)
@@ -132,6 +140,35 @@ def variant_note(payload: dict, path: Path, rel: str) -> str:
             f"{base.name}, so the ledger record's command says what changed and the repo stays readable when it goes "
             "public; a one-off probe goes in work/ (ignored by git). Keep the copy only if it is a new pipeline, and "
             "then give it a name that says what it is.")
+
+
+def claude_md_note(payload: dict, root: Path, path: Path) -> str:
+    """A note when the workspace CLAUDE.md (the one Claude Code loads at launch) gets a dated journal entry or grows
+    past the limit, once per session for each."""
+    if not path.is_absolute():
+        path = Path(payload.get("cwd") or ".") / path
+    try:
+        rel = path.resolve().relative_to(root.resolve()).as_posix()
+    except (OSError, ValueError):
+        return ""
+    if rel not in LY.CLAUDE_MD:
+        return ""  # a subfolder's CLAUDE.md loads only on demand
+    ti = payload.get("tool_input") or {}
+    if payload.get("tool_name") == "Edit":
+        added = LY.dated_entries(ti.get("new_string") or "") > LY.dated_entries(ti.get("old_string") or "")
+    else:
+        added = False  # a Write rewrites the file: only its size says anything
+    found = LY.claude_md_lines(root)
+    n = found[1] if found and found[0] == rel else 0
+    if n > LY.CLAUDE_MD_MAX_LINES and C.once(payload, f"claude-md-size:{rel}", "layout"):
+        return LY.claude_md_advice(rel, n) + "."
+    if added and C.once(payload, f"claude-md-dated:{rel}", "layout"):
+        return (f"That edit adds a dated entry to {rel}, which Claude Code loads into every session and most "
+                f"subagents, so a journal there grows with every experiment. Put the narrative in {LY.JOURNAL} "
+                "instead (a plain path, not an @import); keep in `## Current state` only what changed (the plan, a "
+                "closed direction, a standing gotcha), rewritten in place. Results belong in `kgkit ledger decide` / "
+                "`kgkit backlog set --result`.")
+    return ""
 
 
 if __name__ == "__main__":

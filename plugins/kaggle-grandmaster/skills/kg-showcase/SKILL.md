@@ -98,8 +98,8 @@ commit on a branch; the journey's links point at commits, so moving or deleting 
    uncommitted changes before snapshots existed), snapshots that need pushing, records still without a phase.
 4. **The story.** Write `journey/README.md` with [journey-template.md](journey-template.md), in the user's voice
    and with their numbers. Sources, all local: the ledger (notes and decision notes), `journey/experiments.md`, the
-   backlog with its evidence and results (`python -m kgkit backlog list --all`), the commit messages, the notes in
-   the workspace `CLAUDE.md`, `studies/*/README.md`, `reports/` (post-mortem, final selection), the figures of
+   backlog with its evidence and results (`python -m kgkit backlog list --all`), the commit messages,
+   `reports/journal.md` and the workspace `CLAUDE.md`, `studies/*/README.md`, `reports/` (post-mortem, final selection), the figures of
    step 1. Every number comes from these; every claim links to the record, the study or the code. Dead ends get as
    much room as successes: what was expected, what happened, why it failed.
 
@@ -189,8 +189,8 @@ Then, only on the user's go-ahead:
   Writeups or Discussion section (`https://www.kaggle.com/competitions/<slug>/writeups`): the Kaggle CLI cannot
   post, and never post on the user's behalf. If Claude Code ran part of the work, offer a line saying what it did and
   what the user decided. Whether to include it is the user's call.
-- Update everything that still describes the competition as running, or contradicts `kgkit final`: the notes in
-  the workspace `CLAUDE.md` (the competition is over, the result, where to start reading),
+- Update everything that still describes the competition as running, or contradicts `kgkit final`:
+  `## Current state` in the workspace `CLAUDE.md` (the competition is over, the result, where to start reading),
   `reports/final-selection.md` (append the outcome), any README or doc line that states a final pick or a score
   that the output of step 1 contradicts.
 

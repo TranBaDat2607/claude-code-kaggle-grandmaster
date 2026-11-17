@@ -8,6 +8,11 @@ at the moment they happen:
 - a variant written as a copy of a script (``train_v2.py`` beside ``train.py``) instead of a flag of that script;
 - a log written next to the code or the reports instead of in ``work/`` (ignored by git).
 
+The workspace ``CLAUDE.md`` is checked too, for a different reason: Claude Code loads it into every session, again
+after ``/compact``, and into most subagents, so a dated journal kept there costs context every time and buries the
+rules. Its ``## Current state`` is rewritten in place; the narrative goes in ``reports/journal.md``, which nothing
+loads until it is opened (``claude_md_line``, and the PostToolUse note in ``hooks/post_write.py``).
+
 Nothing here blocks. Standard library only (hooks import it); every check returns quietly when git fails.
 """
 
@@ -21,6 +26,14 @@ SRC_SCRIPTS_MAX = 15
 UNDECIDED_MIN = 3
 WORK = "work"
 GENERATED = (".kaggle-gm/remote", ".kaggle-gm/build")
+# The workspace CLAUDE.md: the template is ~75 lines, so this leaves ~20 for `## Current state` and room for the
+# repo's own additions; Claude Code itself targets under 200 lines per CLAUDE.md and warns past that.
+CLAUDE_MD = ("CLAUDE.md", ".claude/CLAUDE.md")
+CLAUDE_MD_MAX_LINES = 150
+JOURNAL = "reports/journal.md"
+# A dated journal entry: "### 2026-11-14 stack v3", "- 2026-11-14: ...", "## Day 3", "- **2026-11-14** ..."
+DATED_RE = re.compile(r"^[ \t]*(?:#{2,6}[ \t]+|[-*][ \t]+)(?:\*\*)?[ \t]*(?:\d{4}-\d{2}-\d{2}|day[ \t]+\d+)\b",
+                      re.IGNORECASE | re.MULTILINE)
 # train_v2, train-new, train_copy, train (2), "train - Copy": a copy of a script, not a script of its own
 VARIANT_RE = re.compile(r"^(?P<base>.+?)(?:[_-](?:v\d+|new|copy|old|fixed|final|alt|tmp|bak|backup|\d)"
                         r"|\s*\(\d+\)|\s+-\s+copy|\s+copy)$", re.IGNORECASE)
@@ -107,15 +120,57 @@ def drift(root: str | Path) -> list[str]:
     return out
 
 
+def claude_md_lines(root: str | Path) -> tuple[str, int] | None:
+    """(name, line count) of the workspace CLAUDE.md that Claude Code loads at launch; None when there is none."""
+    for name in CLAUDE_MD:
+        p = Path(root) / name
+        try:
+            if p.is_file():
+                with p.open("rb") as f:
+                    return name, sum(1 for _ in f)
+        except OSError:
+            return None
+    return None
+
+
+def dated_entries(text: str) -> int:
+    """How many dated journal entries (headings or bullets that start with a date or "Day N") the text has."""
+    return len(DATED_RE.findall(text or ""))
+
+
+def claude_md_advice(name: str, n: int) -> str:
+    return (f"{name} is {n} lines, and Claude Code loads all of it into every session (again after /compact) and into "
+            f"most subagents. Move the dated notes to {JOURNAL} (nothing loads it until it is opened: point to it as "
+            f"a plain path, never an @import, which would load it at launch) and rewrite `## Current state` in place "
+            f"to the plan, the closed directions and the standing gotchas (under ~20 lines). Results already live in "
+            f"the ledger, the backlog `--result` and the studies' READMEs")
+
+
+def claude_md_line(root: str | Path) -> str:
+    """One line of the session brief and `kgkit status` when the workspace CLAUDE.md has grown past
+    CLAUDE_MD_MAX_LINES; '' otherwise."""
+    try:
+        found = claude_md_lines(root)
+    except Exception:
+        return ""
+    if not found or found[1] <= CLAUDE_MD_MAX_LINES:
+        return ""
+    return claude_md_advice(*found) + "."
+
+
 def brief_line(root: str | Path) -> str:
-    """The drift as one line of the session brief; '' when there is none."""
+    """The drift (one line) and a grown CLAUDE.md (one more) for the session brief; '' when there is neither."""
+    out = []
     try:
         found = drift(root)
     except Exception:  # the brief must survive anything here
-        return ""
-    if not found:
-        return ""
-    return ("Repo layout (it goes public when the competition ends, /kg-showcase): " + "; ".join(found) + ".")
+        found = []
+    if found:
+        out.append("Repo layout (it goes public when the competition ends, /kg-showcase): " + "; ".join(found) + ".")
+    notes = claude_md_line(root)
+    if notes:
+        out.append(notes)
+    return "\n".join(out)
 
 
 def journey_lines(st, recs: list[dict]) -> list[str]:

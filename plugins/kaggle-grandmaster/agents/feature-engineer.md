@@ -38,6 +38,7 @@ only features validated on the frozen CV, built leak-free, count.
    the full model.
 4. Run importance analysis (permutation on OOF or null-importance) and try removing the weakest
    features/families; check adversarial drift of new features.
-5. Update the base feature set; record the decision in CLAUDE.md notes.
+5. Update the base feature set; record the decision with `kgkit ledger decide` (its "why") and the
+   backlog `--result`. Touch CLAUDE.md `## Current state` only if a direction is now closed (one line).
 
 Return: table of families tried with Δ CV and decision, the new best experiment id, and next ideas.

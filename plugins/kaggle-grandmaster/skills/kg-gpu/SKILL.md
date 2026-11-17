@@ -79,8 +79,8 @@ use-it-or-lose-it hours before the reset.
 4. Decide with a paired test against the control on that fold:
    `python -m kgkit ledger compare artifacts/<a> artifacts/<control> --truth data/train.csv:<target>
    --folds data/folds.csv:fold --fold 0`. PROMOTE (z ≥ 2) / DISCARD / RE-TEST (positive but within noise:
-   second fold or seed). Record it on the backlog item (`kgkit backlog set <n> --screen-gain <gain>`) and in
-   CLAUDE.md.
+   second fold or seed). Record it on the backlog item (`kgkit backlog set <n> --screen-gain <gain>`); CLAUDE.md
+   `## Current state` changes only if the plan does.
 
 ## run <experiment>
 Full-fold run of a promoted idea: `gpu build` with all folds, `--hours` from the measured

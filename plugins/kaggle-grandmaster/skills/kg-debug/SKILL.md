@@ -40,4 +40,6 @@ Follow the `cv-lb-debugging` skill:
 3. In parallel, launch the `validation-auditor` agent on the relevant code and folds.
 4. If shift is suspected: `python -m kgkit adv` and drop/transform tests.
 5. Conclude with the root cause (or ranked hypotheses with the experiment that would distinguish
-   them), the fix, and how it changes trust in CV vs LB going forward. Record it in CLAUDE.md notes.
+   them), the fix, and how it changes trust in CV vs LB going forward. Record it in `reports/journal.md`
+   (or a `studies/<name>/README.md` when a script decided it), and one line in CLAUDE.md `## Current state`
+   when it changes how CV or the LB is trusted from now on.

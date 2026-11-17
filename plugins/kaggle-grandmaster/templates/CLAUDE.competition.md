@@ -21,7 +21,7 @@ third_party/  code that is not yours: a vendored kgkit (`kgkit vendor third_part
 work/         scratch, ignored by git: probes, quick checks, logs, downloads
 artifacts/    per-experiment OOF + test predictions + models (artifacts/<exp_id>/, ignored)
 subs/         submission CSVs, named after the experiment id (ignored)
-reports/      EDA, recon, adversarial validation, final selection, post-mortem (markdown; logs go in work/)
+reports/      EDA, recon, adversarial validation, final selection, post-mortem, journal.md (markdown; logs go in work/)
 .kaggle-gm/   competition.json (facts), ledger.jsonl (every experiment), backlog (committed); remote/, build/ ignored
 ```
 
@@ -68,6 +68,14 @@ only tell the journey the ledger recorded, so rule 9 below matters from day one.
 - `/kaggle-grandmaster:kg-postmortem`, then `/kaggle-grandmaster:kg-showcase` — after the deadline: what worked, then
   the repo made public with `solution/` and `journey/`
 
-## Current plan / notes
+## Current state
 
-<!-- Keep a short running log here: what worked, what did not, what to try next. -->
+Rewrite this section in place; never append to it. Keep it under ~20 lines: this file loads into every session and
+most subagents. Only what the tools can't tell you goes here: the baseline, CV, LB and decisions come from
+`python -m kgkit status` and the ledger. The dated narrative (what was tried, day by day) goes in `reports/journal.md`,
+which loads only when opened; results go in `python -m kgkit ledger decide` and `python -m kgkit backlog set --result`.
+
+- Plan: (the next experiments, in order)
+- Closed directions: (one line each, with the reason and the ledger id)
+- Planned finals: (and why)
+- Standing gotchas: (tool bugs, environment quirks, things that waste a day if forgotten)

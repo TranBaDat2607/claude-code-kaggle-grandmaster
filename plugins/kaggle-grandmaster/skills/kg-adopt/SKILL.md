@@ -101,7 +101,8 @@ does around the existing work: submission logging and the daily budget, the sess
    with `id,fold` columns when the training code can read it). Do not redraw folds mid-competition.
 6. **Rules.** If the repo has a `CLAUDE.md`, leave it alone except, with the user's agreement, a short
    kaggle-grandmaster section (log every run, compare against the accepted baseline, validate before
-   submitting, the `/kg-*` commands). If it has none, offer to create one from
+   submitting, the `/kg-*` commands, and a short `## Current state` that is rewritten in place, never a dated log:
+   the history goes in `reports/journal.md`). If it has none, offer to create one from
    `${CLAUDE_PLUGIN_ROOT}/templates/CLAUDE.competition.md`, adapted to the repo's real paths.
 7. **Commit** `.kaggle-gm/` (it is the experiment memory) once the user agrees.
 
