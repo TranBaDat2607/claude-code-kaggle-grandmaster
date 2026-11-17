@@ -95,12 +95,8 @@ score, you're overfitting the blend — use fewer models, simpler weights, or pl
   or threshold) on the same fold it reports OOF predictions for has an optimistic OOF. A stacker then gives it
   weight it has not earned (in one Playground, about +2e-4 of fake OOF gain). Read its training loop: an
   `eval_set` or validation split that is also the predicted fold is the sign. Re-train such a member with
-  early stopping on an inner split, or keep it out of the stack.
-- Audit public OOF files before stacking them. A notebook that early-stops (or picks its epoch, iteration count
-  or threshold) on the same fold it reports OOF predictions for has an optimistic OOF. A stacker then gives it
-  weight it has not earned (in one Playground, about +2e-4 of fake OOF gain). Read its training loop: an
-  `eval_set` or validation split that is also the predicted fold is the sign. Re-train such a member with
-  early stopping on an inner split, or keep it out of the stack.
+  early stopping on an inner split, or keep it out of the stack. The plugin's templates select off the scored
+  fold and record it (`oof_selection` in the ledger); a member logged with `scored-fold` has the same problem.
 - Keep the blend reproducible: the ledger entry records weights and member experiment ids.
 - For code competitions, account for inference time of every member; drop the members with the
   worst (Δscore / runtime) ratio first.

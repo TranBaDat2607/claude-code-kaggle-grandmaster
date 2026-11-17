@@ -120,6 +120,24 @@ def fmt_cv(r: dict, digits: int = 5) -> str:
     return f"{r['cv']:.{digits}f}" if isinstance(r.get("cv"), (int, float)) else "LB-only"
 
 
+def selection_note(new: dict, base: dict) -> str | None:
+    """Why two records' OOF scores are not like for like, or None. ``oof_selection`` says whether anything about a
+    model (stopping round, epoch, checkpoint) was chosen on the fold it then predicts ("scored-fold": an optimistic
+    OOF) or not ("independent"); the training templates record it (#109). Older records do not say."""
+    a, b = new.get("oof_selection"), base.get("oof_selection")
+    if a == b or (a is None and b is None):
+        return None
+    if "scored-fold" in (a, b):
+        biased = new if a == "scored-fold" else base
+        return (f"{biased['id']} chose its stopping round / epoch on the scored fold: its OOF is optimistic, so the "
+                f"gain is biased {'up' if biased is new else 'down'}. Re-run it with selection off the scored fold "
+                f"(the templates' default) before deciding a small gain.")
+    old = new if a is None else base
+    return (f"{old['id']} was logged before kgkit recorded how an OOF was selected. If its template early-stopped "
+            f"or picked its best epoch on the scored fold, its OOF is optimistic: re-run it with this kgkit's "
+            f"template before deciding a small gain.")
+
+
 def _check_decision(d: str) -> str:
     d = d.lower()
     if d not in DECISIONS:

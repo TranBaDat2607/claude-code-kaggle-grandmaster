@@ -157,6 +157,10 @@ def test_image_template_tiny(tmp_path, plugin_root):
     _run([*args, "--epochs", "3", "--name", "r18", "--folds", "1", "2"], tmp_path, plugin_root)
     rec = Ledger(tmp_path).records()[-1]
     assert rec["name"] == "r18" and len(rec["fold_scores"]) == 3
+    # #109: the OOF is the last epoch's (EMA) weights, not the epoch that scored best on the fold it predicts
+    assert rec["oof_selection"] == "independent" and rec["params"]["select"] == "last"
+    out = _run([*args, "--epochs", "2", "--name", "r18_best", "--select", "best"], tmp_path, plugin_root)
+    assert Ledger(tmp_path).records()[-1]["oof_selection"] == "scored-fold" and "optimistic" in out
     res = validate_submission(tmp_path / rec["submission"], tmp_path / "data" / "sample_submission.csv")
     assert res["ok"], res
 
@@ -216,6 +220,10 @@ def test_transformer_template_tiny(tmp_path, plugin_root):
     _run([*args, "--epochs", "10", "--name", "tiny"], tmp_path, plugin_root)
     rec = Ledger(tmp_path).records()[-1]
     assert rec["name"] == "tiny" and len(rec["fold_scores"]) == 2
+    assert rec["oof_selection"] == "independent" and rec["params"]["select"] == "last"  # #109
+    out = _run([*args, "--epochs", "2", "--name", "tiny_best", "--select", "best"], tmp_path, plugin_root)
+    best = Ledger(tmp_path).records()[-1]
+    assert best["oof_selection"] == "scored-fold" and "optimistic" in out
     assert rec["cv"] < df["score"].std()  # learned something beyond predicting the mean
     res = validate_submission(tmp_path / rec["submission"], tmp_path / "data" / "sample_submission.csv")
     assert res["ok"], res

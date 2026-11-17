@@ -1004,6 +1004,7 @@ def _ledger_compare(led, a):
     from . import state as S
     from .compare import compare_folds, describe, estimate, format_comparison, verdict
     from .evalset import fmt_se
+    from .experiment import selection_note
 
     st = S.load()
     holdout = st is not None and st.holdout
@@ -1032,6 +1033,9 @@ def _ledger_compare(led, a):
                   "are not comparable" if holdout else
                   "WARNING: the two experiments used different fold splits - the per-fold pairing is not valid; "
                   "only the OOF bootstrap (with --truth) is meaningful")
+        sel = selection_note(led.get(a.args[0]), led.get(base_ref))
+        if sel:
+            print(("WARNING: " if "scored fold" in sel else "note: ") + sel)
     if holdout and (a.folds or a.fold is not None):
         raise SystemExit("holdout+lb workspace: there are no folds; the holdout predictions are compared as a whole")
     truth_spec = a.truth

@@ -18,8 +18,12 @@ img_size (or cache uint8 npy) when --bench says INPUT-BOUND.
 
 The train CSV needs an image path column (relative to image_dir) and the target column(s).
 task: "multiclass" (single label), "multilabel" (several 0/1 columns), "regression"/"binary"
-(single column, one output). Per-fold best checkpoints, OOF and test predictions land in
+(single column, one output). Per-fold checkpoints, OOF and test predictions land in
 artifacts/<name>/; the assembled experiment is logged to the ledger with a submission file.
+
+Honest OOF (#109): each fold keeps its last epoch's EMA weights (select="last"). Keeping the epoch that scored best
+on the fold it then predicts (--select best, the old behaviour) picks the epoch on those rows and makes the OOF
+optimistic. Choose the number of epochs once, from the per-epoch val scores of all folds of an earlier run.
 """
 
 from __future__ import annotations
@@ -79,6 +83,7 @@ CONFIG = dict(
     grad_clip=1.0,
     num_workers=4,
     tta_hflip=True,
+    select="last",              # last: the final epoch's EMA weights | best: best epoch on the scored fold (optimistic)
     seed=42,
     notes="",
 )
@@ -279,9 +284,12 @@ def main():
                          "fold (default 30 steps each), print the verdict and the speed-up against the last bench; "
                          "trains and logs nothing")
     ap.add_argument("--compile", action="store_true", help="torch.compile the model for training (Linux, sm_70+)")
+    ap.add_argument("--select", choices=["last", "best"],
+                    help="last (default): each fold's final EMA weights; best: the epoch that scores best on the fold "
+                         "it predicts (optimistic OOF, the old behaviour)")
     a = ap.parse_args()
     cfg = dict(CONFIG)
-    for k in ("name", "backbone", "img_size", "epochs", "batch_size", "lr", "notes"):
+    for k in ("name", "backbone", "img_size", "epochs", "batch_size", "lr", "notes", "select"):
         if getattr(a, k) is not None:
             cfg[k] = getattr(a, k)
     if a.no_pretrained:
@@ -342,6 +350,9 @@ def main():
     crit = loss_fn(task, cfg["label_smoothing"])
     t0 = time.time()
     stopped = None  # "timeout" | "pruned": the session deadline or the baseline curve ended this run early
+    if cfg["select"] == "best":
+        print("note: --select best keeps the epoch that scores best on the fold it predicts: the OOF is optimistic",
+              flush=True)
 
     for fold in ([] if a.assemble else run_folds):
         tr = np.flatnonzero(train["fold"].to_numpy() != fold)
@@ -363,7 +374,8 @@ def main():
         amp_dtype = autocast_dtype(device)
         scaler = torch.amp.GradScaler(enabled=amp and amp_dtype == torch.float16)
         ema = EMA(model, cfg["ema_decay"])
-        best, best_pred, start_epoch = metric.worst(), None, 0
+        # best: best val score so far (progress, pruning); kept/kept_pred: the epoch whose predictions become the OOF
+        best, kept, kept_pred, start_epoch = metric.worst(), metric.worst(), None, 0
         budget = TrainBudget(out_dir, fold, cfg["epochs"], metric.greater_is_better)
 
         def train_step(x, yb):
@@ -390,7 +402,8 @@ def main():
             opt.load_state_dict(ck["opt"])
             sched.load_state_dict(ck["sched"])
             scaler.load_state_dict(ck["scaler"])
-            best, best_pred, start_epoch = ck["best"], ck["best_pred"], ck["epoch"]
+            best, start_epoch = ck["best"], ck["epoch"]
+            kept, kept_pred = ck.get("kept", ck["best"]), ck.get("kept_pred", ck["best_pred"])
             print(f"fold {fold}: resumed at epoch {start_epoch} (best {best:.5f})", flush=True)
         for epoch in range(start_epoch, cfg["epochs"]):
             budget.start_epoch()
@@ -400,14 +413,16 @@ def main():
             pred = predict(ema.module, dl_va, device, task, amp, hflip=False)
             score = metric(y_metric[va], metric_input(task, metric, pred))
             print(f"fold {fold} epoch {epoch} loss {loss.item():.4f} val {metric.name} {score:.5f}", flush=True)
-            if metric.is_better(score, best) or best_pred is None:
-                best, best_pred = score, pred
+            if metric.is_better(score, best):
+                best = score
+            if cfg["select"] == "last" or kept_pred is None or metric.is_better(score, kept):
+                kept, kept_pred = score, pred
                 torch.save(ema.module.state_dict(), out_dir / f"fold{fold}.pt")
             action = "continue" if a.smoke else budget.end_epoch(epoch, score)
             if action == "timeout":
                 torch.save({"model": model.state_dict(), "ema": ema.module.state_dict(), "opt": opt.state_dict(),
                             "sched": sched.state_dict(), "scaler": scaler.state_dict(), "epoch": epoch + 1,
-                            "best": best, "best_pred": best_pred}, resume)
+                            "best": best, "best_pred": kept_pred, "kept": kept, "kept_pred": kept_pred}, resume)
                 budget.write_status("timeout", next_epoch=epoch + 1)
                 print(f"fold {fold}: session deadline near - checkpointed after epoch {epoch}; resume later", flush=True)
             elif action == "prune":
@@ -420,19 +435,19 @@ def main():
             break
         if cfg["tta_hflip"]:
             ema.module.load_state_dict(torch.load(out_dir / f"fold{fold}.pt", map_location=device))
-            best_pred = predict(ema.module, dl_va, device, task, amp, hflip=True)
-            best = metric(y_metric[va], metric_input(task, metric, best_pred))
-        np.save(out_dir / f"fold{fold}_oof.npy", best_pred)
+            kept_pred = predict(ema.module, dl_va, device, task, amp, hflip=True)
+            kept = metric(y_metric[va], metric_input(task, metric, kept_pred))
+        np.save(out_dir / f"fold{fold}_oof.npy", kept_pred)
         np.save(out_dir / f"fold{fold}_idx.npy", va)
         if test_paths is not None and not a.smoke:
             dl_te = DataLoader(ImageDataset(test_paths, None, tf_eval), batch_size=cfg["batch_size"] * 2, **loader_kw)
             ema.module.load_state_dict(torch.load(out_dir / f"fold{fold}.pt", map_location=device))
             np.save(out_dir / f"fold{fold}_test.npy", predict(ema.module, dl_te, device, task, amp, cfg["tta_hflip"]))
         if not a.smoke:
-            budget.best = best
+            budget.best = kept
             budget.write_status("done")
             resume.unlink(missing_ok=True)
-        print(f"fold {fold} best {metric.name} {best:.5f}", flush=True)
+        print(f"fold {fold} {cfg['select']} {metric.name} {kept:.5f} (best epoch {best:.5f})", flush=True)
 
     if a.smoke:
         print("smoke run OK (not logged)")
@@ -461,7 +476,8 @@ def main():
         test_pred = np.mean([np.load(out_dir / f"fold{f}_test.npy") for f in all_folds], axis=0)
     rec = Ledger().log(cfg["name"], cv, fold_scores=fold_scores, model=cfg["backbone"], notes=cfg["notes"],
                        params={k: v for k, v in cfg.items() if k not in ("notes",)}, oof=oof, test_pred=test_pred,
-                       runtime_s=round(time.time() - t0, 1))
+                       runtime_s=round(time.time() - t0, 1),
+                       oof_selection="scored-fold" if cfg["select"] == "best" else "independent")
     print(f"[{cfg['name']}] {metric.name} CV {cv:.5f} +/- {np.std(fold_scores):.5f} -> {rec['id']}")
     if test_pred is not None and Path(cfg["sample"]).exists():
         sample = pd.read_csv(cfg["sample"])

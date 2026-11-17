@@ -43,7 +43,10 @@ Follow the experiment protocol (`grandmaster-playbook` §2):
    cost in GPU time is known before the run. A pure speed change (AMP, compile, caching) is an experiment too:
    keep it on its speed-up with the score unchanged (skill `compute-efficiency`). For long runs (> ~10 min) run in the background and keep working on
    analysis meanwhile; or delegate the whole run to the `experiment-runner` agent.
-4. Log to the ledger with OOF/test preds and `parent=<baseline id>` (notes: hypothesis).
+4. Log to the ledger with OOF/test preds and `parent=<baseline id>` (notes: hypothesis); the templates take
+   `--parent <baseline id>`. Nothing about the model (stopping round, epoch, checkpoint) may be chosen on the fold
+   it predicts: the templates early-stop on an inner slice / keep the last epoch and log `oof_selection`. When
+   `ledger compare` says the baseline was selected otherwise, re-run the baseline before deciding a small gain.
 5. Decide with numbers:
    `python -m kgkit ledger compare <new> --truth data/train.csv:<target> --folds data/folds.csv:fold`
    (add `--groups data/train.csv:<group>` when rows are clustered). In a `holdout+lb` workspace log the
