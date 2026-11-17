@@ -1582,7 +1582,8 @@ def cmd_kernels(a):
         print(SF.wrap(K.format_top(rows, scores=not a.no_score), "kaggle-cli", competition=slug, view="top kernels"))
         if not a.no_score:
             print(K.TOP_LEGEND + (f"\npublic scores unknown: {err}" if err else ""))
-        print("\nnext: python -m kgkit kernels pull <ref>   (review + local script under ref/)")
+        print(f"\nnext: python -m kgkit kernels pull <ref>{_competition_flag(st, slug)}   (review + local script "
+              "under ref/)")
     elif a.action in ("pull", "review"):
         if not a.ref:
             raise SystemExit(f"usage: kernels {a.action} <owner/slug>")
@@ -1595,6 +1596,44 @@ def cmd_kernels(a):
                                 holdout=holdout, score_lookup=not a.no_score)
         print((Path(rev["dir"]) / "REVIEW.md").read_text(encoding="utf-8"))
         print(f"local script: {rev['dir']}/{a.ref.split('/')[-1]}_local.py")
+
+
+def _competition_flag(st, slug: str) -> str:
+    """' --competition <slug>' for a follow-up command kgkit prints, when ``slug`` is not the workspace's own: run as
+    printed, the command would otherwise read the workspace's competition (#115)."""
+    return "" if st is not None and st.slug == slug else f" --competition {slug}"
+
+
+TOPICS_SEEN_FILE, TOPICS_SEEN_MAX = "discussion_topics.json", 5000
+
+
+def _remember_topics(root: Path | None, slug: str, ids) -> None:
+    """Which competition each listed topic belongs to (a git-ignored cache), so `discussions read <id>` of a topic
+    listed with another --competition can say where it is. Never fails the listing."""
+    from . import state as S
+
+    try:
+        p = S.cache_dir(root or Path.home()) / TOPICS_SEEN_FILE
+        seen = json.loads(p.read_text(encoding="utf-8")) if p.is_file() else {}
+        seen = {k: v for k, v in seen.items() if isinstance(v, str)}
+        for i in ids:
+            seen.pop(str(int(i)), None)
+            seen[str(int(i))] = slug  # the latest listing last: the oldest go first past the cap
+        p.write_text(json.dumps(dict(list(seen.items())[-TOPICS_SEEN_MAX:])), encoding="utf-8")
+    except (OSError, ValueError, TypeError):
+        pass
+
+
+def _topic_listed_for(root: Path | None, tid: int) -> str | None:
+    """The competition a listing showed topic ``tid`` under (`_remember_topics`), None when none did."""
+    from . import state as S
+
+    try:
+        p = S.cache_dir(root or Path.home()) / TOPICS_SEEN_FILE
+        slug = json.loads(p.read_text(encoding="utf-8")).get(str(tid)) if p.is_file() else None
+    except (OSError, ValueError, AttributeError):
+        return None
+    return slug if isinstance(slug, str) else None
 
 
 def cmd_discussions(a):
@@ -1634,6 +1673,8 @@ def cmd_discussions(a):
         idx_path.parent.mkdir(parents=True, exist_ok=True)
         t.to_csv(idx_path, index=False)
         print(f"{slug}: {len(t)} topics -> {idx_path} ({where}); local only, git ignores it")
+        if "Id" in t:
+            _remember_topics(root, slug, t["Id"].tolist())
         old = [p for p in ((root / "reports").glob("discussions*.csv") if root else []) if p.is_file()]
         if old:
             rel = " ".join(p.relative_to(root).as_posix() for p in old)
@@ -1647,8 +1688,8 @@ def cmd_discussions(a):
             except SystemExit:
                 pass
         f = D.facts(comp) if comp else ""
-        print("facts: " + f if f else "facts: `kaggle competitions list -s <slug>` (deadline), the rules page "
-              "(`kgkit pages --page rules`) for merger deadline / team size")
+        print("facts: " + f if f else f"facts: `kaggle competitions list -s {slug}` (deadline), the rules page "
+              f"(`kgkit pages --page rules{_competition_flag(st, slug)}`) for merger deadline / team size")
         src = D.SOURCES[t["Source"].iloc[0]] if len(t) else "kaggle-cli"
         print("\nmost voted (" + SF.UNTRUSTED_NOTE + "):\n"
               + SF.wrap(D.format_table(D.top(t, min(a.n, 10), "votes")), src, competition=slug))
@@ -1657,14 +1698,20 @@ def cmd_discussions(a):
         if not a.query:
             raise SystemExit("usage: discussions read <topic_id>")
         tid = int(a.query)
-        url = f"https://www.kaggle.com/competitions/{slug}/discussion/{tid}"
+        # a topic a listing showed under another competition: say where it is, and link it there (#115)
+        home = _topic_listed_for(root, tid)
+        home = home if home and home != slug else None
+        url = f"https://www.kaggle.com/competitions/{home or slug}/discussion/{tid}"
+        where = (f" topic {tid} was listed for {home}: python -m kgkit discussions read {tid} --competition {home}"
+                 if home else f" If topic {tid} is from another competition, pass --competition <its slug>."
+                 if not a.competition else "")
         msgs, src = [], "meta-kaggle"
         if a.source != "meta":
             try:
                 msgs, src = D.live_thread(slug, tid), "kaggle-cli"
             except D.LiveUnavailable as e:
                 if a.source == "live":
-                    raise SystemExit(str(e))
+                    raise SystemExit(str(e) + "." + where)
                 print(f"{e}; trying the Meta Kaggle message cache")
         if not msgs:
             src = "meta-kaggle"
@@ -1672,16 +1719,20 @@ def cmd_discussions(a):
                 msgs = D.read_thread(tid)
             except FileNotFoundError:
                 print(f"ForumMessages.csv is not cached (`discussions sync --source meta --messages`, ~1.8 GB once)."
-                      f"\nRead it at {url}")
+                      f"{where}\nRead it at {url}")
                 return
         if not msgs:
-            print(f"topic {tid} not found (wrong competition, or newer than the last Meta Kaggle export). "
+            print(f"topic {tid} not found (wrong competition, or newer than the last Meta Kaggle export).{where} "
                   f"Read it at {url}")
             return
         print(SF.UNTRUSTED_NOTE)
-        for m in msgs[: a.n if a.n else None]:
+        shown = msgs[: a.n if a.n else None]
+        for m in shown:
             medal = int(m["Medal"]) if pd.notna(m.get("Medal")) and m.get("Medal") else None
             print(SF.wrap(m["text"][:a.max_chars], src, topic=tid, posted=m.get("PostDate"), medal=medal))
+        cut = [len(m["text"]) for m in shown if len(m["text"]) > a.max_chars]
+        if cut:
+            print(f"({len(cut)} message(s) cut at {a.max_chars} characters: --max-chars {max(cut)} for all of it)")
         print(url)
         return
     if idx_path.is_file():
@@ -1702,7 +1753,9 @@ def cmd_discussions(a):
             return
     print(SF.UNTRUSTED_NOTE)
     print(SF.wrap(D.format_table(out), src, competition=slug, view=a.action))
-    print("\nread one: python -m kgkit discussions read <id>   (or WebFetch its URL: "
+    if "Id" in out:
+        _remember_topics(root, slug, out["Id"].tolist())
+    print(f"\nread one: python -m kgkit discussions read <id>{_competition_flag(st, slug)}   (or WebFetch its URL: "
           f"https://www.kaggle.com/competitions/{slug}/discussion/<id>)")
 
 
@@ -1727,7 +1780,7 @@ def cmd_pages(a):
         print(SF.UNTRUSTED_NOTE)
         print(SF.wrap(", ".join(f"{p['name']} ({len(p['text'])} chars)" for p in pages), "kaggle-cli",
                       competition=slug, view="page names"))
-        print("\nread one: python -m kgkit pages <name>   (all: --save reports/pages)")
+        print(f"\nread one: python -m kgkit pages <name>{_competition_flag(st, slug)}   (all: --save reports/pages)")
         return
     page = P.pick(pages, a.page)
     if page is None:
