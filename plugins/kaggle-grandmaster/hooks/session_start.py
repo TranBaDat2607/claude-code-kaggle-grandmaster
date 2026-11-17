@@ -170,8 +170,7 @@ def brief(root: Path) -> str:
     if recs:
         scored = [r for r in recs if _own_cv(r, holdout) and not r.get("recheck")]
         lines.append(ledger_line(st, recs))
-        accepted = next((r for r in reversed(recs) if r.get("decision") in ("baseline", "keep")
-                         and not r.get("recheck") and not C.EV.lb_fitted(r)), None)
+        accepted = C.EV.accepted_baseline(recs)
         if accepted is not None:
             cv = f"CV {accepted['cv']:.5f}" if isinstance(accepted.get("cv"), (int, float)) else "LB-only"
             lines.append(f"Accepted baseline (compare new ideas against this): {accepted['id']} {cv}.")

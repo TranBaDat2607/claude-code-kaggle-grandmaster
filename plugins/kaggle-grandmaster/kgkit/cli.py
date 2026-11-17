@@ -754,15 +754,16 @@ def cmd_ledger(a):
     elif a.action == "decide":
         try:
             ids = led.ids(a.args[0])
-            done = [led.decide(i, a.args[1], " ".join(a.args[2:]), parent=a.parent) for i in ids]
+            before = led.baseline(fallback=False)
+            done = [led.decide(i, a.args[1], " ".join(a.args[2:]), parent=a.parent, member=a.member) for i in ids]
         except KeyError as e:
             raise SystemExit(str(e.args[0]) if e.args else str(e))
         except ValueError as e:
             raise SystemExit(str(e))
         for r in done:
-            print(f"{r['id']}: {r['decision']}" + (f" (vs {r['parent']})" if r.get("parent") else ""))
-        if done and done[-1]["decision"] in ("keep", "baseline"):
-            print(f"accepted baseline is now {done[-1]['id']} (CV {fmt_cv(done[-1])})")
+            print(f"{r['id']}: {r['decision']}" + (" (member)" if r.get("member") else "")
+                  + (f" (vs {r['parent']})" if r.get("parent") else ""))
+        _decide_baseline_note(led, done, before)
     elif a.action == "phase":
         _ledger_phase(led, a)
     elif a.action == "journey":
@@ -774,7 +775,7 @@ def cmd_ledger(a):
         if r is None:
             print("(ledger is empty)")
         else:
-            src = r.get("decision") if r.get("decision") in ("keep", "baseline") else "highest CV - nothing accepted yet"
+            src = r.get("decision") if E.accepted(r) else "highest CV - nothing accepted yet"
             print(f"{r['id']}  CV {fmt_cv(r)}  [{src}]")
     elif a.action == "lineage":
         chain = led.lineage(a.args[0] if a.args else led.baseline()["id"])
@@ -1914,6 +1915,28 @@ class _CollectArgs(argparse.Action):
         namespace.args = [*getattr(namespace, "args", []), *(v for v in vals if v is not None)]
 
 
+def _decide_baseline_note(led, done: list[dict], before: dict | None) -> None:
+    """After `ledger decide`: the baseline `ledger baseline` returns now, and a warning when a record decided
+    keep/baseline does not become it."""
+    from . import evalset as E
+    from .experiment import fmt_cv
+
+    after = led.baseline(fallback=False)
+    last = done[-1] if done else None
+    if after is not None and (before is None or after["id"] != before["id"]):
+        print(f"accepted baseline is now {after['id']} (CV {fmt_cv(after)})")
+    elif after is not None and last is not None and last["decision"] in E.ACCEPTED:
+        print(f"accepted baseline stays {after['id']} (CV {fmt_cv(after)})")
+    elif after is None and before is not None:
+        print("no accepted baseline left: `ledger baseline` falls back to the highest CV; decide one "
+              "(`ledger decide <id> baseline`)")
+    if last is not None and last["decision"] in E.ACCEPTED and not last.get("member") \
+            and (after is None or after["id"] != last["id"]):
+        why = (": it is a re-check on re-drawn folds (recheck), not comparable with the frozen folds"
+               if last.get("recheck") else "")
+        print(f"warning: {last['id']} is {last['decision']} but is not the accepted baseline{why}")
+
+
 def _action_parsers(p, actions: dict, options: list) -> None:
     """`<cmd> <action> [args...]` as one subparser per action, so `<cmd> <action> --help` shows that action's
     arguments and only the options it takes. ``actions``: {name: (help, [(metavar, nargs, help)], "flags it
@@ -1963,6 +1986,8 @@ _LEDGER_OPTIONS = [
                                          "the public labels: display only, never a baseline or a final pick, and "
                                          "`kgkit status` warns while Kaggle would auto-select it")),
     ("--remove", dict(action="store_true", help="tag: remove the tags instead of adding them")),
+    ("--member", dict(action="store_true", help="decide keep: keep it as an ensemble member without making it the "
+                                                "accepted baseline")),
     ("--pred", dict(help="FILE:COL[,COL...] or .npy predictions on the evaluation set (holdout+lb: the holdout; else "
                          "OOF); the score is recomputed, the predictions stored and compared with the baseline")),
     ("--variant", dict(help="name shared by re-runs of one pipeline with other seeds (seed noise)")),
@@ -2009,7 +2034,7 @@ _LEDGER_ACTIONS = {
     "decide": ("record the decision on a compared experiment (or on several: a sweep decided at once)",
                [("exp_id", None, "ledger id or name, a list 3,7,9 or a range 12..20"),
                 ("baseline|keep|discard|inconclusive", None, "the decision"), ("note", "*", "why")],
-               "--parent"),
+               "--parent --member"),
     "phase": ("name the phase new records belong to (no name: list the phases), or put past records in one",
               [("name", "*", "the phase, e.g. stacking public OOFs")], "--records"),
     "journey": ("write journey/experiments.md: every record by phase, its parent, change, scores, decision and a "

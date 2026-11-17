@@ -289,6 +289,29 @@ def lb_fitted(rec: dict) -> bool:
     return isinstance(rec, dict) and bool(set(rec.get("tags") or ()) & set(LB_FITTED_TAGS))
 
 
+ACCEPTED = ("baseline", "keep")
+
+
+def accepted(rec: dict) -> bool:
+    """True for a record that can be the accepted baseline: decided keep/baseline, not kept only as an ensemble
+    member (``decide keep --member``), not a re-check on re-drawn folds, not fitted to the public LB."""
+    return (isinstance(rec, dict) and rec.get("decision") in ACCEPTED and not rec.get("member")
+            and not rec.get("recheck") and not lb_fitted(rec))
+
+
+def decision_order(rec: dict) -> tuple[int, str]:
+    """When a record was decided: the ledger's decision counter (``decision_seq``), then the decision time for
+    records decided before the counter existed (or the log time for a decision given at log time)."""
+    return int(rec.get("decision_seq") or 0), str(rec.get("decided_at") or rec.get("time") or "")
+
+
+def accepted_baseline(recs: list[dict]) -> dict | None:
+    """The accepted baseline: the accepted record decided last (not the last one in the ledger, so
+    ``decide <earlier-id> baseline`` works). Ties keep ledger order. None when nothing is accepted."""
+    cands = [(decision_order(r), i, r) for i, r in enumerate(recs) if accepted(r)]
+    return max(cands, key=lambda t: t[:2])[2] if cands else None
+
+
 def public_tuned(rec: dict) -> bool:
     """True for a record tagged ``public-tuned``: chosen on the public LB, so not a hedge."""
     return isinstance(rec, dict) and bool(set(rec.get("tags") or ()) & set(PUBLIC_TUNED_TAGS))

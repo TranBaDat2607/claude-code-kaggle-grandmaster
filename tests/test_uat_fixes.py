@@ -3453,3 +3453,112 @@ def test_plan_counts_the_other_accounts_hours_once_read(ws, tmp_path, monkeypatc
     txt = G.plan(ws, refresh=False)
     assert "Other registered accounts: 2 read (acc2 ~30h, acc3 ~30h until the deadline)" in txt
     assert "Regime: TIME-BOUND. ~69 GPU-hours across 3 accounts" in txt and "Not counted" not in txt
+
+
+# ----------------------------------------------------------------------------- #112 the accepted baseline
+def test_the_latest_decision_sets_the_baseline_whatever_the_ledger_order(ws):
+    """`decide <earlier-id> baseline` after a later record was kept makes the earlier one the baseline, even when
+    the decisions fall in the same second (a script, a sweep)."""
+    led = Ledger(ws)
+    a, b = led.log("stack", 0.95233), led.log("member", 0.95026)
+    led.decide(a["id"], "keep")
+    led.decide(b["id"], "keep")
+    assert led.baseline()["id"] == b["id"]
+    led.decide(a["id"], "baseline", "back to the stack")
+    assert led.baseline()["id"] == a["id"]
+    # discarding the baseline hands it back to the accepted decision before it
+    led.decide(a["id"], "discard")
+    assert led.baseline()["id"] == b["id"]
+
+
+def test_ledgers_decided_before_the_fix_order_by_decision_time(ws):
+    led = Ledger(ws)
+    a, b = led.log("a", 0.9), led.log("b", 0.8)
+    led.update(a["id"], decision="keep", decided_at="2026-11-02T10:00:00")
+    led.update(b["id"], decision="keep", decided_at="2026-11-01T10:00:00")
+    assert led.baseline()["id"] == a["id"]
+    led.decide(b["id"], "keep")  # any new decision is later than the old ones
+    assert led.baseline()["id"] == b["id"]
+
+
+def test_a_member_is_kept_without_becoming_the_baseline(ws):
+    led = Ledger(ws)
+    stack, member = led.log("stack", 0.95), led.log("lgbm", 0.94)
+    led.decide(stack["id"], "baseline")
+    r = led.decide(member["id"], "keep", "diverse member", member=True)
+    assert r["decision"] == "keep" and r["member"]
+    assert led.baseline()["id"] == stack["id"]
+    with pytest.raises(ValueError, match="--member"):
+        led.decide(member["id"], "baseline", member=True)
+    with pytest.raises(ValueError, match="--member"):
+        led.decide(member["id"], "discard", member=True)
+    # deciding it again without --member makes it a candidate baseline again
+    led.decide(member["id"], "keep")
+    assert not led.get(member["id"]).get("member") and led.baseline()["id"] == member["id"]
+
+
+def test_every_baseline_reader_agrees(ws, plugin_root):
+    """The session brief, the final-pick candidates and `gpu` --prune-against baseline use the ledger's rule."""
+    from kgkit import evalset as EV
+    from kgkit import finals as FN
+    from kgkit import gpu as GP
+
+    led = Ledger(ws)
+    a, b, m = led.log("stack", 0.95, fold_scores=[0.95] * 3), led.log("single", 0.94, fold_scores=[0.94] * 3), \
+        led.log("member", 0.93, fold_scores=[0.93] * 3)
+    led.decide(a["id"], "keep")
+    led.decide(b["id"], "keep")
+    led.decide(a["id"], "baseline")
+    led.decide(m["id"], "keep", member=True)
+    recs = led.records()
+    assert EV.accepted_baseline(recs)["id"] == a["id"] == led.baseline()["id"]
+    assert GP._accepted_or_best(recs, True)["id"] == a["id"]
+    honest = dict(FN._honest(S.load(ws), {r["id"]: r for r in recs}, {}))
+    assert "accepted baseline" in honest[a["id"]]
+    from tests.test_hooks import hook
+    ctx = hook(plugin_root, "session_start.py", {"hook_event_name": "SessionStart", "cwd": str(ws)})["additionalContext"]
+    assert f"Accepted baseline (compare new ideas against this): {a['id']}" in ctx
+
+
+def test_cli_decide_reports_the_baseline_ledger_baseline_returns(ws, monkeypatch, capsys):
+    from kgkit import cli
+
+    monkeypatch.chdir(ws)
+    led = Ledger(ws)
+    a, b, m = led.log("stack", 0.95), led.log("single", 0.94), led.log("member", 0.93)
+    cli.main(["ledger", "decide", a["id"], "keep"])
+    cli.main(["ledger", "decide", b["id"], "keep"])
+    capsys.readouterr()
+    cli.main(["ledger", "decide", a["id"], "baseline", "back"])
+    assert f"accepted baseline is now {a['id']}" in capsys.readouterr().out
+    cli.main(["ledger", "baseline"])
+    assert capsys.readouterr().out.startswith(a["id"])
+
+    cli.main(["ledger", "decide", m["id"], "keep", "diverse", "--member"])
+    out = capsys.readouterr().out
+    assert f"{m['id']}: keep (member)" in out and f"accepted baseline stays {a['id']}" in out
+
+    # discarding the baseline says which record takes over
+    cli.main(["ledger", "decide", a["id"], "discard"])
+    assert f"accepted baseline is now {b['id']}" in capsys.readouterr().out
+
+    # a record that can never be the baseline: kept, but the command says so instead of claiming it
+    r = led.log("rechecked", 0.96)
+    led.update(r["id"], recheck="seed-2")
+    cli.main(["ledger", "decide", r["id"], "keep"])
+    out = capsys.readouterr().out
+    assert "accepted baseline is now" not in out and f"accepted baseline stays {b['id']}" in out
+    assert "warning" in out and "recheck" in out
+
+
+def test_ledger_baseline_with_only_members_kept_falls_back_to_the_highest_cv(ws, monkeypatch, capsys):
+    from kgkit import cli
+
+    monkeypatch.chdir(ws)
+    led = Ledger(ws)
+    m, top = led.log("member", 0.90), led.log("top", 0.95)
+    cli.main(["ledger", "decide", m["id"], "keep", "--member"])
+    assert "accepted baseline" not in capsys.readouterr().out
+    cli.main(["ledger", "baseline"])
+    out = capsys.readouterr().out
+    assert out.startswith(top["id"]) and "nothing accepted yet" in out

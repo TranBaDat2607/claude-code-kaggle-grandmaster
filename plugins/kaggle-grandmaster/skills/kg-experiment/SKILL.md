@@ -57,7 +57,9 @@ Follow the experiment protocol (`grandmaster-playbook` §2):
    spread counts as seed noise (or keep only if it adds no complexity/runtime); `--rope <gain>` marks
    changes too small to matter; a flagged huge jump → `validation-auditor` before accepting.
 6. Record it: `python -m kgkit ledger decide <new> keep|discard|inconclusive "<gain, folds k/K>"
-   --parent <baseline>`; KEEP makes it the new baseline. `python -m kgkit backlog set <n> --status done
+   --parent <baseline>`; KEEP makes it the new baseline (the accepted decision made last is the baseline;
+   `decide <id> baseline` restores any record). A model kept only as a member of the accepted ensemble:
+   `decide <new> keep --member`, which leaves the baseline alone. `python -m kgkit backlog set <n> --status done
    --exp <new> --result "<decision + gain>"`. Add one line of learning to the CLAUDE.md notes. Commit code. A sweep of runs is decided at once: `python -m
    kgkit ledger decide 12..20 discard "<why>"`.
 7. Suggest the next experiment based on what was learned. When it changes direction (a new model family, new data,

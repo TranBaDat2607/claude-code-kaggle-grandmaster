@@ -1200,12 +1200,11 @@ def input_sources(datasets: list[str], kernels: list[str], layout: str = "flat")
 
 
 def _accepted_or_best(cands: list[dict], gib: bool) -> dict | None:
-    """The accepted baseline (latest record decided keep/baseline), else the highest CV — the same rule
-    as ``kgkit.experiment.Ledger.baseline`` (duplicated here: this module stays standard-library only)."""
+    """The accepted baseline (``evalset.accepted_baseline``, the rule of ``Ledger.baseline``), else the highest CV."""
     cands = [r for r in cands if not r.get("recheck")]  # re-drawn-split runs are not comparable references
-    for r in reversed(cands):
-        if r.get("decision") in ("baseline", "keep"):
-            return r
+    base = E.accepted_baseline(cands)
+    if base is not None:
+        return base
     return sorted(cands, key=lambda r: r["cv"], reverse=gib)[0] if cands else None
 
 

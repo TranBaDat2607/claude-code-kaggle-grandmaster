@@ -182,8 +182,7 @@ def _honest(st: S.CompetitionState, by_id: dict, score: dict) -> list[tuple[str,
     untuned = [r for r in ok if not E.public_tuned(r)]  # picked on the public LB: its public score is no evidence
     sign = 1 if st.greater_is_better else -1
     found: dict[str, list[str]] = {}
-    base = next((r for r in reversed(list(by_id.values())) if r.get("decision") in ("baseline", "keep")
-                 and not E.lb_fitted(r) and not r.get("recheck")), None)
+    base = E.accepted_baseline(list(by_id.values()))
     if base is not None:
         found.setdefault(base["id"], []).append("accepted baseline")
     own = [r for r in ok if E.own_score(r, st.holdout)]
