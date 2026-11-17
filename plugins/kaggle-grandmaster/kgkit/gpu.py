@@ -63,6 +63,9 @@ SESSION_LIMITS = {"GPU": 12.0, "TPU": 9.0, "CPU": 12.0}
 SESSION_SLOTS = {"GPU": 2, "TPU": 1}
 # How long a pushed run may sit in the queue before an entry that never reported "running" is stale.
 QUEUE_ALLOWANCE_H = {"GPU": 1.0, "TPU": 36.0, "CPU": 1.0}
+# A GPU batch session normally starts within a minute or two of its push; one queued longer than this is stuck
+# more often than waiting (#110). TPU jobs queue for hours by design: no warning for them.
+GPU_QUEUE_WARN_MIN = 5
 # `kaggle quota` is tried this many times, this many seconds apart: the CLI fails now and then on a flaky network.
 QUOTA_TRIES, QUOTA_RETRY_S = 2, 3.0
 # A run logged since a cached quota counts against it when it may have spent at least this many hours of it.
@@ -114,6 +117,9 @@ ACTIVE = (PENDING, "pushed", "queued", "running")
 FINISHED = ("complete", "error", "cancelled")
 # The statuses of a run whose session is over (`collect` adds the last three): the runs whose hours count.
 ENDED = (*FINISHED, "collected", "partial", "failed")
+DELETED = "deleted"  # the kernel was deleted on Kaggle (`gpu repush`, or `kaggle kernels delete` seen by the hook)
+# `kaggle kernels delete` answers this (Kaggle CLI 2.x) when the kernel is gone
+DELETED_RE = re.compile(r"Kernel ([\w.-]+/[\w.-]+) deleted successfully", re.IGNORECASE)
 CLOCK_SKEW_S = 60  # this machine's clock vs Kaggle's, when a pending push is matched to the kernel's last run
 
 
@@ -735,8 +741,9 @@ def record_push(root: str | Path, rec: dict) -> dict:
     the log is the same run, logged once: its entry is returned and nothing is written."""
     recs = runs(root)
     if rec.get("version") is not None:
-        for r in recs:
-            if r.get("kernel") == rec.get("kernel") and r.get("version") == rec.get("version"):
+        for r in recs:  # a deleted kernel pushed again under its slug numbers its versions from 1 again: a new run
+            if (r.get("kernel") == rec.get("kernel") and r.get("version") == rec.get("version")
+                    and not r.get("deleted_at")):
                 return r
     for r in recs:
         if r.get("kernel") == rec.get("kernel") and r.get("status") in ACTIVE:
@@ -797,6 +804,50 @@ def release(root: str | Path, kernel: str, status: str = "released") -> int:
     if n:
         _write_runs(root, recs)
     return n
+
+
+def note_deleted(root: str | Path, kernel: str) -> int:
+    """The kernel was deleted on Kaggle: every entry of it is marked ``deleted_at`` (a push under the same slug starts
+    again at version 1, and is a new run), and a run still in flight is closed as deleted. A run seen queued never
+    started and spent nothing; one seen running is charged its session time so far. Returns the entries marked."""
+    recs = runs(root)
+    now, n = _iso(_now()), 0
+    for r in recs:
+        if r.get("kernel") != kernel or r.get("deleted_at"):
+            continue
+        r["deleted_at"] = now
+        n += 1
+        if r.get("status") in ACTIVE:
+            was = r.get("status")
+            r.update(status=DELETED, finished_at=now)
+            key = hours_key(run_resource(r))
+            if was == "queued" and not r.get("started_at"):
+                r[key] = 0.0
+            elif was == "running":
+                r[key] = session_hours(r)
+    if n:
+        _write_runs(root, recs)
+    return n
+
+
+def queued_minutes(r: dict, now: dt.datetime | None = None) -> float | None:
+    """Minutes since the run was pushed, for a run Kaggle still has queued."""
+    pushed = _parse_time(r.get("pushed_at"))
+    return None if pushed is None else max(0.0, ((now or _now()) - pushed).total_seconds() / 60)
+
+
+def queue_advice(root: str | Path, kernel: str, minutes: float) -> str:
+    """What helps a GPU job stuck in Kaggle's queue."""
+    r = latest_run(root, kernel)
+    other = [run_label(x) for x in active_runs(root, "GPU") if x.get("kernel") != kernel and x.get("status") == "running"]
+    return (f"WARNING: {kernel} has been queued for {minutes:.0f} min, more than {GPU_QUEUE_WARN_MIN} min: GPU sessions "
+            "normally start within a minute or two. "
+            + (f"{', '.join(other)} of yours {'is' if len(other) == 1 else 'are'} running and may hold the session "
+               "slots; if not, " if other else "")
+            + "Kaggle has most likely left it stuck. What usually helps: delete it and push it again, which starts "
+            f"a fresh queue: `python -m kgkit gpu repush {kernel} --yes`" + ("" if r.get("dir") else " <folder>")
+            + " (deleting is irreversible: every version and output of the kernel goes, so ask the user first); or "
+            "build it for the other GPU pool (P100: `--accelerator NvidiaTeslaP100`, one GPU) and push that.")
 
 
 def confirm_pending(root: str | Path, kernels: list[str] | None = None) -> list[dict]:
@@ -1616,7 +1667,8 @@ def push(root: str | Path | None, kdir: str | Path, force: bool = False, hours: 
     rec = {"kernel": tm["kernel"], "version": int(m.group(1)), "name": tm["name"],
            "jobs": tm.get("jobs") or [tm["name"]], "accelerator": acc, "resource": res, "hours": hours,
            "folds": tm.get("folds"), "cmd": tm.get("cmd"), "build_id": tm.get("build_id"), "prune": tm.get("prune"),
-           "resume_from": tm.get("resume_from"), "pushed_at": _iso(_now()), "status": "pushed"}
+           "resume_from": tm.get("resume_from"), "pushed_at": _iso(_now()), "status": "pushed",
+           "dir": _rel_dir(root, kdir)}
     print(cap_note(hours, res, bool(tm.get("cmd"))))
     dropped = [s for v in dropped_sources(out).values() for s in v]
     if dropped:
@@ -1624,6 +1676,56 @@ def push(root: str | Path | None, kdir: str | Path, force: bool = False, hours: 
         print(f"WARNING: {dropped_sources_warning(out)}")
     record_push(root, rec)
     return rec
+
+
+def _rel_dir(root: Path, kdir: Path) -> str:
+    """The kernel folder as `gpu repush` finds it again: relative to the workspace when inside it."""
+    try:
+        return kdir.resolve().relative_to(root.resolve()).as_posix()
+    except ValueError:
+        return kdir.resolve().as_posix()
+
+
+def repush(root: str | Path | None, kernel: str, kdir: str | Path | None = None, yes: bool = False) -> dict:
+    """Delete a queued (or running) kernel on Kaggle and push its folder again: the remedy for a GPU job Kaggle left
+    in the queue (#110). Deleting is irreversible, so without ``yes`` it only says what it would do."""
+    root = _root(root)
+    prev = latest_run(root, kernel)
+    try:
+        status, text = kernel_status(kernel)
+    except (OSError, subprocess.SubprocessError) as e:
+        status, text = "unknown", str(e)
+    if status in FINISHED:
+        raise SystemExit(f"{kernel} is {status}: nothing to repush. Push it again with `python -m kgkit gpu push <dir>`.")
+    if status not in ("queued", "running"):
+        raise SystemExit(f"{kernel}: could not read its status ({status}: {text[:200]}); nothing deleted")
+    folder = Path(kdir) if kdir else (root / prev["dir"] if prev.get("dir") else None)
+    if folder is None:
+        raise SystemExit(f"the run log has no folder for {kernel} (it was not pushed with `kgkit gpu push`): pass "
+                         f"the kernel folder: `python -m kgkit gpu repush {kernel} <dir> --yes`")
+    spec = push_spec(folder, prev.get("hours") if not (folder / "kg-train.json").is_file() else None)
+    if spec["kernel"] != kernel:
+        raise SystemExit(f"{folder} pushes {spec['kernel']}, not {kernel}")
+    hours = prev.get("hours") or spec["hours"]
+    lost = ("it has not started, so no output is lost" if status == "queued" else
+            "it is RUNNING: its session stops and whatever it has not written out yet is lost")
+    if not yes:
+        print(f"would run: kaggle kernels delete {kernel} -y   ({lost}; every version and output of the kernel on "
+              f"Kaggle goes)\n  then push {folder.as_posix()} again (cap {float(hours):g}h).\nDeleting is "
+              f"irreversible: ask the user, then run `python -m kgkit gpu repush {kernel}"
+              + ("" if kdir is None else f" {folder.as_posix()}") + " --yes`.")
+        raise SystemExit(2)
+    r = run_kaggle(["kernels", "delete", kernel, "-y"], timeout=300)
+    out = (r.stdout or "") + (r.stderr or "")
+    if r.returncode != 0 or not DELETED_RE.search(out):
+        raise SystemExit(f"deleting {kernel} failed; nothing was pushed: {_one_line(out)[:500]}")
+    n = note_deleted(root, kernel)
+    print(f"deleted {kernel} on Kaggle ({lost}); {n} run(s) of it marked deleted in the GPU log")
+    return push(root, folder, hours=float(hours))
+
+
+def _one_line(text: str) -> str:
+    return " ".join(text.split())
 
 
 def kernel_status(kernel: str) -> tuple[str, str]:
@@ -1638,8 +1740,8 @@ def cancel_advice(kernel: str, status: str) -> str:
         return (f"{kernel} is queued. A queued session has no session id yet, so the API cannot cancel it; the "
                 f"only way to free its slot is to delete the kernel (irreversible: every version and output goes):\n"
                 f"  kaggle kernels delete {kernel} -y\n"
-                "Ask the user before running it, then push again (the queue starts from zero). Afterwards: "
-                f"`kgkit gpu release {kernel}`.")
+                "Ask the user before running it, then push again (the queue starts from zero). `kgkit gpu repush "
+                f"{kernel} --yes` does both and keeps the run log right.")
     if status == "running":
         return (f"{kernel} is running. Stop it from the website ({url}, Edit -> session controls -> Stop "
                 f"session) or let its -t cap end it; then `kgkit gpu release {kernel}` if it was not collected.")
@@ -1799,6 +1901,7 @@ def wait(root: str | Path | None, kernel: str, interval: float = 60, max_hours: 
     t_end = time.time() + max_hours * 3600
     last = None
     seen_running = None  # when a poll last found it running: it ran at least until then
+    warned = False
     while True:
         pend = next((r for r in runs(root) if r.get("kernel") == kernel and r.get("status") == PENDING), None)
         if pend is not None and confirm_pending(root, [kernel]):
@@ -1817,6 +1920,12 @@ def wait(root: str | Path | None, kernel: str, interval: float = 60, max_hours: 
             last = s
         if s == "running":
             seen_running = _now()
+        if s == "queued" and not warned:
+            run = latest_run(root, kernel)
+            mins = queued_minutes(run)
+            if run_resource(run) == "GPU" and mins is not None and mins > GPU_QUEUE_WARN_MIN:
+                print(queue_advice(root, kernel, mins), flush=True)
+                warned = True
         if pend is not None and _stale(pend, _now()):
             print(f"no version of {kernel} has run on Kaggle since its push from a background command at "
                   f"{pend.get('pushed_at')}: that push most likely failed (read that command's output). "

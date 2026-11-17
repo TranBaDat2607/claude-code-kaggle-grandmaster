@@ -26,7 +26,7 @@ Commands
   vendor      copy kgkit into a project or a Kaggle dataset folder (for offline kernels)
   whoami      your Kaggle username (KAGGLE_USERNAME, kaggle.json or `kaggle config view`; never the key)
   datasets    pull  — download a dataset, file by file when the whole-dataset download returns 404
-  gpu         quota | plan | build | push | status | wait | collect | release | cancel | log  — Kaggle GPUs/TPUs
+  gpu         quota | plan | build | push | status | wait | collect | repush | release | cancel | log  — Kaggle GPUs/TPUs
 """
 
 from __future__ import annotations
@@ -1858,14 +1858,23 @@ def cmd_gpu(a):
                       f"`kgkit gpu release {k}`)")
                 continue
             s, text = G.kernel_status(k)
-            was_active = G.latest_run(root, k).get("status") in G.ACTIVE
+            run = G.latest_run(root, k)
+            was_active = run.get("status") in G.ACTIVE
             G.note_status(root, k, s)
+            mins = G.queued_minutes(run) if s == "queued" else None
             print(f"{k}: {s}" + (f"  ({text})" if s == "unknown" else "")
+                  + (f" (for {mins:.0f} min since its push)" if mins is not None else "")
                   + ("  (its push from a background command went through)" if k in confirmed else ""))
+            if mins is not None and G.run_resource(run) == "GPU" and mins > G.GPU_QUEUE_WARN_MIN:
+                print("  " + G.queue_advice(root, k, mins))
             if was_active and s in ("cancelled", "error"):  # it ended since the log last saw it: say how
                 G.report_stop(root, k, s, tail=False)
         if not kernels:
             print("no active remote runs")
+    elif a.gpu_cmd == "repush":
+        rec = G.repush(None, a.kernel, a.dir, yes=a.yes)
+        print(f"pushed {rec['kernel']} v{rec['version']} ({rec['accelerator']}, cap {rec['hours']}h). "
+              f"Next: python -m kgkit gpu wait {rec['kernel']}  (run it in the background)")
     elif a.gpu_cmd == "release":
         root = G._root(None)
         n = G.release(root, a.kernel)
@@ -2403,6 +2412,11 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--weights", action="store_true", help="also download model weights (*.pt etc.)")
     s = gs.add_parser("release", help="drop the quota reservation of a run that finished or never started")
     s.add_argument("kernel")
+    s = gs.add_parser("repush", help="delete a kernel stuck in the queue on Kaggle and push its folder again "
+                                     "(irreversible: without --yes it only says what it would do)")
+    s.add_argument("kernel")
+    s.add_argument("dir", nargs="?", help="the kernel folder (default: the one `gpu push` recorded)")
+    s.add_argument("--yes", action="store_true", help="delete it: ask the user first, every version and output goes")
     s = gs.add_parser("cancel", help="how to stop a running or queued kernel (prints the steps; deletes nothing)")
     s.add_argument("kernel")
     s = gs.add_parser("log", help="remote GPU runs and their cost")

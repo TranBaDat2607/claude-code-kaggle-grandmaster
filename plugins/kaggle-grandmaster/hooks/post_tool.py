@@ -169,6 +169,23 @@ def log_gpu_pushes(payload: dict, pushes: list[dict]) -> list[str]:
     return [n for n in notes if n]
 
 
+def note_deleted_kernels(payload: dict) -> str | None:
+    """`kaggle kernels delete` answered that a kernel is gone: its runs in the GPU log are marked deleted (a run still
+    in flight stops holding quota) and a push under the same slug, which Kaggle numbers from version 1 again, is
+    logged as a new run. Read before this command's pushes are logged: `delete && push` re-pushes at once."""
+    root = C.workspace(payload)
+    if root is None:
+        return None
+    gone = [k for k in dict.fromkeys(m.group(1) for m in C.G.DELETED_RE.finditer(_response_text(payload)))
+            if C.G.note_deleted(root, k)]
+    if not gone:
+        return None
+    return (f"kaggle-grandmaster: {', '.join(gone)} deleted on Kaggle: {'its runs' if len(gone) == 1 else 'their runs'}"
+            " in the GPU log are marked deleted and hold no quota. Push it again with `python -m kgkit gpu push "
+            "<dir>` so the new run (version 1 again) is logged; `python -m kgkit gpu repush <kernel> --yes` does "
+            "the delete and the push in one step next time.")
+
+
 def _push_record(push: dict, target: tuple, res: str, version: int | None, status: str, at: dt.datetime) -> dict:
     try:
         hours = round(float(push["timeout"]) / 3600, 3) if push.get("timeout") else C.G.session_limit(res)
@@ -424,7 +441,8 @@ def main() -> None:
     # One command can chain an upload, pushes and submits: report on each, in one message.
     pushes = C.parse_pushes(cmd)
     subs = C.parse_submits(cmd) or C.script_submits(payload, cmd, ran=True)
-    notes = [silent_failure_note(payload), *push_reply_notes(payload, pushes), *log_gpu_pushes(payload, pushes),
+    deleted = note_deleted_kernels(payload)  # before the pushes: `delete && push` logs the re-push as a new run
+    notes = [silent_failure_note(payload), deleted, *push_reply_notes(payload, pushes), *log_gpu_pushes(payload, pushes),
              *log_submissions(payload, subs), unlogged_submit_note(payload, subs), log_place_note(payload, cmd)]
     notes = [n for n in notes if n]
     if notes:
