@@ -1489,8 +1489,8 @@ def cmd_backlog(a):
         print(bl.table(include_closed=a.all, n=a.n))
     elif a.action == "set":
         i = bl.set(int(a.args[0]), exp=a.exp, status=a.status, result=a.result, gain=a.gain, prob=a.prob,
-                   cost=a.cost, gpu_hours=a.gpu_hours, evidence=a.evidence, screen_gain=a.screen_gain,
-                   full_gain=a.full_gain)
+                   cost=a.cost, gpu_hours=a.gpu_hours, evidence=a.evidence, source=a.source,
+                   first_experiment=a.first_experiment, screen_gain=a.screen_gain, full_gain=a.full_gain)
         print(f"#{i['id']} {i['idea']} -> {i['status']}" + (f": {i['result']}" if i.get("result") else ""))
     elif a.action == "render":
         print(f"wrote {bl.render(a.out)}")
@@ -2030,7 +2030,7 @@ _BACKLOG_OPTIONS = [
                                           "deadline, not as human time)")),
     ("--evidence", dict()),
     ("--source", dict(help="error-analysis | eda | forum | notebook | prior-art | brainstorm | domain")),
-    ("--first-experiment", dict()),
+    ("--first-experiment", dict(help="the smallest experiment that tests the idea (e.g. its command)")),
     ("--status", dict(choices=["todo", "running", "done", "dropped"])),
     ("--exp", dict(help="ledger id of an experiment testing this idea")),
     ("--result", dict()),
@@ -2040,12 +2040,14 @@ _BACKLOG_OPTIONS = [
     ("-n", dict(type=int, default=30)),
     ("--out", dict(help="output path (default reports/backlog.md)")),
 ]
+# the fields of an idea: `add` records them and `set` changes any of them on an existing idea (#111: kg-experiment
+# learns the command of the first experiment only when it marks the idea running)
+_BACKLOG_FIELDS = "--gain --prob --cost --gpu-hours --evidence --source --first-experiment --status --exp --result"
 _BACKLOG_ACTIONS = {
-    "add": ("add an idea", [("idea", "+", "the idea, in words")],
-            "--gain --prob --cost --gpu-hours --evidence --source --first-experiment --status --exp --result"),
+    "add": ("add an idea", [("idea", "+", "the idea, in words")], _BACKLOG_FIELDS),
     "list": ("open ideas, best expected value per hour first", [], "--all -n"),
-    "set": ("update an idea", [("id", None, "backlog id")],
-            "--status --exp --result --gain --prob --cost --gpu-hours --evidence --screen-gain --full-gain"),
+    "set": ("update an idea (options left out keep their value)", [("id", None, "backlog id")],
+            _BACKLOG_FIELDS + " --screen-gain --full-gain"),
     "render": ("write the backlog as markdown", [], "--out"),
     "fidelity": ("do the cheap screens predict the full-CV gains?", [], ""),
 }

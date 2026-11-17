@@ -31,7 +31,8 @@ Follow the experiment protocol (`grandmaster-playbook` §2):
 1. `python -m kgkit status` and `python -m kgkit ledger baseline` → the **accepted baseline** id
    (last KEEP, not the highest CV), its CV ± std and code path. If nothing is accepted yet, decide one
    first (`python -m kgkit ledger decide <id> baseline`). If the idea is in the backlog, mark it
-   `python -m kgkit backlog set <n> --status running`; otherwise add it.
+   `python -m kgkit backlog set <n> --status running --first-experiment "<command you will run>"`; otherwise add
+   it (same options).
 2. Restate the hypothesis, the *single* change, the baseline id, and the success criterion:
    paired gain ≥ ~2 standard errors of the per-fold differences (or of the OOF bootstrap) with most
    folds improving. Not "Δ > fold std": the fold std measures fold difficulty, which cancels in a

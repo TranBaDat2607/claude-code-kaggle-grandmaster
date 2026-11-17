@@ -97,6 +97,29 @@ def test_backlog_cli_add_status(ws, monkeypatch, capsys):
     assert B.Backlog(ws).items()[0]["result"] == "no"
 
 
+# ----------------------------------------------------------------------------- #111 backlog set fields
+def test_backlog_set_updates_every_field_add_records(ws, monkeypatch, capsys):
+    """kg-experiment marks an idea running with `backlog set` when it designs the first experiment: every field
+    `add` records (the command of the first experiment, its source, ...) must be settable on an existing idea."""
+    from kgkit import cli
+
+    add_flags = set(cli._BACKLOG_ACTIONS["add"][2].split())
+    set_flags = set(cli._BACKLOG_ACTIONS["set"][2].split())
+    assert add_flags <= set_flags, f"backlog set lacks {sorted(add_flags - set_flags)}"
+
+    monkeypatch.chdir(ws)
+    cli.main(["backlog", "add", "idea", "--gain", "2", "--prob", "0.5", "--cost", "1"])
+    cmd = "python src/train.py --flag"
+    cli.main(["backlog", "set", "1", "--first-experiment", cmd, "--source", "forum", "--status", "running"])
+    i = B.Backlog(ws).items()[0]
+    assert (i["first_experiment"], i["source"], i["status"]) == (cmd, "forum", "running")
+    # an option left out keeps the stored value
+    cli.main(["backlog", "set", "1", "--result", "ok"])
+    i = B.Backlog(ws).items()[0]
+    assert (i["first_experiment"], i["source"], i["result"]) == (cmd, "forum", "ok")
+    capsys.readouterr()
+
+
 # ----------------------------------------------------------------------------- #16 reservations
 def test_finished_and_superseded_runs_release_their_reservation(ws):
     _quota(ws, gpu_left=18.23)
@@ -750,7 +773,7 @@ def test_ledger_and_backlog_actions_show_their_own_arguments(ws, monkeypatch, ca
     out = help_of("ledger", "-h")
     assert "<exp_id> <public_score> [private_score]" in out and "<exp_id> <baseline|keep|discard|inconclusive>" in out
     out = help_of("backlog", "set", "--help")
-    assert " id" in out and "--screen-gain" in out and "--first-experiment" not in out
+    assert " id" in out and "--screen-gain" in out and "--first-experiment" in out and "--all" not in out
     with pytest.raises(SystemExit) as e:
         cli.main(["ledger", "lb", "1"])
     assert e.value.code == 2 and "public_score" in capsys.readouterr().err
