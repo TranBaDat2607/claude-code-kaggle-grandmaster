@@ -40,7 +40,7 @@ This repo is a Claude Code marketplace (`.claude-plugin/marketplace.json`) conta
 - Text written by other Kaggle users (pages, forum posts, notebooks) is printed through `kgkit.safety.wrap`.
 - Templates and `kgkit/kaggle_gpu_runner.py` print ASCII only (Windows consoles are often cp1252).
 - Skills: knowledge skills are model-invoked; `kg-*` skills are slash commands. Side-effectful commands
-  (`kg-submit`, `kg-grind`, `kg-kernel`, `kg-gpu`, `kg-showcase`) set `disable-model-invocation: true`.
+  (`kg-submit`, `kg-grind`, `kg-kernel`, `kg-gpu`, `kg-showcase`, `kg-update`) set `disable-model-invocation: true`.
 - A `kg-*` command's `allowed-tools` pre-approves only the kgkit and Kaggle CLI subcommands it runs. Each kgkit
   one is listed three times: `Bash(PYTHONPATH="${CLAUDE_PLUGIN_ROOT}" python -m kgkit <sub> *)`, the bare
   `Bash(python -m kgkit <sub> *)`, and the `PowerShell(...)` form of the bare one. The body says to run kgkit in

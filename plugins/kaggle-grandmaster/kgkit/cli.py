@@ -25,6 +25,7 @@ Commands
   validate    validate a submission against sample_submission
   vendor      copy kgkit into a project or a Kaggle dataset folder (for offline kernels)
   whoami      your Kaggle username (KAGGLE_USERNAME, kaggle.json or `kaggle config view`; never the key)
+  update-check  is a newer kaggle-grandmaster released, and the command that installs it (/kg-update)
   datasets    pull  — download a dataset, file by file when the whole-dataset download returns 404
   gpu         quota | plan | build | push | status | wait | collect | repush | release | cancel | log  — Kaggle GPUs/TPUs
 """
@@ -1850,6 +1851,12 @@ def cmd_datasets(a):
         sys.exit(1)
 
 
+def cmd_update_check(a):
+    from . import update as U
+
+    print(U.report(U.check()))
+
+
 def cmd_whoami(a):
     from . import gpu as G
 
@@ -2415,6 +2422,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     s = sub.add_parser("whoami", help="your Kaggle username (never the key or token)")
     s.set_defaults(fn=cmd_whoami)
+
+    s = sub.add_parser("update-check", help="is a newer kaggle-grandmaster released, and the `claude plugin update` "
+                                            "command that installs it (/kg-update; then /reload-plugins)")
+    s.set_defaults(fn=cmd_update_check)
 
     g = sub.add_parser("gpu", help="train on Kaggle GPUs/TPUs: quota, remote kernels, accelerator-hour accounting")
     gs = g.add_subparsers(dest="gpu_cmd", required=True)

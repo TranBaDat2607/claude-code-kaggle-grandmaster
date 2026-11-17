@@ -33,7 +33,7 @@ public).
 
 - `skills/`: 22 knowledge playbooks (including `competition-strategy`: choosing competitions, the solo
   gold, teaming and merging; and `compute-efficiency`: speed defaults per domain and hardware, from winning
-  solutions) + 18 `kg-*` slash commands
+  solutions) + 19 `kg-*` slash commands
 - `agents/`: 9 specialist subagents
 - `hooks/`: session brief (accepted baseline, backlog top, GPU quota, competition data in git), prompt→skill router, submission +
   GPU-quota + upload guard (credentials never printed or uploaded, repeated files caught), submission /

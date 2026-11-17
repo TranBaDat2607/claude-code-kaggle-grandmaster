@@ -34,7 +34,7 @@ Kaggle submissions and GPU pushes still go through the plugin's hooks, which che
 | Layer | Count | What it does |
 |---|---|---|
 | **Knowledge skills** | 22 | Playbooks Claude loads when relevant: master playbook, recon, validation, tabular, CV, NLP/LLM, time series, audio, simulation/optimisation, recsys, ensembling, metrics, tuning, DL training, boosters, code competitions, Kaggle CLI, Kaggle GPUs, compute efficiency (speed defaults by domain, from winning solutions), CV-LB debugging, final selection, and competition strategy (choosing competitions, solo gold, teaming and merging) |
-| **Slash commands** | 18 | `kg-start`, `kg-adopt`, `kg-recon`, `kg-eda`, `kg-cv`, `kg-baseline`, `kg-experiment`, `kg-grind`, `kg-gpu`, `kg-ensemble`, `kg-submit`, `kg-status`, `kg-kernel`, `kg-final`, `kg-debug`, `kg-ideas`, `kg-postmortem`, `kg-showcase` |
+| **Slash commands** | 19 | `kg-start`, `kg-adopt`, `kg-recon`, `kg-eda`, `kg-cv`, `kg-baseline`, `kg-experiment`, `kg-grind`, `kg-gpu`, `kg-ensemble`, `kg-submit`, `kg-status`, `kg-kernel`, `kg-final`, `kg-debug`, `kg-ideas`, `kg-postmortem`, `kg-showcase`, `kg-update` |
 | **Specialist agents** | 9 | competition-analyst, solution-researcher, data-detective, validation-auditor, feature-engineer, experiment-runner, error-analyst, ensemble-architect, kernel-packager |
 | **Hooks** | 5 | session brief (incl. GPU quota), Kaggle-prompt → skill router, submission + GPU-push + upload guard (validation, repeated files, daily budget, weekly GPU quota, credential protection), submission / GPU-run logger, compute defaults when model code is written |
 | **Kaggle pane** | 1 mod | `/kaggle-monitor`: running kernels with live CPU / GPU / RAM / disk and what each GPU is doing, recent kernels and submissions, GPU/TPU quota for every account, multi-account token management ([below](#kaggle-pane-kaggle-monitor)) |
@@ -214,6 +214,7 @@ the plugin's kgkit) to update it.
 | `metrics` / `score` / `vendor` | metric registry / scoring / copy kgkit into a project or Kaggle dataset |
 | `gpu quota\|plan\|build\|push\|status\|wait\|collect\|release\|cancel\|log` | train on Kaggle GPUs and TPUs: live quota (GPU + TPU) and what holds it, budget to the deadline, remote training kernels, push of any kernel folder with a cap, ledger import, GPU/TPU-hour accounting ([below](#training-on-kaggle-gpus)) |
 | `datasets pull <owner/slug> <dir> [--files GLOB]` | download a dataset; falls back to one request per file when the whole-dataset archive returns 404 |
+| `update-check` | is a newer kaggle-grandmaster released: the running version against the latest GitHub release, what changed, and the exact `claude plugin update` command for this session's install (run by `/kg-update`, which you approve); after the update, that it waits for `/reload-plugins`, the folder kgkit runs from after the reload, and the older `kgkit vendor` copies in the workspace |
 | `whoami` · `config [key=value ...]` | your Kaggle username (never the key) · show or set `competition.json` fields, e.g. `validation=holdout+lb holdout_n=58` |
 
 Python API highlights: `kgkit.cv.assign_folds` (stratified / group / stratified-group /
@@ -342,7 +343,7 @@ Repository layout:
 .claude-plugin/marketplace.json        marketplace manifest (this repo is installable)
 plugins/kaggle-grandmaster/
   .claude-plugin/plugin.json
-  skills/<name>/SKILL.md               22 knowledge skills + 18 kg-* commands
+  skills/<name>/SKILL.md               22 knowledge skills + 19 kg-* commands
   agents/*.md                          9 subagents
   hooks/                               hooks.json, run.sh launcher, stdlib-only Python hooks
   hooks/monitor/                       the Kaggle pane mod (TypeScript hooks module) and its tests

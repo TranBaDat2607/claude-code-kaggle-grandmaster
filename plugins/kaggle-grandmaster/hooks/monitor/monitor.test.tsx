@@ -984,7 +984,7 @@ test('a bad machine: fewer GPUs than the shape promises, a KG_BAD_MACHINE line, 
 test('a card on a bad machine says so, open or closed, and how to get a healthy one', async ($, on) => {
   const now = Date.UTC(2026, 10, 6, 12)
   on('clock.now', () => ({ value: now }))
-  const seeded = runningKernels(now, ['u2/train-a']) as Record<string, { value: Record<string, KernelLive> }>
+  const seeded = runningKernels(now, ['u2/train-a']) as unknown as Record<string, { value: Record<string, KernelLive> }>
   seeded.live!.value['u2/train-a']!.machine = 'the session got 1 GPU where its shape promises 2'
   on('state.get', ($, e, next) => (e.key in seeded ? { value: { value: seeded[e.key], version: 1 } } : next(e)))
   on('store.set', () => ({ value: undefined }))

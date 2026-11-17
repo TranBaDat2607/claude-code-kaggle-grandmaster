@@ -16,7 +16,7 @@ RUN_FORM = 'PYTHONPATH="${CLAUDE_PLUGIN_ROOT}" python -m kgkit <command>'
 # what a turn must never run unprompted: a submission, a push, an upload, anything public, quota spent
 OUTWARD = re.compile(r"\bsubmit\b|\bpush\b|datasets (create|version)|models? (create|instances)|\bgit\b|\bgh\b|"
                      r"\bvendor\b|\brecheck\b|visibility")
-SIDE_EFFECTS = {"kg-submit", "kg-grind", "kg-kernel", "kg-gpu", "kg-showcase"}
+SIDE_EFFECTS = {"kg-submit", "kg-grind", "kg-kernel", "kg-gpu", "kg-showcase", "kg-update"}
 
 
 def _skill(name: str) -> tuple[dict, list[str], str]:
@@ -34,7 +34,7 @@ def _skill(name: str) -> tuple[dict, list[str], str]:
 
 
 def test_there_are_kg_commands():
-    assert len(COMMANDS) == 18 and "kg-showcase" in COMMANDS
+    assert len(COMMANDS) == 19 and "kg-showcase" in COMMANDS and "kg-update" in COMMANDS
 
 
 @pytest.mark.parametrize("name", COMMANDS)
