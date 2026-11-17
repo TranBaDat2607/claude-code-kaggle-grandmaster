@@ -125,6 +125,9 @@ ACTIVE = (PENDING, "pushed", "queued", "running")
 FINISHED = ("complete", "error", "cancelled")
 # The statuses of a run whose session is over (`collect` adds the last three): the runs whose hours count.
 ENDED = (*FINISHED, "collected", "partial", "failed")
+# Two log entries of one kernel version pushed at most this far apart are one push logged twice (a hook re-run on the
+# same command); further apart, the kernel was deleted on Kaggle and created again by the later push (#114).
+DUPLICATE_PUSH_S = 600
 DELETED = "deleted"  # the kernel was deleted on Kaggle (`gpu repush`, or `kaggle kernels delete` seen by the hook)
 # `kaggle kernels delete` answers this (Kaggle CLI 2.x) when the kernel is gone
 DELETED_RE = re.compile(r"Kernel ([\w.-]+/[\w.-]+) deleted successfully", re.IGNORECASE)
@@ -743,16 +746,29 @@ def log_run(root: str | Path, rec: dict) -> dict:
     return rec
 
 
+def _same_push(a: dict, b: dict) -> bool:
+    """Whether two entries of one kernel version are one push logged twice: pushed within DUPLICATE_PUSH_S (an entry
+    without a push time is taken to be the same)."""
+    ta, tb = _parse_time(a.get("pushed_at")), _parse_time(b.get("pushed_at"))
+    return ta is None or tb is None or abs((ta - tb).total_seconds()) <= DUPLICATE_PUSH_S
+
+
 def record_push(root: str | Path, rec: dict) -> dict:
     """Log a new push. Older still-active entries of the same kernel are marked superseded: Kaggle reports
-    only a kernel's latest version, and a re-push must not hold a second reservation. A version already in
-    the log is the same run, logged once: its entry is returned and nothing is written."""
-    recs = runs(root)
-    if rec.get("version") is not None:
-        for r in recs:  # a deleted kernel pushed again under its slug numbers its versions from 1 again: a new run
-            if (r.get("kernel") == rec.get("kernel") and r.get("version") == rec.get("version")
-                    and not r.get("deleted_at")):
+    only a kernel's latest version, and a re-push must not hold a second reservation. The same push logged twice
+    (that version's entry still in flight, pushed moments before) is logged once: its entry is returned and nothing
+    is written. A version at or below one already logged is a new kernel's: Kaggle numbers the versions of a kernel
+    deleted and pushed again under its slug from 1, whether or not kgkit saw the delete, so the entries before are
+    marked deleted (`note_deleted`) and the push gets its own entry (#114)."""
+    kernel, version = rec.get("kernel"), rec.get("version")
+    if isinstance(version, int):
+        live = [r for r in runs(root) if r.get("kernel") == kernel and not r.get("deleted_at")]
+        for r in live:
+            if r.get("version") == version and r.get("status") in ACTIVE and _same_push(r, rec):
                 return r
+        if any(isinstance(r.get("version"), int) and r["version"] >= version for r in live):
+            note_deleted(root, kernel)
+    recs = runs(root)
     for r in recs:
         if r.get("kernel") == rec.get("kernel") and r.get("status") in ACTIVE:
             r.update(status="superseded", finished_at=r.get("finished_at") or _iso(_now()))
@@ -2273,7 +2289,9 @@ def _collect_without_report(root: Path, kernel: str, out: Path, status: str | No
     ran_s = max((e["time"] for e in entries if isinstance(e.get("time"), (int, float))), default=None)
     key, res = hours_key(run_resource(run)), run_resource(run)
     fields = {"collected_at": _iso(_now())}
-    if run.get("status") in ENDED:  # an entry still in flight is not charged a session that may not be over
+    # A session Kaggle reports finished is charged, even on an entry the log closed by hand (released, deleted): the
+    # quota was spent. An entry still in flight is not charged a session that may not be over.
+    if run.get("status") in ENDED or (run and status in FINISHED):
         h = session_hours(run, ran_s)
         if h is not None and h > (run.get(key) or 0):
             fields[key] = h
@@ -2307,7 +2325,11 @@ def _collect_without_report(root: Path, kernel: str, out: Path, status: str | No
     elif not run:
         hours = ", no hours accounted: it is not in the run log (`gpu log`), so its accelerator is unknown"
     else:
-        hours = ", no hours accounted yet: the run log does not have it ended and the session log shows no time"
+        why = ([f"Kaggle has not reported it finished ({status})"]
+               if status not in FINISHED and run.get("status") not in ENDED else [])
+        if ran_s is None:
+            why.append("its session log shows no time")
+        hours = ", no hours accounted yet: " + (" and ".join(why) or "how long its session lasted is unknown")
     saved = [f for f in files if f != f"{kslug}.log"]  # the session log comes with them, but the kernel did not save it
     outcome = ("" if status in FINISHED else " (Kaggle could not be asked for its outcome)" if status == "unknown"
                else f" (Kaggle has it {status})")
