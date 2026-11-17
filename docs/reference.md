@@ -133,11 +133,18 @@ itself. Keys: `1` `2` `3` switch tabs, `r` refreshes, `u` opens or closes every 
 | Accounts | The accounts of `~/.kaggle/kg_accounts.json`: **Use** points this session's Kaggle CLI and kgkit at that account's token file (`KAGGLE_API_TOKEN`), tells Claude which account it is, and is remembered for the next session; **Add** checks a pasted API token (or a token file) with Kaggle, then saves it to `~/.kaggle/access_token_<alias>`, readable by you alone; the registry holds only paths. Where the Kaggle CLI is, found from its install without contacting Kaggle |
 
 Kaggle's API reports no resources of a running session, so the kernel prints them: kernels built by
-`kgkit gpu build` print a `[kgmon] {...}` line every 30 s (`KG_MONITOR_S`, `0` turns it off). Before any other
-`kaggle kernels push` Claude runs, the PreToolUse hook adds `templates/kaggle_monitor_cell.py` to the kernel's code
-(the first cell of a notebook, the top of a script) and tells Claude it changed the file; a code file that mentions
-kgmon anywhere is left alone, so a `# kgmon: off` comment opts out. For a kernel you push yourself, paste the cell in
-as its first cell (`kgmon_doing("fold 2")` adds what it is doing).
+`kgkit gpu build` print a `[kgmon] {...}` line every 30 s (`KG_MONITOR_S`, `0` turns it off). `kgkit gpu push <folder>`,
+and the PreToolUse hook before any other `kaggle kernels push` Claude runs, add `kgkit/kaggle_monitor_cell.py` to the
+kernel's code (the first cell of a notebook, the top of a script; an earlier block is brought up to date) and say
+they changed the file; a code file that mentions kgmon anywhere else is left alone, so a `# kgmon: off` comment opts
+out. For a kernel you push yourself, paste the cell in as its first cell (`kgmon_doing("fold 2")` adds what it is
+doing).
+
+Kaggle sometimes starts a 2x T4 push on a machine with one GPU, or none. The runner and the cell stop such a session
+within seconds with a `KG_BAD_MACHINE` line (the cell expects the GPUs of the shape it was pushed with;
+`KG_EXPECT_GPUS=0` or `KGMON_EXPECT_GPUS = 0` turns the check off); `kgkit gpu wait` reads a running GPU kernel's log
+in its first minutes, and the pane its live log, and both name the bad machine (also a `No CUDA GPUs are available`)
+and the remedy: `kgkit gpu repush <kernel> --yes`, after you agree, as deleting the kernel cannot be undone.
 The pane follows each running kernel's live log (`kaggle kernels logs -f`, Kaggle CLI 2.2 or later). Only batch runs
 (Save Version, `kaggle kernels push`) have a log the API streams; an interactive editor session does not.
 
@@ -225,7 +232,7 @@ multi_level_stack / residual_stack / prune_library`; `kgkit.compare.compare_fold
 | `train_image.py` | timm; AMP (bf16/fp16), channels_last, cudnn.benchmark, fused AdamW, `--compile` (Linux, sm_70+), `--bench`, EMA, cosine warmup, head LR multiplier, hflip TTA; `--folds` lets you split folds across GPUs, and the run that completes the set logs the experiment; checkpoints before a session deadline and resumes, learning-curve pruning, `--assemble` |
 | `train_transformer.py` | HF AutoModel with mean/attention/CLS pooling, layer-wise LR decay, gradient accumulation, length-bucketed training batches, fused AdamW, `--bench`, several evaluations per epoch, length-sorted inference, offline-model friendly; same deadline/resume/pruning/`--assemble` support |
 | `kgkit/kaggle_gpu_runner.py` | filled in by `kgkit gpu build`, and part of the package so that a vendored kgkit (`kgkit vendor third_party`) builds kernels too: the kernel that runs your training command on Kaggle (code bundle embedded, inputs linked into `data/` or one folder each, one (job, fold) per GPU, deadline, resume, assembly, `kg_run.json` report) |
-| `kaggle_monitor_cell.py` | the first cell for a notebook kgkit did not build: prints the session's CPU, RAM, disk and GPUs, and when its clock started, as `[kgmon]` lines for the Kaggle pane |
+| `kgkit/kaggle_monitor_cell.py` | the first cell for a notebook kgkit did not build (`gpu push` and the push hook add it, filled in with the GPUs the machine shape promises): prints the session's CPU, RAM, disk and GPUs, and when its clock started, as `[kgmon]` lines for the Kaggle pane, and stops a session whose machine has fewer GPUs |
 | `inference_kernel.py` + `kernel/*.json` | offline Kaggle kernel: runtime test discovery, offline wheels, time-budgeted ensemble members with fallback, output validation; metadata with internet off |
 
 ## Compute efficiency

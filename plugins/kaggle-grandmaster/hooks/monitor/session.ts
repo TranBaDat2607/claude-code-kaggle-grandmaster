@@ -176,6 +176,13 @@ export function endNotes(c: Clock, L: KernelLive | undefined, ref: string, now: 
   const ended = end ? `${end.isError ? 'stopped on an error' : 'finished'}${end.at !== undefined ? ` ${age((now - end.at) / 1000)} ago` : ''}` : ''
   const left = c.leftMs !== undefined ? age(Math.max(0, c.leftMs) / 1000) : ''
   const notes: Note[] = []
+  if (L?.machine) {
+    notes.push({ text: `Bad machine: ${L.machine}. Kaggle sometimes starts a session on fewer (or slower) GPUs than its shape.`, tone: 'warning' })
+    notes.push({
+      text: `Pushing again usually gets a healthy machine at once: ask Claude for \`kgkit gpu repush ${ref} --yes\` (it deletes the kernel first, which cannot be undone).`,
+      isAdvice: true,
+    })
+  }
   if (c.isClosed) {
     notes.push({
       text: c.isOver

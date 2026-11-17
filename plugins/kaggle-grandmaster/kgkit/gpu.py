@@ -82,6 +82,13 @@ ACCELERATORS = {
     "TpuV6E8": "TPU v6e-8, 8 chips (separate pool, often no capacity)",
 }
 TPU_CHIPS = {"TpuV5E8": 8, "TpuV6E8": 8}
+# The GPUs a machine shape promises. Kaggle sometimes starts a 2x T4 push on a machine with one GPU (#113): the runner
+# and the monitor cell stop such a session at once (KG_BAD_MACHINE), and `gpu wait` and the pane say so.
+GPU_COUNT = {"NvidiaTeslaT4": 2, "NvidiaTeslaP100": 1}
+BAD_MACHINE_TAG = "KG_BAD_MACHINE"
+# `gpu wait` reads a running GPU kernel's log for a bad machine every MACHINE_CHECK_EVERY_S seconds, in the first
+# MACHINE_CHECK_MIN minutes it runs, until the log tells: a bad machine shows within seconds of the start.
+MACHINE_CHECK_MIN, MACHINE_CHECK_EVERY_S = 15, 120
 # Kaggle stores these as TpuV5E8 (verified Oct 2026): ask for the shape that will actually run.
 TPU_REWRITTEN = {"TpuV5E1", "TpuV5E4", "TpuV6E1"}
 # What a push may ask for (`--accelerator`, or machine_shape in kernel-metadata.json; verified Oct 2026): the shapes
@@ -95,7 +102,8 @@ BUNDLE_EXCLUDE_DIRS = {"__pycache__", ".git", ".ipynb_checkpoints", "wandb", ".v
 # kgkit modules a remote run never imports: they look at the local git repository and GitHub, or at the private
 # leaderboard after the deadline. Left out of the bundle, which counts toward Kaggle's source limit
 # (SOURCE_MAX_BYTES); `kgkit vendor` copies still have them.
-BUNDLE_KGKIT_LOCAL_ONLY = {"audit.py", "predictiveness.py", "journey.py", "layout.py"}
+BUNDLE_KGKIT_LOCAL_ONLY = {"audit.py", "predictiveness.py", "journey.py", "layout.py", "monitor.py",
+                           "kaggle_monitor_cell.py"}
 BUNDLE_EXCLUDE_SUFFIXES = {".pyc", ".pt", ".pth", ".bin", ".ckpt", ".safetensors", ".npy", ".npz", ".pkl",
                            ".parquet", ".feather", ".zip", ".png", ".jpg", ".jpeg", ".dcm"}
 # Kaggle refuses a kernel source of 1 MB or more with a bare 400 Bad Request from SaveKernel (its editor says it "must
@@ -836,6 +844,63 @@ def queued_minutes(r: dict, now: dt.datetime | None = None) -> float | None:
     return None if pushed is None else max(0.0, ((now or _now()) - pushed).total_seconds() / 60)
 
 
+def expected_gpus(accelerator: str | None) -> int | None:
+    """The GPUs ``accelerator`` promises; None for a TPU, a CPU or an unknown shape."""
+    return GPU_COUNT.get(str(accelerator or "").strip())
+
+
+def _machine_verdict(log_text: str, accelerator: str | None = None) -> tuple[str | None, str | None]:
+    """('bad', what) when a session log shows its machine has fewer GPUs than its shape promises (a KG_BAD_MACHINE
+    line, or a [kgmon] reading with fewer GPUs than its `want` or the shape's) or a process found none; ('ok', None)
+    when a reading lists the GPUs it should; (None, None) when the log does not tell yet."""
+    entries = log_entries(log_text)
+    text = "".join(str(e.get("data") or "") for e in entries) if entries else (log_text or "")
+    shape = MACHINE_SHAPES.get(str(accelerator or ""), accelerator) or "its machine shape"
+    bad = no_cuda = None
+    ok = False
+    for line in text.splitlines():
+        if BAD_MACHINE_TAG in line:
+            m = re.search(r"promises (\d+) GPUs?, nvidia-smi lists (\d+)", line)
+            if m:
+                want, found = int(m.group(1)), int(m.group(2))
+                bad = bad or f"the session got {found} GPU{'' if found == 1 else 's'} where {shape} promises {want}"
+            else:
+                bad = bad or line[line.index(BAD_MACHINE_TAG):].strip()
+        elif "[kgmon] " in line:
+            try:
+                snap = json.loads(line[line.index("[kgmon] ") + 8:])
+            except ValueError:
+                continue
+            if not isinstance(snap, dict) or not isinstance(snap.get("gpus"), list):
+                continue
+            want, found = snap.get("want") or expected_gpus(accelerator), len(snap["gpus"])
+            if isinstance(want, int) and found < want:
+                bad = bad or f"the session got {found} GPU{'' if found == 1 else 's'} where {shape} promises {want}"
+            elif found:
+                ok = True
+        elif "No CUDA GPUs are available" in line:
+            no_cuda = no_cuda or "a process of the kernel found no GPU (No CUDA GPUs are available)"
+    if bad or no_cuda:
+        return "bad", bad or no_cuda
+    return ("ok", None) if ok else (None, None)
+
+
+def machine_problem(log_text: str, accelerator: str | None = None) -> str | None:
+    """What is wrong with a session's machine, from its log (`_machine_verdict`); None when nothing is."""
+    verdict, what = _machine_verdict(log_text, accelerator)
+    return what if verdict == "bad" else None
+
+
+def machine_advice(root: str | Path, kernel: str, problem: str) -> str:
+    """What helps a session that landed on a bad machine."""
+    r = latest_run(root, kernel)
+    return (f"WARNING: {kernel}: bad machine: {problem}. Kaggle sometimes starts a session on a machine with fewer "
+            "(or slower) GPUs than its shape promises; pushing again usually gets a healthy one at once. A kernel "
+            "with the hardware monitor (gpu build, gpu push) stops by itself; otherwise it spends its cap. Remedy: "
+            f"ask the user first, then `python -m kgkit gpu repush {kernel} --yes`" + ("" if r.get("dir") else " <folder>")
+            + " (deleting is irreversible: every version and output of the kernel goes).")
+
+
 def queue_advice(root: str | Path, kernel: str, minutes: float) -> str:
     """What helps a GPU job stuck in Kaggle's queue."""
     r = latest_run(root, kernel)
@@ -1333,6 +1398,7 @@ def build_kernel(root: str | Path | None, name: str, cmd: str, hours: float, fol
         "git_commit": commit, "git_dirty": dirty, "git_snapshot": code.get("git_snapshot"),
         "build_id": f"{kslug}@{built}",
         "allow_cpu": accelerator == "none", "resource": res, "tpu_chips": TPU_CHIPS.get(accelerator, 0),
+        "gpus": expected_gpus(accelerator),
         "split": split,
     }
     payload = build_bundle(root, list(include), baseline_dir, split_members)
@@ -1652,6 +1718,8 @@ def push(root: str | Path | None, kdir: str | Path, force: bool = False, hours: 
               + f" was stopped by its {float(prev['hours']):g}h cap and this push caps at {hours:g}h: unless the "
               "script got faster, it stops at the same point again. Raise --hours, or have the kernel save its "
               "results earlier.")
+    if not (kdir / "kg-train.json").is_file():  # gpu build kernels report through the runner
+        _add_monitor(kdir, acc)
     args = ["kernels", "push", "-p", str(kdir), "-t", str(int(hours * 3600))]
     if acc != "none":
         args += ["--accelerator", acc]
@@ -1675,6 +1743,20 @@ def push(root: str | Path | None, kdir: str | Path, force: bool = False, hours: 
         print(f"WARNING: {dropped_sources_warning(out)}")
     record_push(root, rec)
     return rec
+
+
+def _add_monitor(kdir: Path, accelerator: str) -> None:
+    """The hardware monitor in a hand-written kernel's code (`kgkit.monitor`): its readings for /kaggle-monitor,
+    and a stop on a machine with fewer GPUs than ``accelerator`` promises. Never stops the push."""
+    from . import monitor
+
+    try:
+        meta = json.loads((kdir / "kernel-metadata.json").read_text(encoding="utf-8"))
+        note = monitor.add_monitor(kdir, meta, accelerator)
+    except (OSError, ValueError) as e:
+        note = f"no hardware monitor added: {e}"
+    if note:
+        print(note)
 
 
 def _rel_dir(root: Path, kdir: Path) -> str:
@@ -1891,6 +1973,34 @@ def report_stop(root: str | Path, kernel: str, status: str, text: str = "", watc
     lines = stop_lines(kernel, run, status, ran_s, files, more, why)
     for i, line in enumerate(lines):
         print((f"{kernel}: " if i == 0 else "  ") + line)
+    problem = machine_problem(log, run.get("accelerator"))
+    if problem:
+        print(machine_advice(root, kernel, problem))
+
+
+def _check_machine(root: Path, kernel: str, state: dict) -> None:
+    """While a GPU kernel runs: read its log every MACHINE_CHECK_EVERY_S seconds in its first MACHINE_CHECK_MIN
+    minutes, until it shows the machine is right or wrong; on a bad machine, say so once (`machine_advice`)."""
+    run = latest_run(root, kernel)
+    if state["known"] or run_resource(run) != "GPU":
+        return
+    now = _now()
+    state["first"] = state["first"] or now
+    if (now - state["first"]).total_seconds() > MACHINE_CHECK_MIN * 60:
+        state["known"] = True  # no verdict in the first minutes: the log will not tell
+        return
+    if state["last"] is not None and (now - state["last"]).total_seconds() < MACHINE_CHECK_EVERY_S:
+        return
+    state["last"] = now
+    try:
+        log = run_kaggle(["kernels", "logs", kernel], timeout=120).stdout or ""
+    except (OSError, subprocess.SubprocessError):
+        return
+    verdict, what = _machine_verdict(log, run.get("accelerator"))
+    if verdict:
+        state["known"] = True
+    if verdict == "bad":
+        print(machine_advice(root, kernel, what), flush=True)
 
 
 def wait(root: str | Path | None, kernel: str, interval: float = 60, max_hours: float = SESSION_LIMIT_H + 1) -> str:
@@ -1901,6 +2011,7 @@ def wait(root: str | Path | None, kernel: str, interval: float = 60, max_hours: 
     last = None
     seen_running = None  # when a poll last found it running: it ran at least until then
     warned = False
+    machine = {"first": None, "last": None, "known": False}  # the bad-machine check (#113)
     while True:
         pend = next((r for r in runs(root) if r.get("kernel") == kernel and r.get("status") == PENDING), None)
         if pend is not None and confirm_pending(root, [kernel]):
@@ -1919,6 +2030,7 @@ def wait(root: str | Path | None, kernel: str, interval: float = 60, max_hours: 
             last = s
         if s == "running":
             seen_running = _now()
+            _check_machine(root, kernel, machine)
         if s == "queued" and not warned:
             run = latest_run(root, kernel)
             mins = queued_minutes(run)

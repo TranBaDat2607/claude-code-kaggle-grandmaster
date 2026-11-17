@@ -499,7 +499,7 @@ export async function readTokenInput($: EngineInterface, text: string, P: Paths)
 
 // ---------------------------------------------------------------- live readings
 
-export type Reading = Pick<KernelLive, 't' | 't0' | 'cpu' | 'cores' | 'ram' | 'disk' | 'tmp' | 'gpus' | 'doing'>
+export type Reading = Pick<KernelLive, 't' | 't0' | 'cpu' | 'cores' | 'ram' | 'disk' | 'tmp' | 'gpus' | 'want' | 'doing'>
 
 const pair = (v: unknown): [number, number] | undefined =>
   Array.isArray(v) && v.length === 2 && v.every(n => typeof n === 'number') ? [v[0] as number, v[1] as number] : undefined
@@ -530,6 +530,7 @@ export function parseKgmon(line: string): Reading | undefined {
     disk: pair(j.disk),
     tmp: pair(j.tmp),
     gpus,
+    want: n(j.want),
     doing: Array.isArray(j.doing) ? j.doing.slice(0, 8).map(d => oneLine(String(d), 80)) : undefined,
   }
 }

@@ -14,8 +14,10 @@
 4. Before each GPU or TPU `kaggle kernels push` in the command: asks for confirmation when the cached
    weekly quota of that accelerator (minus kernels still running) is exhausted or smaller than the -t cap.
 5. Before each `kaggle kernels push` the command runs (not one quoted in a message): adds the hardware monitor
-   (templates/kaggle_monitor_cell.py) to the kernel's .py or .ipynb unless the file mentions kgmon already, so the
-   /kaggle-monitor pane shows the session's CPU, RAM, disk and GPUs. Claude is told what changed (additionalContext).
+   (kgkit/kaggle_monitor_cell.py) to the kernel's .py or .ipynb unless the file mentions kgmon already (a block an
+   earlier push added is brought up to date), so the /kaggle-monitor pane shows the session's CPU, RAM, disk and
+   GPUs, and a session on a machine with fewer GPUs than its shape stops at once. Claude is told what changed
+   (additionalContext).
 Relative paths (-p, -f) are read from where the command's own `cd` steps put the shell at that point.
 Valid submissions produce no output, so the normal permission flow is unchanged.
 """

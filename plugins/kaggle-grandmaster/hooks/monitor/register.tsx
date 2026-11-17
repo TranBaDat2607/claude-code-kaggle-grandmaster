@@ -343,6 +343,7 @@ async function follow($: EngineInterface, a: Account, ref: string) {
           hist: tracker.history(),
           stats: tracker.stats(),
           progress: tracker.progress,
+          machine: tracker.machine ?? old?.machine,
           t0,
           scriptEnd: end ? { isError: end.isError, ...(at.length ? { at: Math.min(...at) } : {}) } : undefined,
           // a log that grows is open
@@ -1241,9 +1242,9 @@ export const register: Register = on => {
               </Text>
             ) : L?.heardAt ? (
               <Text dimColor wrap="wrap">
-                Its log has no resource readings. Kernels pushed by Claude (kgkit gpu push, or kaggle kernels push)
-                print them; for a kernel pushed another way, paste kaggle-grandmaster's templates/kaggle_monitor_cell.py
-                as its first cell.
+                Its log has no resource readings. Kernels built by kgkit gpu build print them, and gpu push or a kaggle
+                kernels push Claude runs adds the monitor to other kernels unless their code says kgmon: off; for a
+                kernel pushed another way, paste kaggle-grandmaster's kgkit/kaggle_monitor_cell.py as its first cell.
               </Text>
             ) : (
               <Text dimColor>Connecting to its live log...</Text>

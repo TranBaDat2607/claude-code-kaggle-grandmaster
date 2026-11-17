@@ -42,6 +42,12 @@ Re-check the regime whenever an account is added, the quota resets, or the deadl
   slots free, it is usually stuck, not waiting: `gpu wait` and `gpu status` say so. Deleting and pushing it
   again starts it at once (`gpu repush <kernel> --yes`; deleting is irreversible, so ask the user first), or
   build it for the P100 pool. TPU jobs are different: they queue for 10-24 h by design.
+- **A 2×T4 push sometimes lands on a bad machine**: one T4 (or none) visible, often several times slower. A
+  `gpu build` kernel, and a hand-written one `gpu push` added the hardware monitor to, stop within seconds with
+  a `KG_BAD_MACHINE` line; `gpu wait` reads a running GPU kernel's log in its first minutes and says so (also
+  for `No CUDA GPUs are available`). The first log lines should list both GPUs. Pushing again usually gets a
+  healthy machine at once: `gpu repush <kernel> --yes`, after asking the user (deleting is irreversible).
+  `KG_EXPECT_GPUS=0` / `KGMON_EXPECT_GPUS = 0` turns the check off for code that needs one GPU only.
 - **Inputs are bound at push time.** `kernel_sources` resolve to the outputs that exist when the kernel is
   pushed, not when it starts. A job queued behind a run that is still going starts without that run's new
   output. `kgkit gpu push` refuses when an attached kernel is still queued or running.

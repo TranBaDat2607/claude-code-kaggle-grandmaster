@@ -637,6 +637,19 @@ def test_push_adds_the_monitor_to_a_script(plugin_root, ws, tmp_path_factory):
     assert f.read_bytes() == before
 
 
+def test_push_monitor_expects_the_gpus_of_the_pushed_shape(plugin_root, ws):
+    """#113: the cell stops a session whose machine has fewer GPUs than the shape promises: --accelerator, else
+    kernel-metadata.json's machine_shape; a CPU kernel gets no check."""
+    t4 = _kernel(ws, "g", "print(1)\n", enable_gpu=True, machine_shape="NvidiaTeslaT4")
+    p100 = _kernel(ws, "p", "print(1)\n", enable_gpu=True, machine_shape="NvidiaTeslaT4")
+    cpu = _kernel(ws, "c", "print(1)\n")
+    hook(plugin_root, "pre_tool.py", bash("kaggle kernels push -p kernels/g && kaggle kernels push -p kernels/p "
+                                          "--accelerator NvidiaTeslaP100 && kaggle kernels push -p kernels/c", ws))
+    assert "KGMON_EXPECT_GPUS = 2" in t4.read_text(encoding="utf-8")
+    assert "KGMON_EXPECT_GPUS = 1" in p100.read_text(encoding="utf-8")
+    assert "KGMON_EXPECT_GPUS = None" in cpu.read_text(encoding="utf-8")
+
+
 def test_push_adds_the_monitor_as_the_first_notebook_cell(plugin_root, ws):
     nb = {"metadata": {}, "nbformat": 4, "nbformat_minor": 5,
           "cells": [{"cell_type": "code", "id": "c1", "metadata": {}, "outputs": [], "execution_count": None,
@@ -685,7 +698,7 @@ def test_push_monitor_note_rides_with_the_quota_ask(plugin_root, ws):
 
 def test_monitor_cell_stays_quiet_in_spawned_workers(plugin_root, tmp_path):
     """multiprocessing's spawn re-imports the script as __mp_main__: the cell must not start a monitor there."""
-    cell = plugin_root / "templates" / "kaggle_monitor_cell.py"
+    cell = plugin_root / "kgkit" / "kaggle_monitor_cell.py"
     code = f"import runpy; runpy.run_path({str(cell)!r}, run_name='__mp_main__')"
     r = subprocess.run([sys.executable, "-c", code], env={**os.environ, "KAGGLE_WORKING": str(tmp_path)},
                        capture_output=True, text=True, timeout=60)

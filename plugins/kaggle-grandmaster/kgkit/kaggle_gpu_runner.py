@@ -503,6 +503,9 @@ def _gpus():
     return rows
 
 
+WANT_GPUS = []  # [n]: the GPUs the pushed shape promises, set by main (a list: no `global` statement needed)
+
+
 def snapshot(prev, has_gpu=True):
     """One reading: (dict for the [kgmon] line, state for the next CPU delta)."""
     now, cpu_us = time.time(), _cgroup_cpu_us()
@@ -518,6 +521,8 @@ def snapshot(prev, has_gpu=True):
             snap[key] = d
     if has_gpu:
         snap["gpus"] = _gpus()
+    if WANT_GPUS:
+        snap["want"] = WANT_GPUS[0]
     with DOING_LOCK:
         if DOING:
             snap["doing"] = [DOING[k] for k in sorted(DOING)]
@@ -607,6 +612,22 @@ def fold_status(art, f, rc=None, killed=False):
 
 
 # ----------------------------------------------------------------------------- main
+def stop_bad_machine(cfg, want, gpus):
+    """Ends the session at once on a machine with fewer GPUs than its shape promises (#113): Kaggle sometimes starts
+    a 2x T4 push on a 1-GPU machine, where the run would not finish in its cap. The reading and the KG_BAD_MACHINE
+    line reach the log first: `kgkit gpu wait` and the kaggle-monitor pane read them."""
+    try:
+        snap, _ = snapshot(None, bool(gpus) and "KG_FAKE_GPUS" not in os.environ)
+        emit(MONITOR_TAG + json.dumps(snap, separators=(",", ":")) + "\n")
+    except Exception:
+        pass
+    log("KG_BAD_MACHINE: %s promises %d GPUs, nvidia-smi lists %d. Kaggle sometimes starts a session on a machine "
+        "with fewer GPUs than its shape; stopping now, before it spends the quota. Push it again: `kgkit gpu repush "
+        "<kernel> --yes` deletes the kernel and pushes it again (ask the user first)."
+        % (cfg.get("accelerator"), want, len(gpus)))
+    sys.exit(3)
+
+
 def main():
     cfg = json.loads(base64.b64decode(CONFIG_B64).decode("utf-8"))
     jobs = cfg["jobs"]
@@ -621,6 +642,12 @@ def main():
     log("jobs %s | accelerator %s | %s: %s | budget %.2fh (graceful stop at %.2fh)"
         % ([j["name"] for j in jobs], cfg.get("accelerator"), "tpu chips" if tpu else "gpus", devices or "NONE",
            budget_s / 3600, (deadline - T0) / 3600))
+    # KG_EXPECT_GPUS (as in the monitor cell): another count, 0 to run on whatever machine came
+    want = 0 if tpu else int(os.environ.get("KG_EXPECT_GPUS") or cfg.get("gpus") or 0)
+    if want:
+        WANT_GPUS[:] = [want]
+    if want and len(gpus) < want:
+        stop_bad_machine(cfg, want, gpus)
     if not devices and not cfg.get("allow_cpu"):
         log("WARNING: no %s visible - check the kernel accelerator setting; training on CPU" % resource)
 

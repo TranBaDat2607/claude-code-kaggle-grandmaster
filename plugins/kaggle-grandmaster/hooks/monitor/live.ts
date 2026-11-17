@@ -17,6 +17,21 @@ const WORDS = ['step|iter(?:ation)?|batch', 'epoch', 'fold']
  * saved. (The run itself starts with a conversion `to notebook`.) */
 export const SCRIPT_END_RE = /\[NbConvertApp\]\s+(?:Converting notebook\s+\S+\s+to\s+html\b|Writing\s+\d+\s+bytes\s+to\s+__results__\.html)/i
 /** nbconvert or papermill stopping the run on a cell's error. */
+/** The line the kgkit runner and the monitor cell print when they stop a session on a machine with too few GPUs. */
+export const BAD_MACHINE_RE = /KG_BAD_MACHINE: (\S+) promises (\d+) GPUs?, nvidia-smi lists (\d+)/
+export const NO_CUDA_RE = /No CUDA GPUs are available/
+
+const gpusText = (n: number) => `${n} GPU${n === 1 ? '' : 's'}`
+
+/** What a reading or a log line shows is wrong with the session's machine (the rule of kgkit.gpu.machine_problem). */
+export function machineOf(r: Reading | undefined, line?: string): string | undefined {
+  if (r?.gpus && r.want && r.gpus.length < r.want) return `the session got ${gpusText(r.gpus.length)} where its shape promises ${r.want}`
+  if (line === undefined) return undefined
+  const m = BAD_MACHINE_RE.exec(line)
+  if (m) return `the session got ${gpusText(Number(m[3]))} where ${m[1]} promises ${m[2]}`
+  return NO_CUDA_RE.test(line) ? 'a process of the kernel found no GPU (No CUDA GPUs are available)' : undefined
+}
+
 export const SCRIPT_ERROR_RE = /\b(?:CellExecutionError|PapermillExecutionError)\b|\[NbConvertApp\]\s+ERROR\b/
 
 /** Where one log line says the training is: a JSON record with step/of or epoch/epochs, a tqdm bar, or
@@ -71,6 +86,8 @@ export class LiveTracker {
   t0: number | undefined
   /** Its script has ended (SCRIPT_END_RE, SCRIPT_ERROR_RE); `t`: the kernel's time at the last reading before. */
   scriptEnd: { t?: number; isError: boolean } | undefined
+  /** What is wrong with its machine (`machineOf`): the first diagnosis its log gave. */
+  machine: string | undefined
   /** A reading came after an end this log showed: that was not the end (a script that converts a notebook itself). */
   isResumed = false
   private lastT = 0
@@ -81,6 +98,7 @@ export class LiveTracker {
     this.lastT = t
     if (r.t !== undefined) this.readT = r.t
     if (r.t0 !== undefined) this.t0 = Math.min(this.t0 ?? r.t0, r.t0)
+    this.machine ??= machineOf(r)
     // The readings come from the script's own process: one after the "end" means it still runs.
     if (this.scriptEnd) {
       this.scriptEnd = undefined
@@ -123,6 +141,7 @@ export class LiveTracker {
   line(text: string) {
     this.tail = [...this.tail, text].slice(-TAIL_MAX)
     this.progress = parseProgress(text) ?? this.progress
+    this.machine ??= machineOf(undefined, text)
     const isError = SCRIPT_ERROR_RE.test(text)
     if (isError || SCRIPT_END_RE.test(text)) {
       this.scriptEnd = { t: this.scriptEnd?.t ?? this.readT, isError: isError || !!this.scriptEnd?.isError }

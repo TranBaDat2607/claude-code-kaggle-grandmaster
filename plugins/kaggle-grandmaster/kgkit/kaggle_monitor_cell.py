@@ -3,10 +3,16 @@
 Paste this as the first cell (or the top of the script). Every KG_MONITOR_S seconds (default 30) it prints one
 `[kgmon] {...}` line to the session log: CPU, RAM, disk and each GPU of the session, what the code says it is
 doing, and when its clock started (t0, Unix seconds: the pane counts the time to the session limit from it). The kaggle-monitor pane in Claude Code follows a running kernel's log (`kaggle kernels logs -f`) and
-draws the latest line; Kaggle's API reports no session resources of its own. Kernels pushed with
-`kgkit gpu push` print these lines already, and when Claude Code runs `kaggle kernels push` the plugin's hook adds
-this block to the kernel's .py or .ipynb itself. A code file that mentions kgmon anywhere is left alone, so a
-`# kgmon: off` comment keeps it out.
+draws the latest line; Kaggle's API reports no session resources of its own. Kernels built by `kgkit gpu build`
+print these lines already; `kgkit gpu push <folder>`, and the plugin's hook when Claude Code runs
+`kaggle kernels push`, add this block to the kernel's .py or .ipynb itself, between kaggle-grandmaster markers (kept
+up to date on later pushes). A code file that mentions kgmon anywhere else is left alone, so a `# kgmon: off`
+comment keeps it out.
+
+It also checks the machine (#113): Kaggle sometimes starts a 2x T4 push on a machine with one GPU, or none. When
+nvidia-smi lists fewer GPUs than KGMON_EXPECT_GPUS (filled in by kgkit from the pushed machine shape), it prints the
+reading and a KG_BAD_MACHINE line and stops the session, before it spends the quota; pushing again usually gets a
+healthy machine. KGMON_EXPECT_GPUS = 0, or the environment variable KG_EXPECT_GPUS=0, turns the check off.
 
 Say what the code is doing, and the pane shows it beside the readings:
 
@@ -26,6 +32,8 @@ import threading as _kgmon_threading
 import time as _kgmon_time
 
 KGMON_T0 = _kgmon_time.time()
+# The GPUs the pushed machine shape promises (2 for NvidiaTeslaT4, 1 for NvidiaTeslaP100); None or 0: no check.
+KGMON_EXPECT_GPUS = None
 _KGMON_DOING = []
 _KGMON_STOP = _kgmon_threading.Event()
 
@@ -87,7 +95,20 @@ def _kgmon_disk_mb(path):
         return None
 
 
+def _kgmon_want():
+    """The GPUs this session should have: KG_EXPECT_GPUS, else KGMON_EXPECT_GPUS; None when unknown or 0."""
+    raw = _kgmon_os.environ.get("KG_EXPECT_GPUS")
+    try:
+        want = int(raw) if raw not in (None, "") else int(KGMON_EXPECT_GPUS or 0)
+    except ValueError:
+        return None
+    return want or None
+
+
 def _kgmon_gpus():
+    fake = _kgmon_os.environ.get("KG_FAKE_GPUS")  # tests: this many GPUs, without nvidia-smi
+    if fake is not None:
+        return [[i, 0, 0, 0, "fake-gpu"] for i in range(int(fake))]
     try:
         out = _kgmon_subprocess.run(["nvidia-smi", "--query-gpu=index,utilization.gpu,memory.used,memory.total,name",
                               "--format=csv,noheader,nounits"], capture_output=True, text=True, timeout=20).stdout
@@ -122,6 +143,9 @@ def _kgmon_snapshot(prev):
     gpus = _kgmon_gpus()
     if gpus is not None:
         snap["gpus"] = gpus
+    want = _kgmon_want()
+    if want:
+        snap["want"] = want
     if _KGMON_DOING:
         snap["doing"] = list(_KGMON_DOING)
     return snap, (now, cpu_us)
@@ -130,6 +154,31 @@ def _kgmon_snapshot(prev):
 def _kgmon_print(snap):
     _kgmon_sys.stdout.write("[kgmon] " + _kgmon_json.dumps(snap, separators=(",", ":")) + "\n")
     _kgmon_sys.stdout.flush()
+
+
+class KgmonBadMachine(RuntimeError):
+    """The session's machine has fewer GPUs than its shape promises."""
+
+
+def kgmon_check():
+    """Stops the session when nvidia-smi lists fewer GPUs than it should have (`_kgmon_want`), after printing the
+    reading and a KG_BAD_MACHINE line: `kgkit gpu wait` and the pane read both. An exception, not sys.exit, so a
+    notebook stops at this cell too."""
+    want = _kgmon_want()
+    if not want:
+        return
+    snap, _ = _kgmon_snapshot(None)
+    found = len(snap.get("gpus") or [])
+    if found >= want:
+        return
+    _kgmon_print(snap)
+    msg = ("KG_BAD_MACHINE: this machine shape promises %d GPUs, nvidia-smi lists %d. Kaggle sometimes starts a "
+           "session on a machine with fewer GPUs than its shape; stopping now, before it spends the quota. Push it "
+           "again (`kgkit gpu repush <kernel> --yes` deletes the kernel and pushes it again: ask the user first), or "
+           "set KGMON_EXPECT_GPUS = 0 to run on this machine anyway." % (want, found))
+    _kgmon_sys.stdout.write(msg + "\n")
+    _kgmon_sys.stdout.flush()
+    raise KgmonBadMachine(msg)
 
 
 def start_kgmon(interval=None):
@@ -154,4 +203,5 @@ def start_kgmon(interval=None):
 
 
 if __name__ == "__main__":  # not again in worker processes that re-import the script (spawn)
+    kgmon_check()
     start_kgmon()
