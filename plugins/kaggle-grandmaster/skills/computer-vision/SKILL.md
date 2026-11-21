@@ -18,7 +18,9 @@ description: Winning playbook for Kaggle computer vision competitions — image 
   brightness/contrast, hue/saturation, CoarseDropout; MixUp/CutMix for classification.
   Choose augmentations that preserve the label (no vertical flips for text, careful with
   colour in medical/satellite data).
-- 5 folds (grouped by patient/source!), 10–30 epochs, save best-by-metric per fold, OOF preds.
+- 5 folds (grouped by patient/source!), 10–30 epochs, keep each fold's last epoch (EMA weights) and save OOF preds.
+  Never keep the epoch that scores best on the fold it predicts: that OOF is optimistic (#109). Fix the epoch count
+  once from an earlier run's per-epoch val curves, or let `--es-holdout 0.05` choose it on rows held out of training.
 - Template: `templates/train_image.py`.
 
 ## 2. Levers in rough order of typical impact

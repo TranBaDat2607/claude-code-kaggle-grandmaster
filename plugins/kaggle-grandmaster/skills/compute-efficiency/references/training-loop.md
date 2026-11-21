@@ -136,7 +136,8 @@ burns until its cap). So every decision that ends, skips or reshapes a step must
 - Progressive resizing: low resolution first, full resolution for the last 20-30 %.
 - Shorter cosine schedules with EMA often match longer ones. Screen the epoch count on one fold.
 - Validate every epoch only when it is cheap. Subsample a large validation set for the per-epoch curve (pruning) and
-  evaluate the best checkpoint in full at the end.
+  evaluate the kept checkpoint (the final one, or the one `--es-holdout` chose) in full at the end: a checkpoint
+  chosen on the scored fold, even a subsample of it, makes the OOF optimistic (#109).
 - Stop at the plateau: if fold 0's best epoch is consistently <= 70 % of the schedule, shorten the schedule for the
   other folds.
 - Exploration at lower resolution, shorter `max_len` or a data subset; scale up for the finals.

@@ -191,6 +191,21 @@ def test_ledger_compare_says_when_the_two_oofs_were_selected_differently(tmp_pat
 
 
 # ----------------------------------------------------------------------------- skills
+SCORED_FOLD_SELECTION = re.compile(
+    r"best[- ]by[- ]metric|best checkpoints? (?:often|per fold)|(?:checkpoint|evaluate|keep) the best checkpoint"
+    r"|checkpoint the best|save best"
+    r"|eval_set=\[\(X(?:\.iloc|\.loc)?\[(?:va|val|valid)\w*\]", re.IGNORECASE)
+
+
+def test_no_skill_teaches_selecting_on_the_scored_fold():
+    """#128: skills that told Claude to keep the best checkpoint, or early-stop on the scored fold, contradicted the
+    templates and kg-experiment (#109)."""
+    for p in sorted(SKILLS.glob("**/*.md")):
+        for n, line in enumerate(p.read_text(encoding="utf-8").splitlines(), 1):
+            m = SCORED_FOLD_SELECTION.search(line)
+            assert not m, f"{p.relative_to(SKILLS)}:{n} selects on the scored fold: {line.strip()}"
+
+
 def test_no_skill_repeats_a_paragraph():
     """A paragraph or bullet pasted twice into a skill costs tokens on every load and reads as a mistake."""
     for p in sorted(SKILLS.glob("*/**/*.md")):

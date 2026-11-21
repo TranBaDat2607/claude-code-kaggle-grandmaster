@@ -35,7 +35,11 @@ def objective(trial):
     )
     scores = []
     for k, (f, tr, va) in enumerate(split_indices(folds)):
-        m = lgb.LGBMClassifier(**params).fit(X.iloc[tr], y[tr], eval_set=[(X.iloc[va], y[va])],
+        # early-stop on a slice of the training part, never on the fold that is scored (#109): the same seed and
+        # fold give every trial the same slice. Grouped or temporal data: hold out whole groups / the latest rows.
+        es = np.random.default_rng([42, f]).permutation(tr)[: len(tr) // 10]
+        fit = np.setdiff1d(tr, es)
+        m = lgb.LGBMClassifier(**params).fit(X.iloc[fit], y[fit], eval_set=[(X.iloc[es], y[es])],
                                               callbacks=[lgb.early_stopping(200, verbose=False)])
         scores.append(metric(y[va], m.predict_proba(X.iloc[va])[:, 1]))
         trial.report(np.mean(scores), k)
@@ -50,6 +54,10 @@ study = optuna.create_study(direction="maximize" if metric.greater_is_better els
 study.optimize(objective, n_trials=100, timeout=3 * 3600)
 ```
 
+- Nothing a trial reports may be chosen on the rows it is scored on: not the stopping round, not an epoch, not a
+  threshold. Early stopping on the scored fold makes every trial a little optimistic, and the search then picks the
+  trial whose selection was luckiest, so the tuned CV is inflated twice. The recipe stops on a slice of each fold's
+  training part, as `train_gbdt.py` does.
 - Use a persistent `storage` so studies survive restarts and can run in parallel workers.
 - Tune with a higher learning rate, then lower it for the final fit.
 - Speed: tune on 1–2 folds or a subsample, confirm the top-5 configs on all folds.

@@ -27,7 +27,9 @@ Always check the rules about which pretrained models/APIs are allowed and model 
   2–5 epochs, batch 8–32 (grad accumulation), weight decay 0.01, AMP, gradient clipping 1.0.
 - Pooling: mean pooling or attention pooling often > CLS; multi-sample dropout head;
   re-initialise the last 1–2 layers on small data.
-- Evaluate several times per epoch (best checkpoints often mid-epoch); AWP / FGM adversarial
+- Evaluate several times per epoch: the curve shows where the schedule should end (peaks are often mid-epoch),
+  and pruning reads it. Keep the final weights, or let `--es-holdout 0.05` pick the evaluation on rows held out of
+  training; never the evaluation that scores best on the fold it predicts (#109). AWP / FGM adversarial
   training and EMA for robustness; freeze embeddings for small data.
 - Seeds vary a lot on small data — average 2–3 seeds per fold for final models.
 - Template: `templates/train_transformer.py`.
