@@ -44,9 +44,9 @@ Kaggle submissions and GPU pushes still go through the plugin's hooks, which che
 | **Specialist agents** | 9 | competition-analyst, solution-researcher, data-detective, validation-auditor, feature-engineer, experiment-runner, error-analyst, ensemble-architect, kernel-packager |
 | **Hooks** | 5 | session brief (incl. GPU quota), Kaggle-prompt → skill router, submission + GPU-push + upload guard (validation, repeated files, daily budget, weekly GPU quota, credential protection), submission / GPU-run logger, compute defaults when model code is written |
 | **Kaggle pane** | 1 mod | `/kaggle-monitor`: running kernels with live CPU / GPU / RAM / disk and what each GPU is doing, recent kernels and submissions, GPU/TPU quota for every account, multi-account token management ([below](#kaggle-pane-kaggle-monitor)) |
-| **`kgkit` toolkit** | 25 modules | Tested Python: leak-free folds, 35+ metrics, threshold/rounding optimisers, hill climbing / multi-level and residual stacking / library pruning, adversarial validation, leak-safe features, brute-force feature search, EDA red flags, experiment ledger with decisions + lineage, paired experiment comparison, fresh-split recheck, idea backlog, public-notebook review, competition pages and discussions, submission validation, Kaggle GPU/TPU pipeline, speed measurement (input-bound / compute-bound / idle, speed-up of a change) and slow-pattern checks, dataset download with per-file fallback, upload and third-party-text safety |
+| **`kgkit` toolkit** | 44 modules | Tested Python: leak-free folds, 35+ metrics, threshold/rounding optimisers, hill climbing / multi-level and residual stacking / library pruning, adversarial validation, leak-safe features, brute-force feature search, EDA red flags, experiment ledger with decisions + lineage, paired experiment comparison, fresh-split recheck, idea backlog, public-notebook review, competition pages and discussions, submission validation, Kaggle GPU/TPU pipeline, speed measurement (input-bound / compute-bound / idle, speed-up of a change) and slow-pattern checks, dataset download with per-file fallback, upload and third-party-text safety |
 | **Templates** | 5 + metadata | Tabular (LightGBM/XGBoost/CatBoost/HGB + linear/kNN/SVM/MLP, GPU option), timm image models, HF transformers (both resumable, with `--bench`), offline inference kernel, Kaggle-pane monitor cell for any notebook |
-| **Evals** | 49 cases | `claude plugin eval` suite with a no-plugin baseline arm |
+| **Evals** | 50 cases | `claude plugin eval` suite with a no-plugin baseline arm |
 
 ## How a competition flows
 
@@ -319,7 +319,7 @@ What it does for you:
 
 ## Verification
 
-- **696 pytest tests** (some run only when LightGBM, PyTorch, timm or transformers are installed) cover kgkit (including paired comparisons, the backlog, feature search, multi-level/residual stacking, notebook review, competition pages, upload checks and repo adoption), all templates end to end (tiny synthetic data, plus an
+- **The pytest suite** (some tests run only when LightGBM, PyTorch, timm or transformers are installed) covers kgkit (including paired comparisons, the backlog, feature search, multi-level/residual stacking, notebook review, competition pages, upload checks and repo adoption), all templates end to end (tiny synthetic data, plus an
   offline tiny BERT), the remote GPU runner executed in a simulated `/kaggle` layout (build, run on two
   fake GPUs, resume, prune, collect, `[kgmon]` resource lines), and the hooks driven through `run.sh` exactly as Claude Code calls them.
   The Kaggle pane's own tests (`claude plugin test`) draw it on the terminal and desktop surfaces and parse the
@@ -329,8 +329,9 @@ What it does for you:
 - **Real-data dry run** on `playground-series-s6e2` (630k rows, no submission made): EDA 6 s,
   adversarial AUC 0.501, LightGBM CV AUC 0.95521, HGB 0.95490, hill-climb blend 0.95537
   (honest nested). The run surfaced 5 bugs, all fixed (see git history).
-- **Plugin evals** (`claude plugin eval`, Haiku, 3 runs per arm): the with-plugin arm scored
-  100 % on all 10 cases. `ensemble-hygiene`, `gpu-quota-budget` and `team-merge` (no private sharing of
+- **Plugin evals** (`claude plugin eval`, Haiku, 3 runs per arm), last full report from the October 2026 run of
+  the 10 cases the suite had then (it has grown since; see `plugins/kaggle-grandmaster/evals/README.md` to run
+  it): the with-plugin arm scored 100 % on all 10. `ensemble-hygiene`, `gpu-quota-budget` and `team-merge` (no private sharing of
   OOF files before a merge; shared folds after) scored 1.00 with the plugin vs 0.00 without. The other
   cases pass with or without the plugin on Haiku, so they work as regression tests, as does
   `untrusted-notebook-injection` (1.00 in both arms).
