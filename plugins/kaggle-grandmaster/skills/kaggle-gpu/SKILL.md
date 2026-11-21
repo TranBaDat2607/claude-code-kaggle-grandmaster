@@ -137,6 +137,13 @@ write predictions in chunks (or per fold) as they are made, so a restart can ski
 with the elapsed time and an ETA, so the log tail `gpu wait` prints shows where the kill came. When a cap does stop
 it, `gpu wait` says so and lists the files saved before the kill.
 
+It has no pruning either, unless its loop asks for it. Attach or embed the control's `curve_fold<k>.json` and call
+`TrainBudget(out_dir, fold, epochs, greater_is_better, baseline=<that folder>, margin=<fold std>, mode="last")` each
+epoch (`end_epoch` returns `"prune"`), or `kgkit.budget.update_curve` + `should_stop(curve, control, margin=...)` on the
+curve file. Copy `curve_fold<k>.json` back when a run resumes in a new session, so the rule sees the whole curve. A
+driver that echoes the training log should echo every key line since its last echo (evaluations, epoch done,
+scored), not only the latest line: the decline of #119 was in the lines between two echoes.
+
 Where the inputs go (match your local layout, so the command finds them):
 - `--input-layout flat` (the default): competition data, `--dataset` and `--kernel` contents side by side in `data/`.
   A name two inputs share (`oof_predictions.parquet`, `submission.csv`, `README.md`) is linked from the first
@@ -170,10 +177,16 @@ python -m kgkit gpu build --name stack --hours 2 --accelerator none --input-layo
    full-run fold score is not a fair reference for a cheaper run.
    - Pack two screens into one session so both T4s work:
      `gpu build --name idea-a --folds 0 --cmd "...idea-a... --folds {fold}" --extra-job idea-b "...idea-b... --folds {fold}"`.
-   - `--prune-against baseline` stops a screen whose best-so-far trails the accepted baseline's
-     learning curve, compared at the same fraction of the schedule, by more than the baseline's fold
-     std. This margin is deliberately generous, so only clearly bad ideas are stopped, and they then
-     cost 30-40% of a run instead of 100%. (`best` is accepted as an alias.)
+   - `--prune-against baseline` stops a screen that trails the accepted baseline's learning curve, compared at the
+     same fraction of the schedule, by more than the baseline's fold std. Two cases: its best score so far trails (an
+     idea bad from the start), or, when the run keeps its last epoch (the templates' default), its current score trails
+     and has been below its own peak for two evaluations (it tied early, then declined: #119). With `--select best`
+     only the first case counts. The margin is deliberately generous, so only clearly losing runs stop, and they then
+     cost 30-40% of a run instead of 100%. Stopping only discards the run, so the OOF stays honest. (`best` is
+     accepted as an alias of `baseline`.)
+   - **Write the stop rule next to the promote rule before the push**, e.g. "stop: pruned against the control at
+     margin 0.002 (last mode); promote: z >= 2 on fold 0". A kernel of your own gets the same rule from
+     `kgkit.budget` (section 2): `gpu push` warns when a kernel capped above 6 h has none.
    - Promote on a paired test of that fold's OOF against the control:
      `kgkit ledger compare artifacts/<idea> artifacts/<control> --truth data/train.csv:<target>
      --folds data/folds.csv:fold --fold 0` (`--groups` for patients/sessions). z ≥ 2 → promote;

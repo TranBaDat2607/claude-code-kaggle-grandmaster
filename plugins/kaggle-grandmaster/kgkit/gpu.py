@@ -1734,6 +1734,9 @@ def push(root: str | Path | None, kdir: str | Path, force: bool = False, hours: 
               + f" was stopped by its {float(prev['hours']):g}h cap and this push caps at {hours:g}h: unless the "
               "script got faster, it stops at the same point again. Raise --hours, or have the kernel save its "
               "results earlier.")
+    nostop = stop_rule_warning(kdir, hours, res)
+    if nostop:
+        print(f"warning: {nostop}")
     if not (kdir / "kg-train.json").is_file():  # gpu build kernels report through the runner
         _add_monitor(kdir, acc)
     args = ["kernels", "push", "-p", str(kdir), "-t", str(int(hours * 3600))]
@@ -1849,6 +1852,35 @@ def cancel_advice(kernel: str, status: str) -> str:
 def latest_run(root: str | Path, kernel: str) -> dict:
     """The log entry of ``kernel``'s latest run ({} when there is none); a pending push is not a run yet."""
     return next((r for r in reversed(runs(root)) if r.get("kernel") == kernel and r.get("status") != PENDING), {})
+
+
+# A kernel of your own capped above this many hours with no stop rule spends its whole cap even when it is clearly
+# losing (#119: 13 T4-hours of a screen whose eval curve had peaked hours before).
+STOP_RULE_HOURS = 6.0
+STOP_RULE_RE = re.compile(r"\bTrainBudget\b|\bshould_stop\b|\bKG_PRUNE_")
+
+
+def stop_rule_warning(kdir: str | Path, hours: float, resource: str) -> str:
+    """Why a push of the kernel in ``kdir`` capped at ``hours`` may spend all of them: its code file names no stop
+    rule (``kgkit.budget.TrainBudget`` / ``should_stop``, or ``KG_PRUNE_*``). '' for a ``gpu build`` kernel (the
+    runner's own deadline and ``--prune-against``), a CPU session (no quota), a cap of at most ``STOP_RULE_HOURS``, or
+    code that cannot be read."""
+    kdir = Path(kdir)
+    if resource == "CPU" or hours <= STOP_RULE_HOURS or (kdir / "kg-train.json").is_file():
+        return ""
+    src = kernel_source(kdir)
+    try:
+        text = (kdir / src[0]).read_text(encoding="utf-8", errors="replace") if src else None
+    except OSError:
+        text = None
+    if text is None or STOP_RULE_RE.search(text):
+        return ""
+    return (f"{src[0]} is capped at {hours:g}h and kgkit finds no stop rule in it (no TrainBudget, should_stop or "
+            f"KG_PRUNE_ setting): a run that is clearly losing still spends up to {hours:g} {resource}-hours of quota. "
+            "Give its loop one before pushing: `TrainBudget(..., baseline=<control curves>, margin=<fold std>, "
+            "mode='last')` or `kgkit.budget.should_stop` on its curve_fold<k>.json (skill kaggle-gpu, section 3), and "
+            "write down the stop rule next to the promote rule. If the code this kernel runs has one elsewhere, ignore "
+            "this.")
 
 
 def cap_note(hours: float, resource: str, built: bool) -> str:
@@ -2223,10 +2255,12 @@ def diagnose(report: dict) -> list[str]:
         out.append(f"cost: {per_fold_h:.2f}h wall per fold = {per_fold_h / par:.2f} quota-hours per fold with "
                    f"{par} GPU(s) busy")
     for j in report.get("jobs", []):
-        pruned = [k for k, s in j.get("fold_status", {}).items() if s.get("status") == "pruned"]
+        status = j.get("fold_status", {})
+        pruned = [k for k, s in status.items() if s.get("status") == "pruned"]
         if pruned:
-            out.append(f"{j['name']}: pruned on folds {pruned} (trailing the baseline curve) - discard the idea or "
-                       "change it materially instead of spending a full run")
+            why = next((status[k].get("reason") for k in pruned if status[k].get("reason")), None)
+            out.append(f"{j['name']}: pruned on folds {pruned} ({why or 'trailing the baseline curve'}) - discard the "
+                       "idea or change it materially instead of spending a full run")
     return out
 
 

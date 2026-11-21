@@ -286,8 +286,13 @@ What it does for you:
   dropped silently: the run log and `collect` say which input kept it.
 - **Never loses work.** `KG_DEADLINE` makes the templates checkpoint before the session limit.
   `--resume-from <kernel>` skips finished folds and continues timed-out ones.
-- **Stops losers early.** `--prune-against baseline` compares the best-so-far score with the baseline's learning
-  curve at the same fraction of the schedule, using the baseline's fold std as the margin.
+- **Stops losers early.** `--prune-against baseline` compares the run with the baseline's learning curve at the same
+  fraction of the schedule, using the baseline's fold std as the margin: it stops a run whose best score so far
+  trails, and, when the run keeps its last epoch (the templates' default), one whose current score trails while it
+  has been below its own peak for two evaluations (it tied early, then declined). A loop of your own gets the same
+  rule from `kgkit.budget` (`TrainBudget(..., baseline=, margin=, mode=)` or `should_stop`), and `gpu push` warns
+  when a kernel capped above 6 h has no stop rule. The templates' `--es-holdout 0.05` is early stopping done legally:
+  the epoch is chosen on rows held out of the training part, never on the scored fold.
 - **Measures itself.** `collect` imports ledger records with fresh ids, records GPU-hours, and flags an idle
   second GPU, input-bound runs (< 60 % utilisation), deadline hits and pruned folds.
 - **Guards the quota.** `push` refuses runs whose cap exceeds the plannable hours, re-checks runs it had

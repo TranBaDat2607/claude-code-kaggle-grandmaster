@@ -24,6 +24,13 @@ artifacts/<name>/; the assembled experiment is logged to the ledger with a submi
 Honest OOF (#109): each fold keeps its last epoch's EMA weights (select="last"). Keeping the epoch that scored best
 on the fold it then predicts (--select best, the old behaviour) picks the epoch on those rows and makes the OOF
 optimistic. Choose the number of epochs once, from the per-epoch val scores of all folds of an earlier run.
+Early stopping, done legally (#119): --es-holdout 0.05 holds 5% of each fold's training part out of training
+(stratified, or whole groups with group_col), keeps the epoch that scores best on it and stops after es_patience
+epochs without a gain there. The scored fold chooses nothing, so the OOF stays honest.
+
+Pruning (kgkit.budget): on Kaggle with `gpu build --prune-against`, a run that trails the control's curve stops
+early. With select="last" it also stops when the current score trails the control's and has fallen below the run's
+own peak for two evaluations (it ties early, then declines); --select best judges the best epoch only.
 """
 
 from __future__ import annotations
@@ -84,6 +91,10 @@ CONFIG = dict(
     num_workers=4,
     tta_hflip=True,
     select="last",              # last: the final epoch's EMA weights | best: best epoch on the scored fold (optimistic)
+                                # | holdout: best epoch on a slice held out of the training part (--es-holdout)
+    es_holdout=0.0,             # holdout: share of each fold's training part held out to choose the epoch (0.05)
+    es_patience=2,              # holdout: stop after this many epochs with no gain on that slice (0: never early)
+    group_col=None,             # holdout: column whose groups (patients, studies) stay whole in the held-out slice
     seed=42,
     notes="",
 )
@@ -218,6 +229,48 @@ def compile_ok(device) -> tuple:
     return True, ""
 
 
+def holdout_split(tr, frac, seed, fold, strat=None, groups=None):
+    """(fit rows, held-out rows) of a fold's training part ``tr`` for select="holdout": the held-out rows choose the
+    epoch and stop training early, so the fold being scored chooses nothing (#109, #119). Whole groups when ``groups``
+    is given, else stratified by ``strat`` (class labels; None draws uniformly). The same seed and fold draw the same
+    rows, so a resumed fold trains on the same split."""
+    rng = np.random.default_rng([int(seed), int(fold), 119])
+    hold = np.zeros(len(tr), dtype=bool)
+    if groups is not None:
+        g = np.unique(groups[tr])
+        take = rng.permutation(g)[: max(1, int(round(frac * len(g))))]
+        hold = np.isin(groups[tr], take)
+    else:
+        keys = strat[tr] if strat is not None else np.zeros(len(tr))
+        for c in np.unique(keys):
+            idx = np.flatnonzero(keys == c)
+            hold[rng.permutation(idx)[: int(round(frac * len(idx)))]] = True
+        if not hold.any():
+            hold[rng.integers(len(tr))] = True
+    if hold.all():
+        raise SystemExit("--es-holdout would hold out the whole training part: lower it")
+    return tr[~hold], tr[hold]
+
+
+def holdout_config(cfg, select_arg=None):
+    """``select`` and ``es_holdout`` made consistent: an es_holdout share switches select to holdout, and holdout
+    without a share holds out 5%. Off, the holdout settings are cleared so the ledger's params don't show them."""
+    cfg = dict(cfg)
+    frac = float(cfg.get("es_holdout") or 0.0)
+    if frac and select_arg == "best":
+        raise SystemExit("--es-holdout chooses the epoch on the held-out slice; it does not combine with --select best")
+    if frac:
+        cfg["select"] = "holdout"
+    if cfg["select"] == "holdout":
+        cfg["es_holdout"] = frac or 0.05
+        if not 0 < cfg["es_holdout"] < 0.5:
+            raise SystemExit(f"--es-holdout {cfg['es_holdout']}: give a share of the training part in (0, 0.5)")
+        cfg["es_patience"] = max(0, int(cfg.get("es_patience") or 0))
+    else:
+        cfg["es_holdout"], cfg["es_patience"] = 0.0, None
+    return cfg
+
+
 def metric_input(task, metric, pred):
     if metric.kind == "label" and task == "multiclass":
         return pred.argmax(1)
@@ -284,16 +337,24 @@ def main():
                          "fold (default 30 steps each), print the verdict and the speed-up against the last bench; "
                          "trains and logs nothing")
     ap.add_argument("--compile", action="store_true", help="torch.compile the model for training (Linux, sm_70+)")
-    ap.add_argument("--select", choices=["last", "best"],
+    ap.add_argument("--select", choices=["last", "best", "holdout"],
                     help="last (default): each fold's final EMA weights; best: the epoch that scores best on the fold "
-                         "it predicts (optimistic OOF, the old behaviour)")
+                         "it predicts (optimistic OOF, the old behaviour); holdout: the epoch that scores best on a "
+                         "slice held out of the training part (--es-holdout)")
+    ap.add_argument("--es-holdout", type=float, metavar="FRAC",
+                    help="hold FRAC (e.g. 0.05) of each fold's training part out of training to choose the epoch and "
+                         "stop early: select=holdout, an honest OOF")
+    ap.add_argument("--es-patience", type=int, metavar="N",
+                    help="select=holdout: stop after N epochs without a gain on the held-out slice (0: never early)")
     a = ap.parse_args()
     cfg = dict(CONFIG)
-    for k in ("name", "backbone", "img_size", "epochs", "batch_size", "lr", "notes", "select"):
+    for k in ("name", "backbone", "img_size", "epochs", "batch_size", "lr", "notes", "select", "es_holdout",
+              "es_patience"):
         if getattr(a, k) is not None:
             cfg[k] = getattr(a, k)
     if a.no_pretrained:
         cfg["pretrained"] = False
+    cfg = holdout_config(cfg, a.select)
 
     import timm
 
@@ -353,12 +414,23 @@ def main():
     if cfg["select"] == "best":
         print("note: --select best keeps the epoch that scores best on the fold it predicts: the OOF is optimistic",
               flush=True)
+    holdout = cfg["select"] == "holdout"
+    if holdout:
+        print(f"select holdout: {cfg['es_holdout']:.0%} of each fold's training part is held out of training to choose "
+              f"the epoch (early stop after {cfg['es_patience'] or 'no'} epochs without a gain there)", flush=True)
+    strat = y if task == "multiclass" else (y[:, 0] if task == "binary" else None)
+    groups = train[cfg["group_col"]].to_numpy() if cfg["group_col"] else None
 
     for fold in ([] if a.assemble else run_folds):
         tr = np.flatnonzero(train["fold"].to_numpy() != fold)
         va = np.flatnonzero(train["fold"].to_numpy() == fold)
         if a.smoke:
             tr, va = tr[: 2 * cfg["batch_size"]], va[: cfg["batch_size"]]
+        es, dl_es = None, None
+        if holdout:  # the rows that choose the epoch come from the training part, never from the scored fold
+            tr, es = holdout_split(tr, cfg["es_holdout"], cfg["seed"], fold, strat, groups)
+            dl_es = DataLoader(ImageDataset([paths[i] for i in es], y[es], tf_eval), batch_size=cfg["batch_size"] * 2,
+                               shuffle=False, **loader_kw)
         dl_tr = DataLoader(ImageDataset([paths[i] for i in tr], y[tr], tf_train), batch_size=cfg["batch_size"],
                            shuffle=True, drop_last=len(tr) > cfg["batch_size"], **loader_kw)
         dl_va = DataLoader(ImageDataset([paths[i] for i in va], y[va], tf_eval), batch_size=cfg["batch_size"] * 2,
@@ -376,7 +448,10 @@ def main():
         ema = EMA(model, cfg["ema_decay"])
         # best: best val score so far (progress, pruning); kept/kept_pred: the epoch whose predictions become the OOF
         best, kept, kept_pred, start_epoch = metric.worst(), metric.worst(), None, 0
-        budget = TrainBudget(out_dir, fold, cfg["epochs"], metric.greater_is_better)
+        es_best, es_bad, early = None, 0, None  # holdout: best score on the held-out slice, evals since, early stop
+        # pruning judges the score this run keeps: its last epoch, or with --select best its best one (#119)
+        budget = TrainBudget(out_dir, fold, cfg["epochs"], metric.greater_is_better,
+                             mode="best" if cfg["select"] == "best" else "last")
 
         def train_step(x, yb):
             with torch.autocast(device_type=device.type, enabled=amp, dtype=amp_dtype):
@@ -404,6 +479,7 @@ def main():
             scaler.load_state_dict(ck["scaler"])
             best, start_epoch = ck["best"], ck["epoch"]
             kept, kept_pred = ck.get("kept", ck["best"]), ck.get("kept_pred", ck["best_pred"])
+            es_best, es_bad = ck.get("es_best"), ck.get("es_bad", 0)
             print(f"fold {fold}: resumed at epoch {start_epoch} (best {best:.5f})", flush=True)
         for epoch in range(start_epoch, cfg["epochs"]):
             budget.start_epoch()
@@ -415,21 +491,35 @@ def main():
             print(f"fold {fold} epoch {epoch} loss {loss.item():.4f} val {metric.name} {score:.5f}", flush=True)
             if metric.is_better(score, best):
                 best = score
-            if cfg["select"] == "last" or kept_pred is None or metric.is_better(score, kept):
+            if holdout:  # the held-out slice of the training part chooses the epoch, never the scored fold
+                es_pred = predict(ema.module, dl_es, device, task, amp, hflip=False)
+                es_score = metric(y_metric[es], metric_input(task, metric, es_pred))
+                print(f"fold {fold} epoch {epoch} holdout {metric.name} {es_score:.5f}", flush=True)
+                keep = es_best is None or metric.is_better(es_score, es_best)
+                es_best, es_bad = (es_score, 0) if keep else (es_best, es_bad + 1)
+            else:
+                keep = cfg["select"] == "last" or kept_pred is None or metric.is_better(score, kept)
+            if keep:
                 kept, kept_pred = score, pred
                 torch.save(ema.module.state_dict(), out_dir / f"fold{fold}.pt")
             action = "continue" if a.smoke else budget.end_epoch(epoch, score)
             if action == "timeout":
                 torch.save({"model": model.state_dict(), "ema": ema.module.state_dict(), "opt": opt.state_dict(),
                             "sched": sched.state_dict(), "scaler": scaler.state_dict(), "epoch": epoch + 1,
-                            "best": best, "best_pred": kept_pred, "kept": kept, "kept_pred": kept_pred}, resume)
+                            "best": best, "best_pred": kept_pred, "kept": kept, "kept_pred": kept_pred,
+                            "es_best": es_best, "es_bad": es_bad}, resume)
                 budget.write_status("timeout", next_epoch=epoch + 1)
                 print(f"fold {fold}: session deadline near - checkpointed after epoch {epoch}; resume later", flush=True)
             elif action == "prune":
                 budget.write_status("pruned", epoch=epoch)
-                print(f"fold {fold}: PRUNED at epoch {epoch} - best {best:.5f} trails the baseline curve", flush=True)
+                print(f"fold {fold}: PRUNED at epoch {epoch} - {budget.prune_reason}", flush=True)
             if action != "continue":
                 stopped = "timeout" if action == "timeout" else "pruned"
+                break
+            if holdout and cfg["es_patience"] and es_bad >= cfg["es_patience"] and epoch + 1 < cfg["epochs"]:
+                early = epoch
+                print(f"fold {fold}: early stop after epoch {epoch} - no gain on the held-out slice for {es_bad} "
+                      f"epochs; keeps epoch {epoch - es_bad}", flush=True)
                 break
         if stopped:
             break
@@ -445,7 +535,7 @@ def main():
             np.save(out_dir / f"fold{fold}_test.npy", predict(ema.module, dl_te, device, task, amp, cfg["tta_hflip"]))
         if not a.smoke:
             budget.best = kept
-            budget.write_status("done")
+            budget.write_status("done", **({"early_stop_after": early} if early is not None else {}))
             resume.unlink(missing_ok=True)
         print(f"fold {fold} {cfg['select']} {metric.name} {kept:.5f} (best epoch {best:.5f})", flush=True)
 
