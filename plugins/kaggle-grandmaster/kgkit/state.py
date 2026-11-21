@@ -75,7 +75,7 @@ class CompetitionState:
 # Generated inside .kaggle-gm/ and never committed (the ledger, backlog and logs there are): what `kgkit gpu collect`
 # downloads from a remote run (its artifacts, per-fold logs) and the kernel folders `kgkit gpu build` writes (the
 # code is embedded in them as base64).
-STATE_IGNORES = ("remote/", "build/")
+STATE_IGNORES = ("remote/", "build/", "*.lock", "*.tmp")  # the last two: kgkit.filelock and rewrites in progress
 
 
 def ensure_state_ignores(root: str | Path) -> list[str]:

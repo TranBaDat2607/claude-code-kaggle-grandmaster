@@ -30,6 +30,7 @@ Only the ledger (not the artefacts) should be committed to git.
 
 from __future__ import annotations
 
+import functools
 import json
 import os
 import random
@@ -43,6 +44,7 @@ from typing import Any, Sequence
 import numpy as np
 
 from . import evalset as E
+from . import filelock as FL
 from . import snapshot as SN
 from . import state as S
 
@@ -163,6 +165,16 @@ def _jsonable(v):
     return v
 
 
+def _locked(method):
+    """Run a Ledger method that writes while holding the ledger's lock file (#126): ids are allocated and rewrites
+    made against the file as it is now, not as another process last saw it. Re-entrant: ``decide`` -> ``update``."""
+    @functools.wraps(method)
+    def run(self, *args, **kwargs):
+        with FL.locked(self.path):
+            return method(self, *args, **kwargs)
+    return run
+
+
 class Ledger:
     def __init__(self, root: str | Path | None = None):
         if root is None:
@@ -206,13 +218,23 @@ class Ledger:
         self.dir.mkdir(parents=True, exist_ok=True)
         tmp = self.path.with_suffix(".tmp")
         tmp.write_text("".join(json.dumps(r) + "\n" for r in recs), encoding="utf-8")
-        tmp.replace(self.path)
+        FL.replace(tmp, self.path)
 
     def get(self, exp_id: str) -> dict:
-        for r in self.records():
-            num = r["id"].split("_")[0]
-            if r["id"] == exp_id or r.get("name") == exp_id or (exp_id.isdigit() and num.isdigit() and int(num) == int(exp_id)):
-                return r
+        """The record with id ``exp_id``, else the first named ``exp_id``, else the one numbered ``exp_id``. A number
+        two records share (two runs logged at once before #126) is refused, naming both: use the full id."""
+        recs = self.records()
+        exact = next((r for r in recs if r["id"] == exp_id), None) or next(
+            (r for r in recs if r.get("name") == exp_id), None)
+        if exact is not None:
+            return exact
+        if exp_id.isdigit():
+            same = [r for r in recs if r["id"].split("_")[0].isdigit() and int(r["id"].split("_")[0]) == int(exp_id)]
+            if len(same) > 1:
+                raise KeyError(f"experiment number {exp_id} is ambiguous: {', '.join(r['id'] for r in same)} share it; "
+                               "give the full id")
+            if same:
+                return same[0]
         raise KeyError(f"experiment {exp_id!r} not found in {self.path}")
 
     def ids(self, spec: str) -> list[str]:
@@ -243,6 +265,7 @@ class Ledger:
             p["last"] = r.get("time") or p["last"]
         return list(out.values())
 
+    @_locked
     def set_phase(self, exp_ids: Sequence[str], phase: str) -> int:
         """Put existing records in a phase (records logged before a phase was named, or in the wrong one)."""
         want = set(exp_ids)
@@ -257,6 +280,7 @@ class Ledger:
         return n
 
     # ------------------------------------------------------------------ write
+    @_locked
     def log(
         self,
         name: str,
@@ -343,6 +367,7 @@ class Ledger:
             return E.split_digest([np.asarray(folds, dtype="<i8").tobytes()])
         return E.folds_file_hash(self.root)  # recheck runs use a re-drawn split (KG_FOLDS_FILE)
 
+    @_locked
     def update(self, exp_id: str, **fields) -> dict:
         recs = self.records()
         target = self.get(exp_id)["id"]
@@ -364,6 +389,7 @@ class Ledger:
             fields["submission"] = submission
         return self.update(exp_id, **fields)
 
+    @_locked
     def tag(self, exp_id: str, *tags: str, remove: bool = False) -> dict:
         """Add tags to a record (or remove them): the way to mark a record already logged, e.g. as
         ``public-lb-fitted``."""
@@ -371,6 +397,7 @@ class Ledger:
         new = [t for t in have if t not in tags] if remove else have + [t for t in dict.fromkeys(tags) if t not in have]
         return self.update(exp_id, tags=new)
 
+    @_locked
     def decide(self, exp_id: str, decision: str, note: str = "", parent: str | None = None,
                member: bool = False) -> dict:
         """Record the keep/discard decision (and optionally the baseline it was compared against). The accepted
@@ -400,6 +427,7 @@ class Ledger:
         machines."""
         return 1 + max([int(r.get("decision_seq") or 0) for r in self.records()] or [0])
 
+    @_locked
     def import_preds(self, name: str, oof: np.ndarray, test_pred: np.ndarray | None, y_true=None,
                      folds: Sequence[int] | None = None, metric: str | None = None, cv: float | None = None,
                      notes: str = "", source: str = "external", **extra) -> dict:

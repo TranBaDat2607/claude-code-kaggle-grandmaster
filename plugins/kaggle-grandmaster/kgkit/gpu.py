@@ -44,6 +44,7 @@ from pathlib import Path, PurePosixPath
 
 from . import bench as B
 from . import evalset as E
+from . import filelock as FL
 from . import kaggle_cli as KC
 from . import safety
 from . import snapshot as SN
@@ -2128,7 +2129,13 @@ def _merge_tree(src: Path, dst: Path) -> int:
 
 
 def import_ledger(root: Path, out: Path, report: dict, kernel: str, version: int | None) -> list[dict]:
-    """Append the remote run's ledger records to the local ledger with fresh ids (idempotent)."""
+    """Append the remote run's ledger records to the local ledger with fresh ids (idempotent), holding the ledger's
+    lock so a run logging locally meanwhile cannot take the same ids (#126)."""
+    with FL.locked(root / S.STATE_DIR / "ledger.jsonl"):
+        return _import_ledger(root, out, report, kernel, version)
+
+
+def _import_ledger(root: Path, out: Path, report: dict, kernel: str, version: int | None) -> list[dict]:
     lp = root / S.STATE_DIR / "ledger.jsonl"
     existing = []
     if lp.is_file():
