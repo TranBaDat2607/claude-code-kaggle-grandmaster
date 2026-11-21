@@ -1,6 +1,6 @@
 ---
 name: code-competitions
-description: Shipping solutions to Kaggle code competitions — offline notebooks with internet disabled, packaging models/wheels/code as Kaggle datasets, hidden test set re-runs, runtime and memory budgets on T4x2/P100/L4/TPU/CPU, evaluation API patterns, and debugging submission errors (Scoring Error, timeout, OOM). Use when a competition requires notebook submission or when preparing an inference kernel.
+description: "Ships Kaggle code-competition solutions: offline notebooks, models as datasets, hidden-test reruns. Use when submissions are notebooks, or on a Scoring Error, timeout or OOM."
 ---
 
 # Code Competitions

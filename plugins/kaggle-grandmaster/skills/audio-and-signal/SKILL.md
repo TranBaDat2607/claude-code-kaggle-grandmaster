@@ -1,6 +1,6 @@
 ---
 name: audio-and-signal
-description: Playbook for Kaggle audio and biosignal competitions — bioacoustics (BirdCLEF-style), speech, EEG/ECG/EMG, seismic and other 1D signals — covering spectrogram vs raw-waveform models, augmentation, weak labels, soundscape inference under CPU limits, and subject-grouped validation. Use for any audio or sensor-waveform data.
+description: "Playbook for Kaggle audio and biosignal competitions (bioacoustics, speech, EEG/ECG, seismic). Use when the inputs are sound or sensor waveforms."
 ---
 
 # Audio & Signal Playbook

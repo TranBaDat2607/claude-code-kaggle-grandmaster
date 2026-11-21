@@ -1,6 +1,6 @@
 ---
 name: kaggle-cli
-description: Using the official Kaggle CLI/API from Claude Code — authentication, downloading competition data, submitting (and reading scores), listing submissions and leaderboards, pushing/pulling notebooks (kernels), creating and versioning datasets and models, and fetching episode replays. Use whenever interacting with kaggle.com programmatically.
+description: "The official Kaggle CLI and API: auth, data download, submissions and scores, kernels, datasets. Use whenever working with kaggle.com from code or when a kaggle command fails."
 ---
 
 # Kaggle CLI / API

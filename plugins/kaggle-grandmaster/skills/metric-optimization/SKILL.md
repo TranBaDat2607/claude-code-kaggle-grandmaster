@@ -1,6 +1,6 @@
 ---
 name: metric-optimization
-description: Optimising directly for the Kaggle evaluation metric — choosing training losses that align with AUC, logloss, RMSE/RMSLE/MAE, F1/F-beta, QWK, MAP@K, IoU/Dice, mAP, pinball and custom metrics; threshold and rounding optimisation, calibration, metric-aware post-processing and exact metric re-implementation. Use whenever deciding a loss, post-processing, or when a metric seems hard to optimise.
+description: "Optimises for the Kaggle evaluation metric: aligned losses, thresholds, rounding, calibration, exact re-implementation. Use when choosing a loss or post-processing, or when a metric (QWK, F1, MAP@K, Dice) is hard to optimise."
 ---
 
 # Metric Optimisation

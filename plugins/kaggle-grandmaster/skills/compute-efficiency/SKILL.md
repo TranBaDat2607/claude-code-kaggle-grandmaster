@@ -1,6 +1,6 @@
 ---
 name: compute-efficiency
-description: "Speed defaults for Kaggle training and inference by domain (images, text and LLMs, tabular with cuDF/cuML and GPU GBDTs, audio, recsys, time series) and hardware (T4x2, P100, TPU, CPU-only kernels, Windows) - measuring idle, input-bound or compute-bound runs, mixed precision, data loading, torch.compile, ONNX/OpenVINO/TensorRT/vLLM, quantisation. Use whenever training or inference code is written or changed, or a run is slow, a GPU idles or runs out of memory, or a kernel must fit a time limit."
+description: "Speed defaults for Kaggle training and inference on T4, P100, TPU and CPU; measure input-bound vs compute-bound first. Use whenever training or inference code is written, a run is slow or out of memory, or a kernel must fit a time limit."
 ---
 
 # Compute efficiency: more experiments per GPU-hour

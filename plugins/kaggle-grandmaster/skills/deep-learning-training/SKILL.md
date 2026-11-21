@@ -1,6 +1,6 @@
 ---
 name: deep-learning-training
-description: Competition-grade deep learning training practice in PyTorch — schedules, optimisers, mixed precision, EMA/SWA, gradient accumulation and checkpointing, multi-GPU on Kaggle (2xT4), data loading speed, reproducibility, debugging loss curves, and making the most of limited GPU hours. Use when writing or debugging any neural network training loop for a competition.
+description: "Competition-grade PyTorch training: schedules, mixed precision, EMA, multi-GPU, loss-curve debugging. Use when writing or debugging a neural network training loop."
 ---
 
 # Deep Learning Training for Competitions

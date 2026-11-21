@@ -1,6 +1,6 @@
 ---
 name: recsys-and-ranking
-description: Playbook for Kaggle recommendation and ranking competitions (OTTO, H&M, session-based recommendation, search relevance, learning-to-rank) — candidate generation (co-visitation, recency, popularity, embeddings), feature engineering for user-item pairs, LambdaRank/GBDT rankers, MAP@K/NDCG/recall validation, and memory-efficient pipelines. Use when predictions are ranked lists of items per user/query/session.
+description: "Playbook for Kaggle recommendation and ranking competitions: candidate generation, GBDT rankers, MAP@K/NDCG. Use when predictions are ranked lists of items per user, query or session."
 ---
 
 # RecSys & Ranking Playbook

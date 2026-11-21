@@ -1,6 +1,6 @@
 ---
 name: kg-grind
-description: Autonomous improvement loop — repeatedly pick the highest-value idea from the backlog, run it as a disciplined experiment against the accepted baseline, decide with a paired comparison, update the backlog, and re-check the CV for overfitting, within a time or experiment budget.
+description: "Autonomous improvement loop: picks backlog ideas, runs each as an experiment, keeps or discards it, within a time or experiment budget. Use to improve the score hands-off."
 argument-hint: "[resume | budget, e.g. 4h or 10 experiments] [focus area]"
 allowed-tools:
   - Read

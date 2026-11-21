@@ -1,6 +1,6 @@
 ---
 name: kg-final
-description: Choose the final Kaggle submissions to maximise expected private leaderboard score — evidence table, LB noise estimate, CV-vs-LB weighting, hedge selection and robustness checks.
+description: "Chooses the final Kaggle submissions from the ledger's evidence. Use in the last days before the deadline."
 allowed-tools:
   - Read
   - Glob

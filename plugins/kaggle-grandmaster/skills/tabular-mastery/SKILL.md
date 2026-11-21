@@ -1,6 +1,6 @@
 ---
 name: tabular-mastery
-description: Winning playbook for tabular Kaggle competitions (including Playground Series) — GBDT (LightGBM, XGBoost, CatBoost) recipes, feature engineering patterns, categorical handling, NN models for tabular (MLP, TabM, transformers), GPU acceleration, synthetic-data competitions, and tabular ensembling. Use for any rows-and-columns problem.
+description: "Playbook for tabular Kaggle competitions, Playground Series included: GBDTs, feature engineering, tabular NNs. Use for any rows-and-columns data."
 ---
 
 # Tabular Mastery

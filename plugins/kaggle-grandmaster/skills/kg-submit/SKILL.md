@@ -1,6 +1,6 @@
 ---
 name: kg-submit
-description: Validate a submission file, check the daily budget, submit it to Kaggle with a ledger-linked message, poll for the public score and record it in the ledger.
+description: "Validates a submission file, checks the daily budget, submits it to Kaggle and records the score. Use to submit a file."
 argument-hint: <submission-file> [experiment-id]
 allowed-tools:
   - Read

@@ -1,6 +1,6 @@
 ---
 name: kg-status
-description: Show where the competition stands — metric, deadline, accepted baseline, best CV, best LB, CV-LB correlation, recent experiments and decisions, top of the backlog, submissions left today — and recommend the next actions.
+description: "Reports where the competition stands (scores, deadline, budget, backlog) and the next actions. Use when the user asks for status, progress or what to do next."
 allowed-tools:
   - Read
   - Glob

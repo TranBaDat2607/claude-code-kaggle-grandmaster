@@ -1,6 +1,6 @@
 ---
 name: kg-experiment
-description: Run one disciplined experiment for a hypothesis — single change, frozen folds, same seeds, ledger logging with its parent baseline, paired comparison (per-fold deltas + OOF bootstrap) against the accepted baseline, recorded keep/discard decision.
+description: "Runs one disciplined experiment against the accepted baseline and records keep or discard. Use when testing an idea, or when deciding and recording a finished experiment."
 argument-hint: <hypothesis or change to test>
 allowed-tools:
   - Read

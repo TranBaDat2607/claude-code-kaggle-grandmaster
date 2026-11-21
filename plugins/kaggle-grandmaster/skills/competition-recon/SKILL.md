@@ -1,6 +1,6 @@
 ---
 name: competition-recon
-description: How to analyse a Kaggle competition before modelling — metric, data, rules, timeline, public notebooks, discussions, leaks, past similar competitions and shake-up risk. Use at the start of a competition, when joining late, or when the user asks to research/understand a competition.
+description: "Analyses a Kaggle competition before modelling: metric, data, rules, leaks, shake-up risk. Use at the start, when joining late, or when asked to research a competition."
 ---
 
 # Competition Recon

@@ -1,6 +1,6 @@
 ---
 name: ensembling
-description: How Kaggle Grandmasters build ensembles — OOF management, diversity, averaging/rank/geometric blending, Caruana hill climbing, constrained weight optimisation, stacking with nested CV, multi-level and residual stacking over large model libraries, library pruning, multi-seed and multi-fold averaging, and avoiding blend overfitting. Use when combining models or when asked to squeeze the final points out of a leaderboard.
+description: "Builds Kaggle ensembles from OOF predictions: blending, hill climbing, stacking with nested CV, without overfitting the blend. Use when combining models or squeezing the last leaderboard points."
 ---
 
 # Ensembling

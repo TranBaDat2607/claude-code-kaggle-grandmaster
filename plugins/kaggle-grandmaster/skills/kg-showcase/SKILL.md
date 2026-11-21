@@ -1,6 +1,6 @@
 ---
 name: kg-showcase
-description: After a competition ends — turn the work into a public repository with two ways in. solution/ for readers who want the result (the final pipeline and the exact commands), journey/ for readers who want to learn from it (how the ideas developed, phase by phase, written from the ledger, with links to the code each experiment ran). Tidies the tree, rebuilds the README, adds a license and figures, audits a public notebook and weights, drafts a Kaggle write-up and tags the final state. Asks before every public step.
+description: "Turns a finished competition into a public repository (solution/ and journey/), asking before every public step. Use after the deadline to publish the work."
 argument-hint: "[competition-slug]"
 allowed-tools:
   - Read

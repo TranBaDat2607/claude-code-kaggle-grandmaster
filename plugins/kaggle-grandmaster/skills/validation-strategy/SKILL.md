@@ -1,6 +1,6 @@
 ---
 name: validation-strategy
-description: Designing a cross-validation scheme that tracks the private leaderboard — choosing KFold/Stratified/Group/StratifiedGroup/multilabel/time-series/purged splits, adversarial validation, CV-LB correlation, noise estimation, and leakage prevention. Use when setting up CV, when CV and LB disagree, or before trusting any score.
+description: "Designs a cross-validation scheme that tracks the Kaggle private leaderboard: the right split, adversarial validation, noise. Use when setting up CV, when CV and LB disagree, or before trusting a score."
 ---
 
 # Validation Strategy

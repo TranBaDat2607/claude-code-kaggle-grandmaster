@@ -1,6 +1,6 @@
 ---
 name: kg-debug
-description: Diagnose a CV-LB disagreement, a suspicious score jump, or a failed/odd submission using the systematic CV-LB debugging procedure and the validation auditor.
+description: "Diagnoses a CV-LB gap, a suspicious score jump or a failed submission in the workspace. Use when a result looks wrong."
 argument-hint: "[symptom description or experiment id]"
 allowed-tools:
   - Read

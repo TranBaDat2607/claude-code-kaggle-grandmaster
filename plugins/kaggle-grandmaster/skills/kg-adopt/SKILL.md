@@ -1,6 +1,6 @@
 ---
 name: kg-adopt
-description: Adopt an existing mid-competition Kaggle repo in place — write .kaggle-gm/ (competition facts), import the past Kaggle submissions and the experiments the repo already tracks, mark the accepted baseline — so the hooks, budget checks and kgkit work. Use instead of kg-start when the competition work already exists (kernel folders, an experiment log, a validation set).
+description: "Adopts an existing mid-competition Kaggle repo in place so the plugin's hooks and kgkit work. Use instead of kg-start when the competition work already exists."
 argument-hint: [competition-slug]
 allowed-tools:
   - Read

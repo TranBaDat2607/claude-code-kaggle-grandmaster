@@ -1,6 +1,6 @@
 ---
 name: simulation-and-optimization
-description: Playbook for Kaggle simulation competitions (agents playing games in an environment against other teams' bots, e.g. Lux AI, Kore, ConnectX, Halite) and combinatorial optimisation competitions (Santa / traveling-salesman / scheduling / packing puzzles). Use when the submission is an agent or a solution file scored by an objective rather than predictions on a test set.
+description: "Playbook for Kaggle simulation (game-playing agents) and combinatorial optimisation (Santa-style puzzles) competitions. Use when the submission is an agent or a solution file scored by an objective."
 ---
 
 # Simulation & Optimisation Playbook

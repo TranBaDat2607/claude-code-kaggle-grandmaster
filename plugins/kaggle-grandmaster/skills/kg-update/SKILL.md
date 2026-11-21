@@ -1,6 +1,6 @@
 ---
 name: kg-update
-description: Update the kaggle-grandmaster plugin to its latest release without leaving the conversation — check the running version against the latest GitHub release, show what changed, run `claude plugin update` for this session's install (the user approves it), then have the user type /reload-plugins.
+description: "Updates the kaggle-grandmaster plugin to its latest release from inside the conversation. Use when the user wants the newest version."
 allowed-tools:
   - Read
   - Glob

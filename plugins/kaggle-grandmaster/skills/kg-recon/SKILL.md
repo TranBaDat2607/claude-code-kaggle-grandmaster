@@ -1,6 +1,6 @@
 ---
 name: kg-recon
-description: Research a Kaggle competition (metric, data, rules, timeline, top notebooks, discussions, similar past competitions, leak and shake-up risk) and write reports/recon.md.
+description: "Researches a Kaggle competition and writes reports/recon.md. Use before modelling a new competition."
 argument-hint: <competition-slug>
 allowed-tools:
   - Read

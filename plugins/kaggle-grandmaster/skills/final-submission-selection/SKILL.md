@@ -1,6 +1,6 @@
 ---
 name: final-submission-selection
-description: Choosing the final Kaggle submissions to maximise expected private leaderboard score and survive shake-ups — CV vs public LB weighting, hedging strategies, robustness checks, and endgame timeline. Use in the last days of a competition or when the user asks which submissions to select.
+description: "Chooses the final Kaggle submissions to maximise the private leaderboard score. Use in a competition's last days or when the user asks which submissions to select."
 ---
 
 # Final Submission Selection

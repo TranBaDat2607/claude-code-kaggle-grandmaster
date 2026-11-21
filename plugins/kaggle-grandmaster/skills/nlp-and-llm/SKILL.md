@@ -1,6 +1,6 @@
 ---
 name: nlp-and-llm
-description: Winning playbook for Kaggle NLP and LLM competitions — transformer fine-tuning (DeBERTa-v3 and friends), LLM fine-tuning with LoRA/QLoRA, LLM-as-solver (math/reasoning/agents), retrieval & RAG, synthetic data generation, distillation, efficient inference with vLLM under Kaggle time limits, and text-specific validation. Use for any text, chat, code, or LLM-related competition.
+description: "Playbook for Kaggle NLP and LLM competitions: transformer and LoRA fine-tuning, LLM solvers, RAG, vLLM inference. Use for any text, chat, code or LLM competition."
 ---
 
 # NLP & LLM Playbook

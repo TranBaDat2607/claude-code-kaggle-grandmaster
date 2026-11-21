@@ -1,6 +1,6 @@
 ---
 name: kg-baseline
-description: Build fast, strong, correctly-validated baselines for the current competition from the plugin's templates — the main model plus diverse families on the same folds — log them to the ledger, decide the accepted baseline and produce a validated submission file.
+description: "Builds validated baselines from the plugin's templates and sets the accepted baseline. Use when the workspace has frozen folds but no accepted baseline."
 argument-hint: "[model: lgbm|xgb|cat|hgb|linear|knn|svm|mlp|image|transformer]"
 allowed-tools:
   - Read

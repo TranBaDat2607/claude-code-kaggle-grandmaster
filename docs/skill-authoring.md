@@ -68,7 +68,7 @@ parity, distribution shift, LB noise estimation, ...` (a list, no trigger, and t
 
 | ID | Rule | Source | Enforced by |
 |---|---|---|---|
-| B1 | The total listing text (`description` + `when_to_use`) of the skills Claude may load on its own stays under a cap that only goes **down**. On a 200K-context model the whole listing (every plugin, every built-in skill) gets about 2,000 tokens, roughly 5,400 characters at Claude Code's ~2.7 characters per token. This plugin's target is **4,000 characters** (#130) | CC | `test_skill_standard.py::test_listing_fits_the_budget` |
+| B1 | The total listing text (`description` + `when_to_use`) of the skills Claude may load on its own stays under a cap that only goes **down** (5,850 characters after #130, from 11,116). On a 200K-context model the whole listing, every plugin and built-in skill included, gets about 2,000 tokens. A new skill pays for its description by shortening others, or is slash-only (B2) | CC | `test_skill_standard.py::test_listing_fits_the_budget` |
 | B2 | A command that the user always starts by name, and that neither the prompt router nor another skill loads, is a candidate for `disable-model-invocation: true`: it then costs no listing budget [CC]. Update `SIDE_EFFECTS` in `tests/test_skills.py` with it | CC | review |
 
 Check a real session with `/context` (the Skills row) or `/doctor` on a Sonnet model, not only the 1M-context one.

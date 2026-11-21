@@ -1,6 +1,6 @@
 ---
 name: kg-ideas
-description: Generate a ranked, evidence-backed backlog of next experiments from error analysis, the domain playbook's untried levers, public notebooks, discussion/prior-art research and the ledger history, stored with kgkit backlog.
+description: "Builds a ranked backlog of next experiments from errors, playbooks, public notebooks and the ledger. Use when deciding what to try next."
 argument-hint: "[focus area]"
 allowed-tools:
   - Read

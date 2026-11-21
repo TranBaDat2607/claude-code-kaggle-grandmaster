@@ -1,6 +1,6 @@
 ---
 name: competition-strategy
-description: The career layer of becoming a Kaggle Competitions Grandmaster — what the title requires (golds, a solo gold), which competitions award medals and which to enter, planning a solo gold, joining late, running several competitions at once, and teaming — when and with whom to merge, the private-sharing and submission-count rules around merging, and the technical merge protocol (shared folds, OOF exchange, joint final selection). Use when the user asks about teams, merging, choosing competitions, medals or the Grandmaster title.
+description: "Kaggle career strategy toward Grandmaster: choosing competitions, solo golds, teaming and merging. Use when the user asks about medals, the title, which competition to enter, or merging."
 ---
 
 # Competition Strategy (the path to Grandmaster)

@@ -1,6 +1,6 @@
 ---
 name: kg-kernel
-description: Package the current best solution for a Kaggle code competition — offline inference script, weight/code/wheel datasets, kernel metadata with internet off, runtime estimate on hidden-test size, push and poll.
+description: "Packages the best solution as an offline Kaggle code-competition kernel, then pushes and polls it. Use when a code competition needs its submission notebook."
 argument-hint: "[experiment-id or blend id]"
 allowed-tools:
   - Read
@@ -23,12 +23,13 @@ command. Submitting, pushing or publishing still asks.
 
 Target: `$ARGUMENTS` (default: the best blend/experiment in the ledger).
 
-Delegate to the `kernel-packager` agent with the target experiment(s), the competition constraints
-from `.kaggle-gm/competition.json`, the inference template
-`${CLAUDE_PLUGIN_ROOT}/templates/inference_kernel.py`, and the inference speed checklist
-`${CLAUDE_PLUGIN_ROOT}/skills/compute-efficiency/references/inference.md` (fp16, both T4s, shared preprocessing,
-exports with OOF parity, LLM engines and quantisation). Uploading datasets and pushing kernels are
-outward-facing: confirm with the user before doing them unless already authorised.
-
-Report artefacts, kernel version, measured runtime vs limit (with ≥20% margin), OOF-parity check,
-and the submit command.
+1. **Delegate** to the `kernel-packager` agent with the target experiment(s), the competition constraints
+   from `.kaggle-gm/competition.json`, the inference template
+   `${CLAUDE_PLUGIN_ROOT}/templates/inference_kernel.py`, and the inference speed checklist
+   `${CLAUDE_PLUGIN_ROOT}/skills/compute-efficiency/references/inference.md` (fp16, both T4s, shared
+   preprocessing, exports with OOF parity, LLM engines and quantisation).
+2. **Confirm before anything outward-facing**: uploading datasets and pushing kernels need the user's yes unless
+   already authorised.
+3. **Check** the measured runtime against the limit with ≥20% margin and the OOF-parity check; if either fails,
+   fix and re-run before reporting.
+4. **Report** artefacts, kernel version, runtime vs limit, OOF parity, and the submit command.

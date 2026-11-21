@@ -1,6 +1,6 @@
 ---
 name: kg-eda
-description: Competition-focused EDA — red flags, leaks, drift, hidden groups, adversarial validation — written to reports/eda.md.
+description: "Competition EDA into reports/eda.md: leaks, drift, hidden groups, adversarial validation. Use after the data is downloaded, before designing folds."
 argument-hint: "[train-file] [test-file]"
 allowed-tools:
   - Read

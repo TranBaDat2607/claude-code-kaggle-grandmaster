@@ -1,6 +1,6 @@
 ---
 name: kg-postmortem
-description: After a competition ends — record every public and private score, check what the finals scored, measure which signals predicted the private leaderboard, study the top solutions, and distil reusable lessons into a post-mortem and a cross-competition lessons file.
+description: "Records final scores, what predicted private, top solutions and lessons. Use after a Kaggle competition ends."
 argument-hint: "[competition-slug]"
 allowed-tools:
   - Read

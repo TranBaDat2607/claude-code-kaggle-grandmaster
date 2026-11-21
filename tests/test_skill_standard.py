@@ -36,15 +36,8 @@ BODY_LINES_MAX = 500  # C1 [BP], [CC]
 TOC_AFTER_LINES = 100  # R3 [BP]
 
 # B1: total listing text of the skills Claude may load on its own. Lower it as descriptions shrink, never raise it.
-# The target is 4,000 characters (#130); a 200K-context model has ~5,400 for every plugin and built-in skill together.
-LISTING_CAP = 11_200
-
-# D4: model-invocable commands whose description doesn't yet say when to use it. #130 rewrites them; remove each
-# name here when its description gains a trigger clause (test_trigger_exemptions_are_current fails until you do).
-NO_TRIGGER_YET = {
-    "kg-baseline", "kg-cv", "kg-debug", "kg-eda", "kg-ensemble", "kg-experiment", "kg-final", "kg-ideas",
-    "kg-recon", "kg-start", "kg-status",
-}
+# #130 halved it (11,116 -> 5,841). Below this, a skill needs disable-model-invocation, not a shorter description.
+LISTING_CAP = 5_850
 
 XML = re.compile(r"<[A-Za-z/!][^>]*>")
 FIRST_OR_SECOND_PERSON = re.compile(r"^(I|You|We)\b|\b(I can|I will|I'll|you can|you should|we can|Use this to)\b",
@@ -122,17 +115,8 @@ def test_description_point_of_view(path):
 @pytest.mark.parametrize("name", sorted(_model_invocable()), ids=str)
 def test_description_says_when(name):
     """D4: a skill Claude may load on its own says when to use it."""
-    if name in NO_TRIGGER_YET:
-        pytest.skip("exempt until #130 rewrites its description")
     text = _listing(_model_invocable()[name])
     assert TRIGGER.search(text), f"{name}: the description says what, not when: add 'Use when ...'"
-
-
-def test_trigger_exemptions_are_current():
-    """D4: the exemption list only shrinks; a fixed or removed skill must leave it."""
-    skills = _model_invocable()
-    stale = sorted(n for n in NO_TRIGGER_YET if n not in skills or TRIGGER.search(_listing(skills[n])))
-    assert not stale, f"remove {stale} from NO_TRIGGER_YET: they now say when (or are no longer listed)"
 
 
 def test_listing_fits_the_budget():

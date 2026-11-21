@@ -1,6 +1,6 @@
 ---
 name: cv-lb-debugging
-description: Systematic diagnosis when cross-validation and leaderboard disagree, when a score is suspiciously good or bad, or when an improvement in CV does not transfer to LB — leakage hunting, distribution shift analysis, inference/training mismatch, metric bugs, and public LB noise estimation. Use when CV and LB diverge or a result looks wrong.
+description: "Diagnoses gaps between cross-validation and the Kaggle leaderboard: leaks, shift, metric or inference bugs, LB noise. Use when CV and LB disagree or a score looks too good or too bad."
 ---
 
 # CV ↔ LB Debugging

@@ -1,6 +1,6 @@
 ---
 name: kg-cv
-description: Design, build, verify and freeze the cross-validation scheme (data/folds.csv) so it mirrors how the test set was split.
+description: "Designs, verifies and freezes the cross-validation folds (data/folds.csv). Use when the workspace has no frozen folds or the split must change."
 argument-hint: "[strategy] [group-column]"
 allowed-tools:
   - Read

@@ -1,6 +1,6 @@
 ---
 name: computer-vision
-description: Winning playbook for Kaggle computer vision competitions — image classification, object detection, segmentation, medical imaging (CT/MRI/X-ray/pathology), video, satellite — covering backbone choice (timm), resolution, augmentations, losses, training recipes, TTA, pseudo-labelling, multi-stage pipelines and inference under time limits. Use for any image/video data.
+description: "Playbook for Kaggle computer vision: classification, detection, segmentation, medical imaging, video. Use for any image or video data."
 ---
 
 # Computer Vision Playbook

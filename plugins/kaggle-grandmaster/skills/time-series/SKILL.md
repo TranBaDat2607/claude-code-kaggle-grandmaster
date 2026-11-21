@@ -1,6 +1,6 @@
 ---
 name: time-series
-description: Winning playbook for Kaggle time-series and forecasting competitions — leak-free time validation, lag/rolling/calendar features, global GBDT models, recursive vs direct multi-horizon forecasting, hierarchical reconciliation, deep forecasting models, financial/market prediction with purged CV, and sensor/event sequences. Use whenever the target depends on time or the test period is in the future.
+description: "Playbook for Kaggle time-series and forecasting competitions: time-aware CV, lag features, multi-horizon, purged CV for finance. Use whenever the target depends on time or the test period is in the future."
 ---
 
 # Time-Series Playbook

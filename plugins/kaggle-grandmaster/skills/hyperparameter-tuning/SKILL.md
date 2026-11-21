@@ -1,6 +1,6 @@
 ---
 name: hyperparameter-tuning
-description: Efficient hyperparameter optimisation for Kaggle — when tuning is worth it, Optuna recipes with pruning on frozen folds, search spaces for LightGBM/XGBoost/CatBoost/NNs/transformers, budget allocation, and avoiding CV overfitting from excessive search. Use when the user wants to tune models or asks for an Optuna setup.
+description: "Hyperparameter tuning for Kaggle with Optuna on frozen folds, without overfitting CV. Use when the user wants to tune a model, asks for an Optuna setup, or asks whether tuning is worth it."
 ---
 
 # Hyperparameter Tuning

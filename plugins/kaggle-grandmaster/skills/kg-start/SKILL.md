@@ -1,6 +1,6 @@
 ---
 name: kg-start
-description: Bootstrap a Kaggle competition workspace end to end — recon, data download, workspace init, EDA, adversarial validation, frozen folds, metric implementation, baseline model and a first validated submission file.
+description: "Bootstraps a new Kaggle competition workspace up to a first validated submission file. Use when starting a competition from scratch."
 argument-hint: <competition-slug> [workspace-dir]
 allowed-tools:
   - Read

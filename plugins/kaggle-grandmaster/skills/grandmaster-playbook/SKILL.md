@@ -1,6 +1,6 @@
 ---
 name: grandmaster-playbook
-description: The master operating procedure for competing in a Kaggle (or Kaggle-style) machine learning competition at Grandmaster level. Use whenever the user is working on a Kaggle competition, wants to improve a leaderboard score, asks how to approach a data science competition, or is in a workspace containing .kaggle-gm/ — it routes to the specialised skills (recon, validation, tabular, vision, NLP/LLM, time series, ensembling, code competitions, final selection).
+description: "Master procedure for a Kaggle competition at Grandmaster level; routes to the domain skills. Use whenever the user works on a Kaggle competition, wants a better leaderboard score, or is in a .kaggle-gm/ workspace."
 ---
 
 # The Grandmaster Playbook
