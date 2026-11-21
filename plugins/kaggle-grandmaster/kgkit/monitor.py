@@ -31,15 +31,25 @@ CODING_RE = re.compile(r"^[ \t\f]*#.*?coding[:=][ \t]*[-\w.]+")
 FUTURE_RE = re.compile(r"^[ \t]*from[ \t]+__future__[ \t]+import\b", re.MULTILINE)
 
 
-def cell_lines(accelerator: str | None = None) -> list[str] | None:
+def cell_lines(accelerator: str | None = None, check: bool = True) -> list[str] | None:
     """The monitor cell between its markers, as lines without line ends, expecting the GPUs ``accelerator``
-    promises; None when the cell file is missing."""
+    promises (``check=False``: none, readings only); None when the cell file is missing."""
     try:
         body = CELL.read_text(encoding="utf-8").replace("\r\n", "\n")  # CRLF in a Windows checkout
     except OSError:
         return None
-    body = EXPECT_RE.sub(f"KGMON_EXPECT_GPUS = {G.expected_gpus(accelerator)}", body, count=1)
+    want = G.expected_gpus(accelerator) if check else 0
+    body = EXPECT_RE.sub(f"KGMON_EXPECT_GPUS = {want}", body, count=1)
     return [BEGIN, *body.rstrip("\n").split("\n"), END]
+
+
+def is_submission_kernel(meta: dict) -> bool:
+    """Whether the kernel of ``meta`` (kernel-metadata.json) looks like a code-competition submission: it attaches a
+    competition and runs with internet off, which Kaggle requires of a notebook it scores. Kaggle re-runs the
+    submitted version on the hidden test, so its cell must never stop the session (#121)."""
+    internet = meta.get("enable_internet")
+    off = internet is False or str(internet).strip().lower() == "false"
+    return bool(meta.get("competition_sources")) and off
 
 
 def _script_insert_at(text: str) -> int | None:
@@ -133,7 +143,8 @@ def add_monitor(folder: Path, meta: dict, accelerator: str | None = None) -> str
     if SKIP_MARK.search(raw) and not had:
         return None
     acc = accelerator or G.kernel_meta_accelerator(meta)
-    cell = cell_lines(acc)
+    submission = is_submission_kernel(meta)
+    cell = cell_lines(acc, check=not submission)
     if cell is None:
         return None
     new = _with_notebook_cell(raw, cell) if suffix == ".ipynb" else _with_script_cell(raw, cell)
@@ -147,9 +158,13 @@ def add_monitor(folder: Path, meta: dict, accelerator: str | None = None) -> str
     if len(out) >= G.SOURCE_MAX_BYTES > len(data):
         return f"no hardware monitor added to {path}: with it the source would reach 1 MB, which Kaggle refuses."
     path.write_bytes(out)
-    want = G.expected_gpus(acc)
+    want = 0 if submission else G.expected_gpus(acc)
     check = (f" It stops the session at once if the machine has fewer than the {want} GPU{'s' if want > 1 else ''} "
              f"{acc} promises (KG_BAD_MACHINE in the log)." if want else "")
+    if submission:
+        check = (" This kernel looks like a code-competition submission (competition sources, internet off), so the "
+                 "cell only prints readings: its bad-machine check is off, and Kaggle's scoring rerun never stops on "
+                 "a slower machine.")
     if had:
         return f"updated the hardware monitor in {path} for {acc}, so the file changed on disk.{check}"
     where = "as its first cell" if suffix == ".ipynb" else "at the top"

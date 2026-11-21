@@ -132,6 +132,39 @@ def test_gpu_push_adds_the_monitor_with_the_gpus_the_shape_promises(ws, monkeypa
     assert "hardware monitor" not in capsys.readouterr().out
 
 
+def test_the_check_never_stops_a_code_competition_scoring_run(tmp_path):
+    """#121: Kaggle re-runs a submitted notebook on the hidden test; a slower machine still gives a valid submission,
+    an exception fails it."""
+    r = _run_cell(CELL, tmp_path, KG_FAKE_GPUS="1", KG_EXPECT_GPUS="2", KAGGLE_IS_COMPETITION_RERUN="True")
+    assert r.returncode == 0 and "KG_BAD_MACHINE" not in r.stdout, (r.stdout, r.stderr)
+
+
+@pytest.mark.parametrize("internet", [False, "false"])
+def test_a_submission_kernel_gets_the_monitor_without_the_check(ws, monkeypatch, capsys, tmp_path, internet):
+    _fake_push(monkeypatch)
+    d = _kernel_dir(ws)
+    meta = json.loads((d / "kernel-metadata.json").read_text())
+    meta.update(competition_sources=["demo"], enable_internet=internet)
+    (d / "kernel-metadata.json").write_text(json.dumps(meta))
+    G.push(ws, d, hours=0.75)
+    code = (d / "run.py").read_text(encoding="utf-8")
+    assert M.BEGIN in code and "KGMON_EXPECT_GPUS = 0" in code
+    assert "looks like a code-competition submission" in capsys.readouterr().out
+    r = _run_cell(d / "run.py", tmp_path, KG_FAKE_GPUS="1")
+    assert r.returncode == 0 and "KG_BAD_MACHINE" not in r.stdout and "hi" in r.stdout.splitlines()
+
+
+def test_a_training_kernel_that_attaches_the_competition_keeps_the_check(ws, monkeypatch):
+    _fake_push(monkeypatch)
+    d = _kernel_dir(ws)
+    meta = json.loads((d / "kernel-metadata.json").read_text())
+    meta.update(competition_sources=["demo"], enable_internet=True)
+    (d / "kernel-metadata.json").write_text(json.dumps(meta))
+    G.push(ws, d, hours=0.75)
+    assert "KGMON_EXPECT_GPUS = 2" in (d / "run.py").read_text(encoding="utf-8")
+    assert not M.is_submission_kernel({"competition_sources": [], "enable_internet": False})
+
+
 def test_gpu_push_leaves_opted_out_and_built_kernels_alone(ws, monkeypatch):
     _fake_push(monkeypatch)
     d = _kernel_dir(ws, code="# kgmon: off\nprint('hi')\n")

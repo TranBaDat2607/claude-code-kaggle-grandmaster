@@ -44,6 +44,11 @@ Kernel push via CLI: `kaggle kernels init -p kernels/infer`, edit `kernel-metada
   only by data size. Test locally with a synthetic test set of the hidden size to measure runtime.
 - Categories/values unseen in train will appear — handle unknowns everywhere.
 - Some competitions hide the test until rerun: guard EDA-only code so it doesn't crash.
+- Nothing in the submitted version may stop the session on purpose. The plugin's push hook adds its hardware monitor
+  cell to every kernel it pushes; in a kernel that attaches the competition with internet off it only prints readings
+  (its bad-machine check is off), so a scoring rerun on a slower machine still produces the submission. Code of your
+  own that exits on "wrong" hardware does not belong in a submission notebook either. A `# kgmon: off` comment keeps
+  the cell out entirely.
 
 ## 4. Runtime engineering
 
