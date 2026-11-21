@@ -37,3 +37,6 @@ CHANGELOG.md
 # What Claude Code writes beside a mod it loads (types for the editor, and a tsconfig extending them)
 plugins/kaggle-grandmaster/.claude-plugin/types/
 plugins/kaggle-grandmaster/tsconfig.json
+
+# local secrets (SSH keys, tokens): never committed
+.env
