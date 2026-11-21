@@ -48,6 +48,10 @@ This repo is a Claude Code marketplace (`.claude-plugin/marketplace.json`) conta
 - A `kg-*` command's `allowed-tools` pre-approves only the kgkit and Kaggle CLI subcommands it runs, one rule per
   kgkit subcommand: `Bash(kgkit <sub> *)`. Never a blanket `kgkit *`, and never a command that submits, pushes or publishes
   (`tests/test_skills.py` enforces this).
+- Agents have no Skill tool and inherit no skills: an agent preloads the one or two skills it relies on (`skills:`,
+  bare names: Claude Code resolves them in the agent's own plugin) and reads any other one by its path
+  (`${CLAUDE_PLUGIN_ROOT}/skills/<name>/SKILL.md`). `model: sonnet` for reading, summarising and assembling agents,
+  `inherit` for those that judge, write training code or can let a leak through. `tests/test_agents.py` holds the map.
 - When a new skill is added, add it to the `no-plugin-skill` grader of every `negative` eval case
   (`tests/test_evals.py` enforces this). If the model should load it from a plain-language prompt (a knowledge
   skill, or a command like `kg-adopt`), add a route in `hooks/prompt_router.py`. For a slash-only command, add a

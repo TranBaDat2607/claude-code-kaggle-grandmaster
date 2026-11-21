@@ -2,7 +2,10 @@
 name: competition-analyst
 description: Researches a Kaggle competition end to end — overview, evaluation metric, data description, rules, timeline, leaderboard, top public notebooks and discussion threads — and writes reports/recon.md plus a filled .kaggle-gm/competition.json. Use at the start of a competition or when joining one late.
 tools: Bash, Read, Write, Edit, Glob, Grep, WebFetch, WebSearch
-model: inherit
+model: sonnet
+skills:
+  - competition-recon
+  - competition-strategy
 color: blue
 ---
 

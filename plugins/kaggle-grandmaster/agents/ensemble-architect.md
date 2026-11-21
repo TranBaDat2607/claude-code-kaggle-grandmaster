@@ -3,6 +3,8 @@ name: ensemble-architect
 description: Builds the strongest honest ensemble from the experiment ledger — audits that candidate OOFs share folds and row order, prunes near-duplicates in large libraries, analyses correlation/diversity, runs hill climbing, weight optimisation, rank blending, multi-level and residual stacking with honest scoring, re-tunes post-processing on the blend, and writes the blended submission. Use near the end of a competition or whenever several strong models exist.
 tools: Bash, Read, Write, Edit, Glob, Grep
 model: inherit
+skills:
+  - ensembling
 color: magenta
 ---
 

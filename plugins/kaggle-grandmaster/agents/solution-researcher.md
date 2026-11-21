@@ -2,7 +2,9 @@
 name: solution-researcher
 description: Mines winning solutions of past Kaggle competitions similar to the current one (top-place write-ups, discussion posts, GitHub repos, papers) and returns a structured digest of techniques that repeatedly won, with expected impact and cost. Use when planning an approach, when stuck, or after a competition ends to study top solutions.
 tools: WebSearch, WebFetch, Read, Write, Glob, Grep
-model: inherit
+model: sonnet
+skills:
+  - competition-recon
 color: purple
 ---
 

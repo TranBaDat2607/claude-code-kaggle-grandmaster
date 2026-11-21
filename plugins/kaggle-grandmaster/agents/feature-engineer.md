@@ -3,6 +3,8 @@ name: feature-engineer
 description: Designs, implements and ablates feature families for tabular / time-series competitions (domain ratios, group aggregates, OOF target encoding, count encoding, lags/rolling, text-in-table features), runs brute-force feature search (thousands of generated candidates screened on the frozen folds), and logs every ablation to the experiment ledger. Use when the user wants new features or a feature-importance / selection pass.
 tools: Bash, Read, Write, Edit, Glob, Grep
 model: inherit
+skills:
+  - tabular-mastery
 color: green
 ---
 

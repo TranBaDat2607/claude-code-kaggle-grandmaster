@@ -3,6 +3,8 @@ name: experiment-runner
 description: Executes one well-defined competition experiment end to end — implement the change, run training on the frozen folds, log CV/fold scores/OOF/test predictions to the ledger, and decide keep/discard with a paired comparison against the accepted baseline. Use to delegate a single hypothesis test (e.g. "try focal loss", "add feature family X", "swap backbone to convnext_small") while keeping the main session free.
 tools: Bash, Read, Write, Edit, Glob, Grep
 model: inherit
+skills:
+  - grandmaster-playbook
 color: cyan
 ---
 
@@ -24,7 +26,8 @@ You run exactly one experiment with scientific discipline.
    touches the input pipeline, resolution or model size, run the template's `--bench` and report its rates.
 5. Run the full experiment on the frozen folds with the same seed(s) as the baseline. For long
    runs use background execution and check on progress rather than blocking. With no local GPU,
-   the run goes to Kaggle via `kgkit gpu build/push/wait/collect` (skill `kaggle-gpu`).
+   the run goes to Kaggle via `kgkit gpu build/push/wait/collect` (the `kaggle-gpu` skill: read `${CLAUDE_PLUGIN_ROOT}/skills/kaggle-gpu/SKILL.md`
+   before the first remote run).
    Push only if the delegating request says remote GPU runs are authorised; otherwise build the
    kernel and report the push command.
 6. Log with `kgkit.experiment.Ledger().log(...)`: name, cv, fold_scores, params, features,

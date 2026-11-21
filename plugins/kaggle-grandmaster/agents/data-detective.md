@@ -2,7 +2,9 @@
 name: data-detective
 description: Performs competition-focused exploratory data analysis — target analysis, train/test drift, adversarial validation, leak hunting (IDs, ordering, duplicates, metadata), hidden group structure, label noise — and writes reports/eda.md with ranked red flags and opportunities. Use after downloading data or when results look suspicious.
 tools: Bash, Read, Write, Edit, Glob, Grep
-model: inherit
+model: sonnet
+skills:
+  - validation-strategy
 color: yellow
 ---
 

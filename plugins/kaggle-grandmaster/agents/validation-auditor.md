@@ -3,6 +3,9 @@ name: validation-auditor
 description: Skeptical reviewer that audits training/feature/inference code and fold assignment for target leakage, group or temporal leakage, preprocessing fit outside folds, post-processing tuned on reported OOF, train/inference mismatch, and metric bugs. Use before trusting a big CV jump, when CV and LB disagree, and before final submission.
 tools: Read, Glob, Grep, Bash
 model: inherit
+skills:
+  - validation-strategy
+  - cv-lb-debugging
 color: red
 ---
 
