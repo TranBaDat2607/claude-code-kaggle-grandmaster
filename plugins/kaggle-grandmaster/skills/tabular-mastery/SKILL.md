@@ -14,8 +14,10 @@ Playground data) a well-tuned MLP/TabM is competitive and strongly boosts the bl
 - LightGBM with sensible defaults on raw features (categoricals as `category` dtype),
   frozen folds, early stopping, logged to the ledger, one submission.
   Template: `templates/train_gbdt.py` (handles LGBM/XGB/CatBoost, OOF, test preds, ledger). It early-stops on a
-  10% slice of each fold's training part, never the scored fold (`--refit` then refits on all of it), and prints
-  the per-fold train score next to the CV: the train/validation gap.
+  10% slice of each fold's training part, never the scored fold, then refits on the whole training part with the
+  tree count scaled up (`--no-refit` for quick screens). The slice keeps whole the groups the folds are grouped by
+  (`group_col`, else the group `kgkit folds` recorded) and is the latest rows with `time_col`, so stopping is judged
+  like the folds are. It prints the per-fold train score next to the CV: the train/validation gap.
 - Then CatBoost and XGBoost on the same features — they diverge in categorical handling and
   tree growth, giving free ensemble diversity.
 - **Diverse baselines on day 1, not at the end**: the same template runs `--model linear`, `knn`,
