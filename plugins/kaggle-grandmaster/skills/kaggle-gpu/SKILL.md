@@ -6,7 +6,7 @@ description: "Training on Kaggle's free GPUs and TPUs under their weekly quotas 
 # Training on Kaggle GPUs
 
 Two things run out: GPU-hours (a weekly quota per account) and wall time (the days to the deadline, at ~12 h per
-session). Find out which one binds before you plan (section 4, `gpu plan` prints it):
+session). Find out which one binds before you plan (`gpu plan` prints it):
 - **Quota-bound** (the usual case with one account): optimise score per GPU-hour.
 - **Time-bound**: the quota across *all* registered accounts is more than the planned runs can spend before the
   reset or the deadline, or one experiment fills most of a session and only a few decide-then-run cycles remain.
@@ -14,6 +14,16 @@ session). Find out which one binds before you plan (section 4, `gpu plan` prints
   you don't spend are lost anyway.
 
 Re-check the regime whenever an account is added, the quota resets, or the deadline gets close.
+
+## Guardrails
+
+- `kgkit gpu push` (and raw `kaggle kernels push` with GPU or TPU) spends the user's quota and is
+  outward-facing. Confirm with the user unless they authorised remote runs for this task.
+- Never print credentials. The username comes from `kgkit whoami` (`KAGGLE_USERNAME`, the
+  `username` field of kaggle.json, or `kaggle config view` for token logins). It never reads the key.
+- Deleting a kernel (the only way to drop a queued TPU job) destroys every version and output: the user
+  decides.
+- Keep kernels private (the default) unless the competition rules require publishing.
 
 ## 1. Facts to work from (verify live, they change)
 
@@ -74,95 +84,12 @@ Re-check the regime whenever an account is added, the quota resets, or the deadl
 
 ## 2. The pipeline (`kgkit gpu ...`)
 
-```
-quota / plan        ->  how many hours (GPU and TPU), until when, what to reserve, what holds a reservation
-build               ->  .kaggle-gm/build/<name>-train/ (ignored): runner + your src/ + kgkit + competition.json + data/folds.csv
-                        (packed column by column: 700k rows of id,fold take ~0.3 MB of the script, not 2.4 MB)
-push                ->  input-kernel and busy-session checks, quota check, -t cap, --accelerator, run log
-                        (.kaggle-gm/gpu_runs.jsonl). Also any other kernel folder: `gpu push <dir> --hours H`
-                        reads kernel-metadata.json (notebooks, inference and holdout-diagnostic kernels)
-wait                ->  polls every 90 s; on cancelled/error prints the log tail, says whether the --hours cap
-                        stopped it, and lists the files the session saved (still downloadable with
-                        `gpu collect`)   (run it in the background)
-status              ->  re-checks every run still marked in flight; finished ones free their hours
-collect             ->  outputs (no weights by default) -> ledger import, artefacts, GPU/TPU-hour accounting,
-                        diagnostics (idle GPU, input-bound, deadline hit, pruned). For a kernel `gpu build` did
-                        not make (no kg_run.json): Kaggle's status is the outcome, the files go to
-                        data/ext/kout-<slug>/, the session's hours are accounted, the ledger is yours
-                        (`ledger import` / `ledger add`)
-release <kernel>    ->  drop a reservation by hand (a run that was deleted or never started)
-cancel <kernel>     ->  how to stop it: running = website "Stop session"; queued = only `kaggle kernels
-                        delete` frees the slot (irreversible: ask the user)
-repush <kernel>     ->  delete a stuck kernel and push its folder again; prints the plan, --yes does it
-                        (ask the user first). A deleted kernel's runs stay in the log as deleted
-log                 ->  every remote run with its cost and result
-```
-Raw `kaggle kernels push` calls are logged by the plugin's hook too (every push in a compound command,
-each from the folder its `cd` steps lead to), and a re-push of the same kernel replaces its older
-reservation. After a `cd` it cannot trace (a variable, a loop) the hook reports the push unlogged: give
-`-p` an absolute path there. A push in a command that runs in the background (say, a loop that retries until
-a session slot frees up) is logged as pending: its whole cap stays reserved until Kaggle lists a version of
-the kernel run after it, which `gpu status` and `gpu wait <kernel>` check (`gpu release <kernel>` if the
-push never went through). Your username (for `"id"` in kernel-metadata.json): `kgkit whoami`.
-
-The runner links the attached inputs into `./data` and points `./artifacts` and `./subs` into
-`/kaggle/working`. Your training command then runs unchanged, with the same relative paths and the same frozen
-folds (so `folds_hash` matches the local ledger). It runs one process per (job, fold), one per GPU,
-sets `KG_DEADLINE` so the templates checkpoint before the session ends, and assembles each finished job once.
-
-The frozen split reaches the session cell for cell. `build` packs each column of `data/folds.csv` in the cheapest
-exact form: an integer range costs nothing, the folds take a byte per row, other columns go as text, and a big text
-column (hash-like ids) is read from `data/train.csv` in the session when that file has it row for row. The runner
-writes the file back and checks it against yours; if they differ (a `data/train.csv` that is not the competition's),
-it stops before anything runs. If the split is too big even packed (a few million rows), put `data/folds.csv` in a
-private dataset (ask the user first) and build with `--split-from <owner>/<slug>`: the run links it from there,
-checked byte for byte.
-
-```bash
-# full 5-fold run of a promoted idea: folds 0-4 spread over both T4s
-kgkit gpu build --name cnx384 --hours 7 --dataset me/knee-png-512 \
-    --cmd "python src/train_image.py --name cnx384 --img-size 384 --folds {fold}"
-kgkit gpu push .kaggle-gm/build/cnx384-train # outward-facing: confirm with the user first
-kgkit gpu wait me/cnx384-train --collect     # background
-```
-
-Custom scripts work if they follow the contract: accept `--folds <k>` and `--assemble`, write
-`artifacts/<name>/fold<k>_oof.npy` (+ `_idx.npy`, `_test.npy`), and use `kgkit.budget.TrainBudget`
-for deadline, resume and pruning. The image and transformer templates already do all of this.
-
-A kernel of your own (`gpu push <dir> --hours H`) has no runner and no deadline: Kaggle kills it at H h (see
-section 1). So size H from a measured runtime with a margin, and write the kernel so that a kill costs one phase,
-not the run: save the model to `/kaggle/working` right after training, before a long inference or scoring phase;
-write predictions in chunks (or per fold) as they are made, so a restart can skip what exists; and print progress
-with the elapsed time and an ETA, so the log tail `gpu wait` prints shows where the kill came. When a cap does stop
-it, `gpu wait` says so and lists the files saved before the kill.
-
-It has no pruning either, unless its loop asks for it. Attach or embed the control's `curve_fold<k>.json` and call
-`TrainBudget(out_dir, fold, epochs, greater_is_better, baseline=<that folder>, margin=<fold std>, mode="last")` each
-epoch (`end_epoch` returns `"prune"`), or `kgkit.budget.update_curve` + `should_stop(curve, control, margin=...)` on the
-curve file. Copy `curve_fold<k>.json` back when a run resumes in a new session, so the rule sees the whole curve. A
-driver that echoes the training log should echo every key line since its last echo (evaluations, epoch done,
-scored), not only the latest line: the decline of #119 was in the lines between two echoes.
-
-Where the inputs go (match your local layout, so the command finds them):
-- `--input-layout flat` (the default): competition data, `--dataset` and `--kernel` contents side by side in `data/`.
-  A name two inputs share (`oof_predictions.parquet`, `submission.csv`, `README.md`) is linked from the first
-  only. The run log warns about each one, and `collect` lists them.
-- `--input-layout nested`: each input in its own folder, `data/ext/<slug>/` (datasets) and
-  `data/ext/kout-<slug>/` (kernel outputs). Competition data stays in `data/`. Use it whenever several inputs
-  can share file names, e.g. a stack over public OOF libraries.
-- `--dataset <owner>/<slug>=data/<folder>` (or `--kernel`) puts one input where your scripts expect it, e.g.
-  the folder you gave `kgkit datasets pull`. `=data` puts it beside the competition data.
-
-An input Kaggle did not mount (not attached, or a kernel still running at push time) is a warning in the log
-and a `collect` finding, and so is a missing `--resume-from` kernel, whose folds would be trained again.
-
-```bash
-# CPU stack over many OOF libraries (no GPU quota): every library keeps its own files
-kgkit gpu build --name stack --hours 2 --accelerator none --input-layout nested \
-    --dataset megayak/s6e10-oof mitudru/s6e10-oof=data/ext/mitudru-oof --kernel thisray/s6e10-stack \
-    --cmd "python src/stack.py"
-```
+`quota` / `plan` (hours, regime, reservations) -> `build` (a kernel of your `src/`, kgkit, competition.json and the
+frozen folds) -> `push` (quota, input and session checks, `-t` cap, run log) -> `wait` (in the background) ->
+`collect` (ledger import, GPU-hour accounting, diagnosis); `status`, `release`, `repush`, `cancel`, `log` around them.
+Your command runs unchanged on Kaggle with the same relative paths and frozen folds, one process per (job, fold), one
+per GPU. Before the first `gpu build`, read [references/pipeline.md](references/pipeline.md): the script contract,
+input layouts, a kernel of your own (caps, pruning, log echoes), resuming.
 
 ## 3. Grandmaster protocol for the most leaderboard per GPU-hour
 
@@ -186,7 +113,7 @@ kgkit gpu build --name stack --hours 2 --accelerator none --input-layout nested 
      accepted as an alias of `baseline`.)
    - **Write the stop rule next to the promote rule before the push**, e.g. "stop: pruned against the control at
      margin 0.002 (last mode); promote: z >= 2 on fold 0". A kernel of your own gets the same rule from
-     `kgkit.budget` (section 2): `gpu push` warns when a kernel capped above 6 h has none.
+     `kgkit.budget` ([references/pipeline.md](references/pipeline.md)): `gpu push` warns when a kernel capped above 6 h has none.
    - Promote on a paired test of that fold's OOF against the control:
      `kgkit ledger compare artifacts/<idea> artifacts/<control> --truth data/train.csv:<target>
      --folds data/folds.csv:fold --fold 0` (`--groups` for patients/sessions). z ≥ 2 → promote;
@@ -214,92 +141,15 @@ kgkit gpu build --name stack --hours 2 --accelerator none --input-layout nested 
    of the current best (always useful as a baseline OOF and ensemble member). In later weeks, top up
    the last hours with queued, already-validated work (extra folds/seeds of ensemble members, the
    final-resolution variant, pseudo-label rounds). Never start untested exploration just to burn hours.
-10. **Time-bound: one model on both T4s.** When a run trains for ~6 h or more on one T4 and wall time binds,
-    screen each idea as one model on both GPUs (DDP, `torchrun --nproc_per_node 2` in a `--cmd` without `{fold}`).
-    It costs the same GPU-hours as two one-GPU runs side by side, but the result comes 1.6-1.9x sooner (~6-7 h
-    instead of ~12 h), so about twice as many ideas get screened before the deadline.
-    - Keep the effective batch (micro-batch x accumulation x GPUs) and the schedule of the one-GPU recipe: halve
-      the accumulation (or, without accumulation, the per-GPU batch), not the learning rate, so the screen stays
-      comparable with earlier runs.
-    - Compare against a one-copy control run the same way, never against an average of two copies (averaging
-      removes seed noise the screen still has).
-    - Spend the extra copies or seeds (two one-GPU runs in one session, as before) only on promoted ideas.
-    - Put the trade-off to the user when you plan recurring runs, with the numbers: "two copies per session:
-      steadier result, ~12 h" vs "one copy on both GPUs: ~6-7 h, noisier, twice the ideas before the deadline".
-    - The training loop must be DDP-safe (checklist in `compute-efficiency`,
-      [training-loop.md](../compute-efficiency/references/training-loop.md#ddp-checklist-for-your-own-loop)).
-      `TrainBudget` agrees across ranks by itself; save, log and write OOFs on rank 0 only (`tb.is_main`).
-      The plugin's image and transformer templates run one process per fold, not DDP.
+10. **Time-bound: one model on both T4s (DDP).** When wall time binds, screen each idea as one model on both
+    GPUs (1.6-1.9x sooner, same GPU-hours): [references/plan-and-diagnose.md](references/plan-and-diagnose.md#time-bound-ddp).
 
-## 4. Budgeting until the deadline (`kgkit gpu plan`)
+## 4. Budget, diagnose, TPU
 
-- Total ≈ hours left now + resets before the deadline × weekly quota. Count the resets from
-  `refreshAt` in 7-day steps; one that lands before the deadline counts, even on the last day.
-  `gpu plan` does this arithmetic.
-- Reserve the **final week's quota** for final-model training plus inference kernels (code competitions
-  run GPU inference notebooks too), with 1-2 sessions of slack for failures.
-- Exploration budget = the rest. With measured cost per fold c, a screen costs ≈ c/2 quota-hours
-  (2 per session) and a full K-fold promotion ≈ c·K/2. Plan about 4-6 screens per promotion.
-- Re-plan after every `collect`. Costs are measured, not guessed.
-- **Which regime** (section 1): count the hours of every registered account, not only the active one
-  (`gpu quota --all`). It is **time-bound** when those hours exceed what the planned runs will spend before the reset
-  (they would expire), or when one run takes >= ~6 h on one T4 and the days left allow only a handful of such
-  cycles. `gpu plan` prints the regime from every account's quota (read live; `--cached` uses the last reading), the
-  measured run lengths and the deadline, and names any account whose quota it could not read.
-
-## 5. When a run disappoints
-
-`collect` prints the diagnosis. Act on it:
-
-| Finding | Fix |
-|---|---|
-| second T4 idle | ≥ 2 tasks per session (2 folds, or `--extra-job`), or DDP |
-| one result per ~12 h session, deadline close | time-bound: DDP for screens (section 3, item 10) |
-| GPU util < 60 % | input-bound: pre-resize, uint8, GPU augmentation, fewer CPU transforms, `persistent_workers`. Confirm with the script's `--bench` before the next push |
-| too short to diagnose | a smoke/dev run (< 20 min) is mostly start-up; judge throughput on a longer run |
-| deadline hit | `--resume-from`; next time raise `--hours` or lower epochs/res |
-| stopped by the `--hours` cap (`cancelled`, log ends at the cap) | `gpu collect <kernel>` for what it saved; re-push with a margin (~1.3-1.5x the runtime) and save the model before the long phase. Same cap again stops it at the same point |
-| pruned | discard or change the idea materially; don't re-run it unchanged |
-| fold failed | read the log tail; reproduce with `--smoke` locally before re-pushing |
-
-Making each quota hour do more work (measuring input-bound vs compute-bound, AMP, channels_last, compile, data
-loaders, fold-parallel vs DDP, GBDTs and RAPIDS on the GPU, inference speed) is the `compute-efficiency` skill. With no
-local GPU, a short bench session (`gpu build --name bench --cmd "python src/train_image.py --bench" --hours 0.3`)
-shows whether a script is input-bound for minutes of quota; `gpu collect` adds its record to `reports/bench.jsonl`
-with the speed-up against the previous bench.
-
-## 6. TPU v5e-8 when the GPU quota is gone
-
-The TPU quota (20 h/week) is separate and expires at the same reset, so it is free hours once the GPU
-quota is spent. Measured on a bandwidth-bound ConvNeXt-small (Oct 2026): one v5e chip ≈ **5 T4s** per
-step, bf16 losses matching the T4 run to 3-4 decimals. The catch is the queue:
-
-- Batch TPU jobs wait **10-24 h** (12 h 49 min measured) before they start, plus ~20 min of start-up. One
-  batch TPU session per account; a queued job holds that slot for its whole wait.
-- Expected finish = now + ~13 h queue + 20 min + (T4 time / 5). Use the TPU when that beats the GPU
-  finish: for training longer than a GPU session, or when the GPU quota is gone. For runs under ~12 h
-  with GPU hours left, the GPU usually wins on wall time. Queue about half a day before you need it,
-  and keep a GPU fallback scheduled for after the reset.
-- `machine_shape`: ask for `TpuV5E8`. `TpuV5E1`/`TpuV5E4`/`TpuV6E1` are silently stored as `TpuV5E8`;
-  `TpuV6E8` (often no capacity) and `Tpu1VmV38` (v3-8) are separate pools, queued too. `gpu build` targets
-  v5e-8 and v6e-8.
-- A queued job cannot be cancelled through the API (it has no session id yet). The only way to free the
-  slot is `kaggle kernels delete` (irreversible; ask the user), then a re-push, which starts the queue
-  again from zero. So **validate before queueing**: run the XLA path locally on PJRT CPU, then the same
-  code on a ~5 min 2×T4 dev run. A bug found after the queue costs a whole queue cycle.
-- `kgkit gpu build --accelerator TpuV5E8 --hours <= 9` runs one process per chip for `{fold}` tasks (PJRT
-  `TPU_VISIBLE_CHIPS=<k>` with single-chip process bounds), so each fold/seed keeps the per-process batch
-  it had on one GPU. A command without `{fold}` gets the whole TPU (`PJRT_DEVICE=TPU`). Hours are
-  accounted as TPU-hours, not GPU-hours.
-- Porting a CUDA trainer to torch_xla (bf16, static shapes, `mark_step`, `xm.save`, timm checkpointing,
-  resuming CUDA checkpoints): [references/tpu-xla.md](references/tpu-xla.md).
-
-## Guardrails
-
-- `kgkit gpu push` (and raw `kaggle kernels push` with GPU or TPU) spends the user's quota and is
-  outward-facing. Confirm with the user unless they authorised remote runs for this task.
-- Never print credentials. The username comes from `kgkit whoami` (`KAGGLE_USERNAME`, the
-  `username` field of kaggle.json, or `kaggle config view` for token logins). It never reads the key.
-- Deleting a kernel (the only way to drop a queued TPU job) destroys every version and output: the user
-  decides.
-- Keep kernels private (the default) unless the competition rules require publishing.
+- **Budget to the deadline:** `gpu plan` (hours left, resets, final-week reserve, measured costs, the regime). Plan
+  ~4-6 screens per promotion; re-plan after every `collect`.
+  [references/plan-and-diagnose.md](references/plan-and-diagnose.md).
+- **A run that disappoints:** act on each `collect` finding (idle T4, input-bound, deadline, cap, pruned):
+  [references/plan-and-diagnose.md](references/plan-and-diagnose.md#when-a-run-disappoints). Speed: `compute-efficiency`.
+- **TPU v5e-8 when the GPU quota is gone:** a separate 20 h/week quota, ~5 T4s per chip, but a 10-24 h queue and a
+  torch_xla port validated before queueing: [references/tpu-xla.md](references/tpu-xla.md).

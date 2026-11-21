@@ -87,7 +87,7 @@ sure the kernel saves its model before a long inference phase. If a cap stops it
 files it saved; a re-push with the same cap warns.
 
 ## TPU
-When the GPU quota is gone (or a run is longer than a GPU session), follow the skill's TPU section:
+When the GPU quota is gone (or a run is longer than a GPU session), follow the skill's TPU reference (`references/tpu-xla.md`):
 validate the XLA port off-quota, then `gpu build --accelerator TpuV5E8 --hours <= 9`, and queue it about
 half a day before it is needed. A queued TPU job can only be removed by deleting the kernel: ask first.
 

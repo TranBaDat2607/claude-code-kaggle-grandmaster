@@ -29,7 +29,6 @@ from __future__ import annotations
 import json
 import re
 import sys
-import tempfile
 from pathlib import Path
 
 try:
@@ -204,8 +203,7 @@ def route(prompt: str, in_workspace: bool, task: str = "", ended: bool = False) 
 
 
 def _seen_file(payload: dict) -> Path | None:
-    sid = re.sub(r"[^A-Za-z0-9_-]", "", str(payload.get("session_id") or ""))[:64]
-    return Path(tempfile.gettempdir()) / "kaggle-gm-router" / f"{sid}.json" if sid else None
+    return C.router_seen_file(payload.get("session_id"))
 
 
 def _seen(path: Path | None) -> set[str]:

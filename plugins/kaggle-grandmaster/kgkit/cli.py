@@ -27,6 +27,7 @@ Commands
   whoami      your Kaggle username (KAGGLE_USERNAME, kaggle.json or `kaggle config view`; never the key)
   update-check  is a newer kaggle-grandmaster released, and the command that installs it (/kg-update)
   permissions   the allow rules for kgkit's bookkeeping calls; --write adds them to .claude/settings.local.json
+  grind         a /kg-grind loop's state: start (--resume), status, note --started, stop
   datasets    pull  — download a dataset, file by file when the whole-dataset download returns 404
   gpu         quota | plan | build | push | status | wait | collect | repush | release | cancel | log  — Kaggle GPUs/TPUs
 """
@@ -481,6 +482,44 @@ def cmd_final(a):
               "`python -m kgkit ledger predictiveness` measures which signal predicted the private leaderboard")
         return
     print("\n".join(FN.steps(st)))
+
+
+def cmd_grind(a):
+    from . import grind as GR
+    from . import state as S
+
+    root = S.find_root()
+    if root is None:
+        raise SystemExit("not inside a kaggle-grandmaster workspace (no .kaggle-gm/)")
+    try:
+        if a.action == "start":
+            b = GR.parse_budget(a.budget) if a.budget else {}
+            GR.start(root, a.session, hours=b.get("hours"), experiments=b.get("experiments"), focus=a.focus,
+                     resume=a.resume, takeover=a.takeover)
+        elif a.action == "note":
+            if not a.started:
+                raise SystemExit("grind note needs --started <name> --cmd \"<command>\"")
+            GR.note_started(root, a.session, a.started, a.cmd)
+            print(f"in flight: {a.started}")
+            return
+        elif a.action == "stop":
+            g = GR.stop(root, a.session, a.reason)
+            print("no grind in progress" if g is None else
+                  f"grind {g['id']} stopped: {g['experiments_done']} experiments, {g['active_hours']:.2f} h active "
+                  "(kept in .kaggle-gm/grinds.jsonl)")
+            return
+    except GR.GrindError as e:
+        raise SystemExit(str(e))
+    if a.kaggle:
+        from . import gpu as G
+
+        G.refresh_runs(root)
+    s = GR.status(root, a.session)
+    if s is None:
+        print("no grind in progress (`kgkit grind start --budget 4h|10 --session ${CLAUDE_SESSION_ID}`)")
+        return
+    s["runs"] = GR.reconcile(root, s)
+    print(GR.format_status(s))
 
 
 def cmd_permissions(a):
@@ -2454,6 +2493,20 @@ def build_parser() -> argparse.ArgumentParser:
 
     s = sub.add_parser("whoami", help="your Kaggle username (never the key or token)")
     s.set_defaults(fn=cmd_whoami)
+
+    s = sub.add_parser("grind", help="a /kg-grind loop's budget, progress and runs, kept in .kaggle-gm/grind.json so "
+                                     "a compacted or new session continues it (#125)")
+    s.add_argument("action", choices=["start", "status", "note", "stop"])
+    s.add_argument("--session", default="", help="the Claude Code session that drives it (${CLAUDE_SESSION_ID})")
+    s.add_argument("--budget", help="start: 4h, 90m, 10 (experiments) or 4h,10")
+    s.add_argument("--focus", default="")
+    s.add_argument("--resume", action="store_true", help="start: continue the grind in progress from this session")
+    s.add_argument("--takeover", action="store_true", help="start --resume: even if another session drove it lately")
+    s.add_argument("--started", metavar="NAME", help="note: the run's name (its ledger / artifacts name)")
+    s.add_argument("--cmd", default="", help="note --started: the command that runs it")
+    s.add_argument("--kaggle", action="store_true", help="status: ask Kaggle for the runs it still has in flight")
+    s.add_argument("--reason", default="", help="stop: why it ended")
+    s.set_defaults(fn=cmd_grind)
 
     s = sub.add_parser("permissions", help="allow rules for kgkit's local bookkeeping and read-only calls, so they "
                                            "stop asking after the user's next message and in subagents (#123)")

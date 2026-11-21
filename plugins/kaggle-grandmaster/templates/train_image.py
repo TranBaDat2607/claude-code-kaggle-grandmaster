@@ -36,9 +36,11 @@ own peak for two evaluations (it ties early, then declines); --select best judge
 from __future__ import annotations
 
 import argparse
+import json
 import copy
 import math
 import os
+import socket
 import platform
 import sys
 import time
@@ -94,6 +96,8 @@ CONFIG = dict(
                                 # | holdout: best epoch on a slice held out of the training part (--es-holdout)
     es_holdout=0.0,             # holdout: share of each fold's training part held out to choose the epoch (0.05)
     es_patience=2,              # holdout: stop after this many epochs with no gain on that slice (0: never early)
+    checkpoint_every=0,         # N > 0: a resume checkpoint every N epochs, so a killed fold resumes there
+                                # (0: only before a session deadline; #125)
     group_col=None,             # holdout: column whose groups (patients, studies) stay whole in the held-out slice
     seed=42,
     notes="",
@@ -346,10 +350,13 @@ def main():
                          "stop early: select=holdout, an honest OOF")
     ap.add_argument("--es-patience", type=int, metavar="N",
                     help="select=holdout: stop after N epochs without a gain on the held-out slice (0: never early)")
+    ap.add_argument("--checkpoint-every", type=int, metavar="N",
+                    help="save a resume checkpoint every N epochs (default 0: off), so a fold killed with its "
+                         "session resumes mid-schedule when the same command runs again")
     a = ap.parse_args()
     cfg = dict(CONFIG)
     for k in ("name", "backbone", "img_size", "epochs", "batch_size", "lr", "notes", "select", "es_holdout",
-              "es_patience"):
+              "es_patience", "checkpoint_every"):
         if getattr(a, k) is not None:
             cfg[k] = getattr(a, k)
     if a.no_pretrained:
@@ -411,6 +418,21 @@ def main():
     crit = loss_fn(task, cfg["label_smoothing"])
     t0 = time.time()
     stopped = None  # "timeout" | "pruned": the session deadline or the baseline curve ended this run early
+    # who runs this, for a later session (#125, `kgkit grind status`): is the process alive, which folds are left
+    run_file = None if (a.smoke or a.bench or a.assemble) else out_dir / f"run_{os.getpid()}.json"
+    run_info = {"pid": os.getpid(), "host": socket.gethostname(), "cmd": " ".join(["python", *sys.argv]),
+                "started": time.time(), "heartbeat": time.time(), "folds": [int(f) for f in run_folds],
+                "all_folds": [int(f) for f in all_folds], "finished": False}
+
+    def beat(**info):
+        if run_file is not None:
+            run_info.update(heartbeat=time.time(), **info)
+            try:
+                run_file.write_text(json.dumps(run_info), encoding="utf-8")
+            except OSError:
+                pass
+
+    beat()
     if cfg["select"] == "best":
         print("note: --select best keeps the epoch that scores best on the fold it predicts: the OOF is optimistic",
               flush=True)
@@ -481,6 +503,12 @@ def main():
             kept, kept_pred = ck.get("kept", ck["best"]), ck.get("kept_pred", ck["best_pred"])
             es_best, es_bad = ck.get("es_best"), ck.get("es_bad", 0)
             print(f"fold {fold}: resumed at epoch {start_epoch} (best {best:.5f})", flush=True)
+        def save_resume(epoch):  # what a resumed fold needs: the session deadline and --checkpoint-every
+            torch.save({"model": model.state_dict(), "ema": ema.module.state_dict(), "opt": opt.state_dict(),
+                    "sched": sched.state_dict(), "scaler": scaler.state_dict(), "epoch": epoch + 1, "best": best,
+                    "best_pred": kept_pred, "kept": kept, "kept_pred": kept_pred, "es_best": es_best,
+                    "es_bad": es_bad}, resume)
+
         for epoch in range(start_epoch, cfg["epochs"]):
             budget.start_epoch()
             model.train()
@@ -504,10 +532,7 @@ def main():
                 torch.save(ema.module.state_dict(), out_dir / f"fold{fold}.pt")
             action = "continue" if a.smoke else budget.end_epoch(epoch, score)
             if action == "timeout":
-                torch.save({"model": model.state_dict(), "ema": ema.module.state_dict(), "opt": opt.state_dict(),
-                            "sched": sched.state_dict(), "scaler": scaler.state_dict(), "epoch": epoch + 1,
-                            "best": best, "best_pred": kept_pred, "kept": kept, "kept_pred": kept_pred,
-                            "es_best": es_best, "es_bad": es_bad}, resume)
+                save_resume(epoch)
                 budget.write_status("timeout", next_epoch=epoch + 1)
                 print(f"fold {fold}: session deadline near - checkpointed after epoch {epoch}; resume later", flush=True)
             elif action == "prune":
@@ -516,6 +541,10 @@ def main():
             if action != "continue":
                 stopped = "timeout" if action == "timeout" else "pruned"
                 break
+            beat(fold=int(fold), epoch=int(epoch))
+            if (cfg["checkpoint_every"] and not a.smoke and (epoch + 1) % cfg["checkpoint_every"] == 0
+                    and epoch + 1 < cfg["epochs"]):
+                save_resume(epoch)  # killed after this, the same command resumes here
             if holdout and cfg["es_patience"] and es_bad >= cfg["es_patience"] and epoch + 1 < cfg["epochs"]:
                 early = epoch
                 print(f"fold {fold}: early stop after epoch {epoch} - no gain on the held-out slice for {es_bad} "
@@ -539,6 +568,7 @@ def main():
             resume.unlink(missing_ok=True)
         print(f"fold {fold} {cfg['select']} {metric.name} {kept:.5f} (best epoch {best:.5f})", flush=True)
 
+    beat(finished=True, outcome=stopped or "done")
     if a.smoke:
         print("smoke run OK (not logged)")
         return

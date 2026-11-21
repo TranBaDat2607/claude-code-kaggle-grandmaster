@@ -1,13 +1,14 @@
 ---
 name: kg-grind
 description: Autonomous improvement loop — repeatedly pick the highest-value idea from the backlog, run it as a disciplined experiment against the accepted baseline, decide with a paired comparison, update the backlog, and re-check the CV for overfitting, within a time or experiment budget.
-argument-hint: "[budget, e.g. 4h or 10 experiments] [focus area]"
+argument-hint: "[resume | budget, e.g. 4h or 10 experiments] [focus area]"
 allowed-tools:
   - Read
   - Glob
   - Grep
   - Agent
   - 'Bash(kgkit backlog *)'
+  - 'Bash(kgkit grind *)'
   - 'Bash(kgkit kernels pull *)'
   - 'Bash(kgkit ledger *)'
   - 'Bash(kgkit status *)'
@@ -20,13 +21,23 @@ Run kgkit with the Bash tool as `kgkit <command>`: the plugin puts it on PATH, a
 and this command pre-approves the kgkit calls it makes. Older text that says `python -m kgkit` means the same
 command. Submitting, pushing or publishing still asks.
 
-Budget / focus: `$ARGUMENTS` (default: 6 experiments, no specific focus).
+Budget / focus: `$ARGUMENTS` (default: 6 experiments, no specific focus; `resume` continues the grind in progress).
 
 If the target is a public rank or score ("public top 10", "LB 0.965"), say once that a gain fitted to the public LB
 has zero expected private value. Grind toward the honest equivalent instead: a validation gain over the accepted
 baseline beyond the paired noise, which `kgkit status` reports. The loop never fits or probes the public LB.
 
 ## Before the loop
+The grind's budget, progress and the runs it started live in `.kaggle-gm/grind.json` (`kgkit grind`), not in this
+conversation: a compaction or a new session continues it from there.
+- **`resume`**: `kgkit grind start --resume --session ${CLAUDE_SESSION_ID}`, then `kgkit grind status --session
+  ${CLAUDE_SESSION_ID} --kaggle`. Act on every run it lists before picking new ideas: wait for a running one, re-run
+  a stopped one with the folds it names (a fold with a checkpoint resumes mid-schedule), collect a finished Kaggle
+  run. It refuses while another session drove the grind in the last 30 min (`--takeover` only if the user says that
+  session is gone).
+- **A new grind**: `kgkit grind start --session ${CLAUDE_SESSION_ID} --budget <4h | 10 | 4h,10> [--focus "<area>"]`.
+  It refuses while a grind is in progress: offer to resume it, or to end it with `kgkit grind stop`.
+
 Ask everything the budget needs in one message, before the first experiment: whether remote GPU runs are authorised and for how many hours, and anything the focus leaves open. Then the loop runs without waiting on the user. If `kgkit status` prints a **Permissions** line, offer `kgkit permissions --write` first: otherwise every kgkit call after the user's reply, and in each `experiment-runner`, asks.
 
 ## Guardrails
@@ -40,7 +51,8 @@ Ask everything the budget needs in one message, before the first experiment: whe
   first), repeated crashes, disk/GPU memory issues, or the budget is spent.
 
 ## Loop
-1. **Orient**: `kgkit status` (accepted baseline, decisions on these folds, backlog top),
+1. **Orient**: `kgkit grind status --session ${CLAUDE_SESSION_ID}` (budget left, runs in flight; on BUDGET SPENT go
+   to the final report), `kgkit status` (accepted baseline, decisions on these folds, backlog top),
    CLAUDE.md `## Current state`, `reports/` (recon, eda, error analyses, `journal.md`).
 2. **Backlog**: `kgkit backlog list`. Refill it when fewer than ~5 open ideas by
    (a) dispatching `error-analyst` on the accepted baseline, (b) the domain skill's untried levers,
@@ -53,7 +65,10 @@ Ask everything the budget needs in one message, before the first experiment: whe
    (e.g. two GPUs → two `experiment-runner` agents). Without a local GPU, run GPU experiments
    through `/kg-gpu` (1-fold screens, two per Kaggle session, with pruning). Pushing spends the
    user's weekly quota, so it needs their authorisation for this loop.
-4. **Run** it via the `/kg-experiment` protocol (or delegate to `experiment-runner`): parent = accepted
+4. **Run** it via the `/kg-experiment` protocol (or delegate to `experiment-runner`). Before starting each training
+   run: `kgkit grind note --session ${CLAUDE_SESSION_ID} --started <run name> --cmd "<command>"`, so a later session
+   finds it. A local fold of more than ~30 min: add the template's `--checkpoint-every 1` (or every few epochs), so
+   a killed run resumes mid-fold. Parent = accepted
    baseline, `kgkit ledger compare`, `kgkit ledger decide`. For a promoted screen, record both gains on
    the backlog item (`--screen-gain`, `--full-gain`).
 5. **Update**: `kgkit backlog set <n> --status done --exp <id> --result ...` (the learning goes there and in
@@ -68,7 +83,7 @@ Ask everything the budget needs in one message, before the first experiment: whe
    shrank or did not survive, reverse-ablate the marginal KEEPs before adding new ideas
    (`grandmaster-playbook`, "Guarding against overfitting the CV itself"). If `kgkit backlog fidelity` shows
    screens disagree with full runs, raise screen fidelity before promoting more ideas.
-8. Repeat until the budget is exhausted.
+8. Repeat until the budget is exhausted, then `kgkit grind stop --session ${CLAUDE_SESSION_ID} --reason "<budget spent | why it stopped>"`.
 
 ## Final report
 Table of experiments (id, hypothesis, paired Δ, folds improved, decision), the new accepted baseline and

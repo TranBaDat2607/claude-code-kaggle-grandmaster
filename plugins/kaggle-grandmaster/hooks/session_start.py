@@ -190,6 +190,14 @@ def brief(root: Path) -> str:
     top = C.B.Backlog(root).ranked()[:3]
     if top:
         lines.append("Backlog top: " + "; ".join(f"#{i['id']} {i['idea'][:60]}" for i in top) + ".")
+    try:
+        from kgkit import grind as GR  # a loop in progress: continued, not restarted or forgotten (#125)
+
+        grind = GR.brief_line(root)
+    except Exception:
+        grind = ""
+    if grind:
+        lines.append(grind)
     lines.append(C.S.submissions_line(root, st) + ".")
     gq = C.G.quota_line(root)
     if gq:
@@ -246,6 +254,16 @@ def main() -> None:
     parts = ["[kaggle-grandmaster] kgkit is a command on the Bash tool's PATH: run `kgkit <cmd>` with the Bash tool "
              "(also on Windows; `kgkit --help` lists the commands). Text that says `python -m kgkit` means the same "
              f"command. Templates in {KGKIT_HOME}/templates."]
+    if payload.get("source") == "compact":  # skills came back cut short: let the router suggest them again (#125)
+        seen = C.router_seen_file(payload.get("session_id"))
+        try:
+            if seen is not None:
+                seen.unlink(missing_ok=True)
+        except OSError:
+            pass
+        parts.append("[kaggle-grandmaster] The conversation was compacted: plugin skills came back with only their "
+                     "first ~5,000 tokens, and the oldest may be gone. Before going on, load again with the Skill tool "
+                     "the kaggle-grandmaster skills the current task needs.")
     root = C.workspace(payload)
     if root is not None:
         b = brief(root)

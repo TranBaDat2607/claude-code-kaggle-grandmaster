@@ -264,3 +264,57 @@ def test_inference_kernel_dry_run(tmp_path, plugin_root):
     assert r.returncode == 0, r.stderr
     sub = pd.read_csv(tmp_path / "working" / "submission.csv")
     assert list(sub.columns) == ["id", "target"] and len(sub) == 3
+
+
+def _tiny_image_ws(tmp_path, plugin_root):
+    from PIL import Image
+
+    rng = np.random.default_rng(0)
+    colors = {"red": (220, 30, 30), "green": (30, 200, 30), "blue": (30, 30, 220)}
+    (tmp_path / "data" / "train_images").mkdir(parents=True)
+    rows = []
+    for i in range(60):
+        lab = list(colors)[i % 3]
+        arr = np.clip(np.array(colors[lab]) + rng.normal(0, 25, (32, 32, 3)), 0, 255).astype(np.uint8)
+        Image.fromarray(arr).save(tmp_path / "data" / "train_images" / f"{i}.png")
+        rows.append({"image_id": i, "image_path": f"{i}.png", "label": lab})
+    pd.DataFrame(rows).to_csv(tmp_path / "data" / "train.csv", index=False)
+    _run(["-m", "kgkit", "init", "img", "--metric", "accuracy", "--target", "label", "--id-col", "image_id"],
+         tmp_path, plugin_root)
+    _run(["-m", "kgkit", "folds", "data/train.csv", "--target", "label", "--id-col", "image_id", "--n-splits", "3",
+          "--out", "data/folds.csv"], tmp_path, plugin_root)
+    (tmp_path / "src").mkdir(exist_ok=True)
+    src = (plugin_root / "templates" / "train_image.py").read_text(encoding="utf-8")
+    (tmp_path / "src" / "train_image.py").write_text(src.replace("num_workers=4", "num_workers=0"), encoding="utf-8")
+    return ["src/train_image.py", "--backbone", "resnet18", "--no-pretrained", "--img-size", "32", "--batch-size", "8",
+            "--lr", "3e-3"]
+
+
+def test_image_template_heartbeat_and_checkpoint_every(tmp_path, plugin_root):
+    """#125: a local run says which process runs it (run_<pid>.json, a heartbeat each epoch), so a new session can
+    tell a live run from a dead one; --checkpoint-every N lets a killed fold resume mid-schedule."""
+    import json
+    import time
+
+    args = _tiny_image_ws(tmp_path, plugin_root)
+    _run([*args, "--epochs", "2", "--name", "hb", "--folds", "0"], tmp_path, plugin_root)
+    (run,) = list((tmp_path / "artifacts" / "hb").glob("run_*.json"))
+    info = json.loads(run.read_text())
+    assert info["finished"] is True and info["folds"] == [0] and info["all_folds"] == [0, 1, 2]
+    assert info["heartbeat"] >= info["started"] and "--name hb" in info["cmd"]
+    assert not (tmp_path / "artifacts" / "hb" / "fold0_resume.pt").exists()  # off by default: no checkpoint
+    # --checkpoint-every 1: kill the run once a checkpoint exists, run it again: it resumes, not restarts
+    env = dict(os.environ, KGKIT_HOME=str(plugin_root),
+               PYTHONPATH=os.pathsep.join([str(plugin_root), os.environ.get("PYTHONPATH", "")]))
+    cmd = [sys.executable, *args, "--epochs", "40", "--name", "ck", "--folds", "0", "--checkpoint-every", "1"]
+    p = subprocess.Popen(cmd, cwd=tmp_path, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    ck = tmp_path / "artifacts" / "ck" / "fold0_resume.pt"
+    deadline = time.time() + 300
+    while not ck.exists() and p.poll() is None and time.time() < deadline:
+        time.sleep(0.05)
+    time.sleep(0.3)  # let the checkpoint write finish
+    p.kill()
+    p.wait()
+    assert ck.exists(), "no checkpoint was written"
+    out = _run([*args, "--epochs", "40", "--name", "ck", "--folds", "0", "--checkpoint-every", "1"], tmp_path, plugin_root)
+    assert "resumed at epoch" in out and not ck.exists()

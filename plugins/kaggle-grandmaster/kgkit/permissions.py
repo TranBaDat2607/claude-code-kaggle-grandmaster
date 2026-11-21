@@ -27,7 +27,7 @@ SUBCOMMANDS: dict[str, bool] = {
     "blend": False, "features": False, "pages": True, "discussions": False, "kernels top": True,
     "kernels pull": False, "datasets": False, "audit-repo": True, "whoami": True, "update-check": True,
     "gpu quota": True, "gpu plan": True, "gpu status": True, "gpu log": True, "gpu wait": False,
-    "gpu collect": False, "gpu build": False, "gpu release": False,
+    "gpu collect": False, "gpu build": False, "gpu release": False, "grind": False,
 }
 NEVER = ("gpu push", "gpu repush", "gpu cancel", "vendor", "bench", "recheck", "folds", "init", "adopt")
 SETTINGS = Path(".claude") / "settings.local.json"

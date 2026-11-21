@@ -46,7 +46,7 @@ The general PyTorch loop (precision, memory, input pipeline, fold-parallel vs DD
   slice of the test set) so a run takes minutes.
 - **In your own script:** `kgkit.bench.measure()` and `kgkit.bench.report()` do what `--bench` does
   ([training-loop.md](references/training-loop.md#measuring)).
-- **Remote Kaggle runs:** `kgkit gpu collect` reports utilisation per GPU (`kaggle-gpu` section 5). With no local GPU,
+- **Remote Kaggle runs:** `kgkit gpu collect` reports utilisation per GPU (`kaggle-gpu`, its diagnosis table). With no local GPU,
   a short bench session costs minutes of quota instead of a screen's hours:
   `gpu build --name bench --cmd "python src/train_image.py --bench" --hours 0.3`, then `gpu push` and
   `gpu wait <kernel> --collect`. Without `{fold}` the command runs once, with both GPUs visible. The session saves

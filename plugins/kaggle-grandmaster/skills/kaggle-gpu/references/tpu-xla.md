@@ -1,4 +1,33 @@
-# Porting a CUDA PyTorch trainer to Kaggle TPU (torch_xla, PJRT)
+# TPU v5e-8: when to use it, the queue, and the torch_xla port
+
+## When the GPU quota is gone
+
+The TPU quota (20 h/week) is separate and expires at the same reset, so it is free hours once the GPU
+quota is spent. Measured on a bandwidth-bound ConvNeXt-small (Oct 2026): one v5e chip ≈ **5 T4s** per
+step, bf16 losses matching the T4 run to 3-4 decimals. The catch is the queue:
+
+- Batch TPU jobs wait **10-24 h** (12 h 49 min measured) before they start, plus ~20 min of start-up. One
+  batch TPU session per account; a queued job holds that slot for its whole wait.
+- Expected finish = now + ~13 h queue + 20 min + (T4 time / 5). Use the TPU when that beats the GPU
+  finish: for training longer than a GPU session, or when the GPU quota is gone. For runs under ~12 h
+  with GPU hours left, the GPU usually wins on wall time. Queue about half a day before you need it,
+  and keep a GPU fallback scheduled for after the reset.
+- `machine_shape`: ask for `TpuV5E8`. `TpuV5E1`/`TpuV5E4`/`TpuV6E1` are silently stored as `TpuV5E8`;
+  `TpuV6E8` (often no capacity) and `Tpu1VmV38` (v3-8) are separate pools, queued too. `gpu build` targets
+  v5e-8 and v6e-8.
+- A queued job cannot be cancelled through the API (it has no session id yet). The only way to free the
+  slot is `kaggle kernels delete` (irreversible; ask the user), then a re-push, which starts the queue
+  again from zero. So **validate before queueing**: run the XLA path locally on PJRT CPU, then the same
+  code on a ~5 min 2×T4 dev run. A bug found after the queue costs a whole queue cycle.
+- `kgkit gpu build --accelerator TpuV5E8 --hours <= 9` runs one process per chip for `{fold}` tasks (PJRT
+  `TPU_VISIBLE_CHIPS=<k>` with single-chip process bounds), so each fold/seed keeps the per-process batch
+  it had on one GPU. A command without `{fold}` gets the whole TPU (`PJRT_DEVICE=TPU`). Hours are
+  accounted as TPU-hours, not GPU-hours.
+- Porting a CUDA trainer to torch_xla (bf16, static shapes, `mark_step`, `xm.save`, timm checkpointing,
+  resuming CUDA checkpoints): the port below.
+
+
+## The port
 
 Measured on a 2.5-D ConvNeXt-small MIL trainer (4,348 MRI studies, batch 2, Oct 2026), resumed from a
 CUDA checkpoint: ≈ 0.43 s per optimiser step on one v5e chip vs ≈ 2.1 s on a T4; losses matched the T4
