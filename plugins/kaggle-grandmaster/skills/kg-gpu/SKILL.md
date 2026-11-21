@@ -75,7 +75,9 @@ use-it-or-lose-it hours before the reset.
    the two jobs:
    `gpu build --name <a> --folds 0 --cmd "... --folds {fold}" --extra-job <b> "... --folds {fold}"
    --prune-against baseline --hours <~1.3x estimate>` (attach preprocessed data with `--dataset`).
-3. Confirm with the user (quota is spent), then `gpu push`. Run `gpu wait <kernel> --collect` in the background.
+3. State the stop rule next to the promote rule (e.g. "stop: pruned against the control, margin = its fold std;
+   promote: z >= 2"), then confirm with the user (quota is spent) and `gpu push`. Run `gpu wait <kernel> --collect`
+   in the background.
 4. Decide with a paired test against the control on that fold:
    `python -m kgkit ledger compare artifacts/<a> artifacts/<control> --truth data/train.csv:<target>
    --folds data/folds.csv:fold --fold 0`. PROMOTE (z ≥ 2) / DISCARD / RE-TEST (positive but within noise:

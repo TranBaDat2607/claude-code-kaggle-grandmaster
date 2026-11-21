@@ -13,7 +13,12 @@ description: Competition-grade deep learning training practice in PyTorch — sc
 - Mixed precision: `torch.autocast` bf16 on Ampere+ (A100/L4/H100), fp16 + GradScaler on T4/P100.
 - Gradient clipping (max norm 1.0) for transformers/RNNs.
 - **EMA of weights** (decay 0.999–0.9999) — cheap, frequently +, evaluate the EMA model.
-- Checkpoint the best-by-metric (not by loss) per fold; also keep last for SWA if used.
+- Keep the last epoch (the templates' default) or choose the epoch on rows held out of the *training* part
+  (`--es-holdout 0.05`: early stopping, done legally), never on the fold it predicts: a checkpoint or a stopping point
+  chosen on the scored fold makes its OOF optimistic (#109). The same goes for early stopping: its stopping rows must
+  come from the training part. To fix the schedule once, read the epoch count off the per-epoch val curves of an
+  earlier run's folds. A run that is losing is cut short by pruning against the baseline's curve (skill `kaggle-gpu`),
+  which discards it and chooses nothing.
 - Evaluate more often than once per epoch for short schedules.
 
 ## Speed (more experiments per GPU-hour)
@@ -62,5 +67,6 @@ loop: it has the measurement, the per-domain how-to and what runs on which GPU.
 ## Regularisation menu
 
 Augmentation (first), dropout / drop-path (stochastic depth 0.1–0.3 for ViTs/ConvNeXts), label
-smoothing 0.05–0.1, mixup/cutmix, weight decay, early stopping, smaller LR for backbone,
+smoothing 0.05–0.1, mixup/cutmix, weight decay, early stopping (on rows held out of the training part, see above),
+smaller LR for backbone,
 layer-wise LR decay, AWP/FGM adversarial perturbations (NLP), SWA over last epochs.

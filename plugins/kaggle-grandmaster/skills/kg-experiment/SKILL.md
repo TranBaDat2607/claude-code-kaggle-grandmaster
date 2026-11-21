@@ -36,7 +36,9 @@ Follow the experiment protocol (`grandmaster-playbook` §2):
 2. Restate the hypothesis, the *single* change, the baseline id, and the success criterion:
    paired gain ≥ ~2 standard errors of the per-fold differences (or of the OOF bootstrap) with most
    folds improving. Not "Δ > fold std": the fold std measures fold difficulty, which cancels in a
-   paired comparison.
+   paired comparison. For a run of hours, also state its stop rule up front: pruned against the baseline's curve
+   (`gpu build --prune-against`, or `kgkit.budget` in a loop of your own), so cutting it short is decided in advance
+   like the verdict.
 3. Implement behind a flag/config in the existing script, never in a copy of it (`train_v2.py`): the record keeps
    the command it ran, so the flag says what changed. A quick probe that is not the experiment goes in `work/`. Smoke test, then full run on frozen folds
    with the baseline's seed(s). When the change touches the input pipeline, the resolution / `max_len` or the

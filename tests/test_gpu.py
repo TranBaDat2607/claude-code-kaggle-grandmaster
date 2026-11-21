@@ -112,6 +112,132 @@ def test_budget_prune_and_resume_curve(tmp_path):
     assert ok.end_epoch(4, 0.55) == "continue"
 
 
+# #119: GPT-2 medium (8 epochs, 0-based here) tied the GPT-2 small control early, peaked, then declined; the table's
+# even epochs, with the odd ones in between
+_MEDIUM = [0.9440, 0.94411, 0.9442, 0.94424, 0.9420, 0.93898, 0.9350, 0.93067]
+_CONTROL = [0.9420, 0.94430, 0.9452, 0.94592, 0.9461, 0.94626, 0.9460, 0.94588]
+
+
+def _curve(scores, gib=True, epochs=None):
+    return {"fold": 0, "epochs": epochs or len(scores), "greater_is_better": gib,
+            "points": [{"epoch": e, "score": s} for e, s in enumerate(scores)]}
+
+
+def _write_curve(d, scores, gib=True):
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "curve_fold0.json").write_text(json.dumps(_curve(scores, gib)))
+    return d
+
+
+def test_prune_last_mode_stops_a_run_that_ties_then_declines(tmp_path):
+    from kgkit.budget import should_stop
+
+    base = _write_curve(tmp_path / "control", _CONTROL)
+    runs = {}
+    for mode in ("last", "best"):
+        tb = TrainBudget(tmp_path / mode, 0, total_epochs=8, env={}, baseline=base, margin=0.003, mode=mode)
+        acts = []
+        for e, s in enumerate(_MEDIUM):
+            acts.append(tb.end_epoch(e, s))
+            if acts[-1] == "prune":
+                tb.write_status("pruned", epoch=e)
+                break
+        runs[mode] = (acts, tb)
+    acts, tb = runs["last"]
+    assert acts == ["continue"] * 5 + ["prune"]  # epoch 6 of the issue's table: the end of the first session
+    status = json.loads((tmp_path / "last" / "fold0_status.json").read_text())
+    assert status["status"] == "pruned" and status["prune_mode"] == "last" and "below its own peak" in status["reason"]
+    assert runs["best"][0] == ["continue"] * 8  # the old rule never fires: the best so far tied the control
+    # the pure function on the curve files gives the same answer, epoch by epoch
+    control = _curve(_CONTROL)
+    assert should_stop(_curve(_MEDIUM[:5], epochs=8), control, margin=0.003) is None
+    assert "below its own peak" in should_stop(_curve(_MEDIUM[:6], epochs=8), control, margin=0.003)
+    assert should_stop(_curve(_MEDIUM[:6], epochs=8), control, margin=0.003, mode="best") is None
+
+
+def test_prune_last_mode_keeps_the_old_rule_and_spares_a_climbing_run():
+    from kgkit.budget import should_stop
+
+    control = _curve([0.6 + 0.02 * e for e in range(10)])
+    # bad from the start and still climbing: no decline, but its best trails, so both modes stop it at 30%
+    for mode in ("last", "best"):
+        assert "best so far" in should_stop(_curve([0.55, 0.555, 0.56], epochs=10), control, margin=0.01, mode=mode)
+        assert should_stop(_curve([0.55, 0.555], epochs=10), control, margin=0.01, mode=mode) is None  # before 30%
+    # against a control that levels off: a run that ties it and is still rising is not stopped
+    flat = _curve([0.60, 0.62] + [0.64] * 8)
+    assert should_stop(_curve([0.58, 0.61, 0.635, 0.638], epochs=10), flat, margin=0.01) is None
+    # a run that tied it, then fell: one evaluation below its peak is not yet a decline (patience 2), two are
+    dip = [0.60, 0.62, 0.64, 0.60]
+    assert should_stop(_curve(dip, epochs=10), flat, margin=0.01) is None
+    assert "below its own peak" in should_stop(_curve(dip + [0.59], epochs=10), flat, margin=0.01)
+    assert should_stop(_curve(dip + [0.59], epochs=10), flat, margin=0.01, patience=3) is None
+    assert should_stop(_curve(dip + [0.59], epochs=10), flat, margin=0.01, mode="best") is None
+    # fallen, but still within the margin of the control: not stopped
+    assert should_stop(_curve([0.60, 0.62, 0.64, 0.635, 0.634], epochs=10), flat, margin=0.01) is None
+    # lower is better: the same decline, mirrored
+    low = _curve([1 - s for s in _CONTROL], gib=False)
+    assert "below its own peak" in should_stop(_curve([1 - s for s in _MEDIUM[:6]], gib=False, epochs=8), low,
+                                               margin=0.003)
+    # never at the last epoch, never without a baseline or a margin
+    assert should_stop(_curve(_MEDIUM, epochs=8), _curve(_CONTROL), margin=0.003) is None
+    assert should_stop(_curve(_MEDIUM[:6], epochs=8), None, margin=0.003) is None
+    assert should_stop(_curve(_MEDIUM[:6], epochs=8), _curve(_CONTROL), margin=None) is None
+    with pytest.raises(ValueError):
+        should_stop(_curve(_MEDIUM[:6], epochs=8), _curve(_CONTROL), margin=0.003, mode="peak")
+
+
+def test_prune_judges_the_whole_curve_across_resumed_sessions(tmp_path):
+    base = _write_curve(tmp_path / "control", _CONTROL)
+    out = tmp_path / "run"
+    first = TrainBudget(out, 0, total_epochs=8, env={"KG_PRUNE_BASELINE": str(base), "KG_PRUNE_MARGIN": "0.003"})
+    assert first.mode == "last"  # the default: the templates keep the last epoch
+    assert [first.end_epoch(e, s) for e, s in enumerate(_MEDIUM[:5])] == ["continue"] * 5  # session 1 ends
+    # session 2 (gpu build --resume-from copies curve_fold0.json back): the peak of session 1 still counts
+    second = TrainBudget(out, 0, total_epochs=8, env={"KG_PRUNE_BASELINE": str(base), "KG_PRUNE_MARGIN": "0.003"})
+    assert len(second.points) == 5 and second.end_epoch(5, _MEDIUM[5]) == "prune"
+    # explicit arguments win over the variables
+    env = {"KG_PRUNE_BASELINE": str(tmp_path / "missing"), "KG_PRUNE_MARGIN": "9", "KG_PRUNE_MODE": "best"}
+    tb = TrainBudget(tmp_path / "x", 0, total_epochs=8, env=env, baseline=base, margin=0.003, mode="last")
+    assert tb.baseline is not None and tb.margin == 0.003 and tb.mode == "last"
+    assert TrainBudget(tmp_path / "y", 0, total_epochs=8, env=env).mode == "best"
+
+
+def test_update_curve_for_a_hand_written_loop(tmp_path):
+    from kgkit.budget import load_curve, should_stop, update_curve
+
+    control = _write_curve(tmp_path / "control", _CONTROL)
+    path = tmp_path / "run" / "curve_fold0.json"
+    verdicts = []
+    for e, s in enumerate(_MEDIUM):
+        curve = update_curve(path, e, s, total_epochs=8)
+        verdicts.append(should_stop(curve, load_curve(control, 0), margin=0.003))
+    assert [v is not None for v in verdicts] == [False] * 5 + [True, True, False]  # last epoch: finished, not pruned
+    assert curve["fold"] == 0 and load_curve(path.parent, 0)["points"][-1]["score"] == _MEDIUM[-1]
+    # a resumed epoch replaces its point and every later one
+    curve = update_curve(path, 3, 0.95, total_epochs=8)
+    assert [pt["epoch"] for pt in curve["points"]] == [0, 1, 2, 3] and curve["points"][-1]["score"] == 0.95
+
+
+def test_push_warns_about_a_long_kernel_with_no_stop_rule(tmp_path):
+    from kgkit.gpu import stop_rule_warning
+
+    kdir = tmp_path / "kern"
+    kdir.mkdir()
+    (kdir / "kernel-metadata.json").write_text(json.dumps({"id": "me/k", "code_file": "k.py", "language": "python"}))
+    (kdir / "k.py").write_text("for epoch in range(8):\n    train()\n")
+    msg = stop_rule_warning(kdir, 9, "GPU")
+    assert "no stop rule" in msg and "9 GPU-hours" in msg and "should_stop" in msg
+    assert stop_rule_warning(kdir, 6, "GPU") == ""  # short enough
+    assert stop_rule_warning(kdir, 9, "CPU") == ""  # no quota spent
+    (kdir / "k.py").write_text("from kgkit.budget import TrainBudget\n")
+    assert stop_rule_warning(kdir, 9, "GPU") == ""
+    (kdir / "k.py").write_text("import os\nos.environ['KG_PRUNE_MARGIN'] = '0.01'\n")
+    assert stop_rule_warning(kdir, 9, "TPU") == ""
+    (kdir / "k.py").write_text("train()\n")
+    (kdir / "kg-train.json").write_text("{}")  # a gpu build kernel: the runner's deadline and --prune-against
+    assert stop_rule_warning(kdir, 9, "GPU") == ""
+
+
 class _FakeGroup:
     """Two DDP ranks in one process: each rank's ``max`` call blocks nothing; the test feeds both ranks' values."""
 

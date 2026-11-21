@@ -161,6 +161,16 @@ def test_image_template_tiny(tmp_path, plugin_root):
     assert rec["oof_selection"] == "independent" and rec["params"]["select"] == "last"
     out = _run([*args, "--epochs", "2", "--name", "r18_best", "--select", "best"], tmp_path, plugin_root)
     assert Ledger(tmp_path).records()[-1]["oof_selection"] == "scored-fold" and "optimistic" in out
+    # #119: early stopping done legally - the epoch is chosen on rows held out of the training part
+    out = _run([*args, "--epochs", "3", "--name", "r18_es", "--es-holdout", "0.2", "--es-patience", "1"], tmp_path,
+               plugin_root)
+    es = Ledger(tmp_path).records()[-1]
+    assert "select holdout" in out and "holdout accuracy" in out
+    assert es["oof_selection"] == "independent" and es["params"]["select"] == "holdout"
+    assert es["params"]["es_holdout"] == 0.2 and rec["params"]["es_holdout"] == 0.0
+    bad = subprocess.run([sys.executable, *args, "--smoke", "--select", "best", "--es-holdout", "0.1"], cwd=tmp_path,
+                         env=dict(os.environ, PYTHONPATH=str(plugin_root)), capture_output=True, text=True, timeout=600)
+    assert bad.returncode != 0 and "does not combine with --select best" in bad.stdout + bad.stderr
     res = validate_submission(tmp_path / rec["submission"], tmp_path / "data" / "sample_submission.csv")
     assert res["ok"], res
 
@@ -217,10 +227,23 @@ def test_transformer_template_tiny(tmp_path, plugin_root):
     assert "[bench]" in out and "verdict:" in out and "padding:" in out
     out = _run([*args, "--bench", "3", "--no-bucket"], tmp_path, plugin_root)
     assert "length_buckets True -> False" in out
-    _run([*args, "--epochs", "10", "--name", "tiny"], tmp_path, plugin_root)
+    out = _run([*args, "--epochs", "10", "--name", "tiny"], tmp_path, plugin_root)
     rec = Ledger(tmp_path).records()[-1]
     assert rec["name"] == "tiny" and len(rec["fold_scores"]) == 2
     assert rec["oof_selection"] == "independent" and rec["params"]["select"] == "last"  # #109
+    # #119: the learning curve holds each epoch's last evaluation (what select=last keeps), not the running best, so
+    # pruning can see a run that peaks and then declines
+    import json
+    import re
+    last_eval = {int(e): float(s) for e, st, n, s in
+                 re.findall(r"fold 0 epoch (\d+) step (\d+)/(\d+) val \w+ ([\d.]+)", out) if st == n}
+    curve = json.loads((tmp_path / "artifacts" / "tiny" / "curve_fold0.json").read_text(encoding="utf-8"))
+    assert len(curve["points"]) == 10
+    assert all(pt["score"] == pytest.approx(last_eval[pt["epoch"]], abs=1e-5) for pt in curve["points"])
+    out = _run([*args, "--epochs", "4", "--name", "tiny_es", "--es-holdout", "0.2"], tmp_path, plugin_root)
+    es = Ledger(tmp_path).records()[-1]
+    assert "select holdout" in out and "holdout rmse" in out
+    assert es["oof_selection"] == "independent" and es["params"]["select"] == "holdout"
     out = _run([*args, "--epochs", "2", "--name", "tiny_best", "--select", "best"], tmp_path, plugin_root)
     best = Ledger(tmp_path).records()[-1]
     assert best["oof_selection"] == "scored-fold" and "optimistic" in out
