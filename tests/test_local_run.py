@@ -151,3 +151,18 @@ def test_left_out_of_the_kaggle_bundle_and_gpu_imports_without_it(lws, plugin_ro
             "sys.meta_path.insert(0, Block())\nfrom kgkit import gpu\nprint(gpu.LR, gpu.is_local('local/x'))\n")
     r = subprocess.run([sys.executable, "-c", code], cwd=str(plugin_root), capture_output=True, text=True, timeout=60)
     assert r.returncode == 0 and r.stdout.split() == ["None", "True"], r.stderr
+
+
+def test_plan_names_the_local_gpu_and_keeps_its_costs_apart(lws, monkeypatch):
+    monkeypatch.setattr(G, "local_gpus", lambda *a, **k: [("NVIDIA GeForce RTX 5060", 8151)])
+    monkeypatch.setattr(G, "current_quota", lambda *a, **k: (None, "offline"))
+    G.log_run(lws, {"kernel": "local/fk-train", "version": 1, "resource": "LOCAL", "status": "collected",
+                    "gpu_hours": 2.0, "folds_done": {"fk": [0, 1, 2, 3]}})
+    G.log_run(lws, {"kernel": "tester/fk-train", "version": 1, "resource": "GPU", "status": "collected",
+                    "gpu_hours": 4.0, "folds_done": {"fk": [0, 1]}})
+    out = G.plan(lws, refresh=False)
+    assert "Local GPU: NVIDIA GeForce RTX 5060 (8 GB)" in out and "--backend local" in out
+    kaggle, local = out.split("Measured costs (quota-hours")[1], out.split("Measured costs on the local GPU")[1]
+    assert "2.00h/fold" in kaggle.split("Measured costs on")[0] and "0.50h/fold" in local
+    monkeypatch.setattr(G, "local_gpus", lambda *a, **k: [])
+    assert "Local GPU" not in G.plan(lws, refresh=False)

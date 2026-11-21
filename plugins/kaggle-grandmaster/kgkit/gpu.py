@@ -683,6 +683,44 @@ def cpu_torch_line(paths: list[str] | None = None) -> str:
             "an RTX 50-series GPU needs CUDA 12.8 or newer); installing changes their environment, so ask first.")
 
 
+def local_gpus(timeout: float = 15) -> list[tuple[str, int]]:
+    """(name, memory MiB) of each NVIDIA GPU on this machine, from nvidia-smi; [] without one."""
+    exe = shutil.which("nvidia-smi")
+    if exe is None:
+        return []
+    try:
+        r = subprocess.run([exe, "--query-gpu=name,memory.total", "--format=csv,noheader,nounits"],
+                           capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout)
+    except (OSError, subprocess.SubprocessError):
+        return []
+    out = []
+    for line in (r.stdout or "").splitlines():
+        name, _, mem = line.rpartition(",")
+        try:
+            out.append((name.strip(), int(float(mem))))
+        except ValueError:
+            continue
+    return out
+
+
+def local_gpu_lines(root: str | Path) -> list[str]:
+    """`gpu plan`: the GPU(s) on this machine as a second place to train (`gpu push --backend local`), the local
+    runs still going, and a CPU-only torch that would leave them unused. Nothing on a machine without one."""
+    gpus = local_gpus()
+    if not gpus:
+        return []
+    names = ", ".join(f"{n} ({m / 1024:.0f} GB)" for n, m in gpus)
+    going = [r for r in active_runs(root, "LOCAL")]
+    lines = [f"Local GPU: {names}. Free hours, no queue, no session limit: a run that fits its memory goes there "
+             "first (`gpu push <build dir> --backend local`), Kaggle takes runs that need more memory (a T4 has "
+             "16 GB) or run in parallel" + (f". Running now: {', '.join(run_label(r) for r in going)} (one local "
+                                             "run at a time)" if going else "") + "."]
+    warn = cpu_torch_line()
+    if warn:
+        lines.append(warn)
+    return lines
+
+
 def resets_before(q: dict, deadline: str | None) -> int:
     """Weekly resets from the quota's refreshAt (7-day steps) that land before the deadline day ends."""
     if not deadline:
@@ -2866,12 +2904,17 @@ def plan(root: str | Path | None = None, refresh: bool = True, deadline: str | N
             if gpu_left is not None and gpu_left < 1.0:
                 lines.append("GPU quota is used up: queue validated multi-hour training on the TPU now, about half a "
                              "day before it is needed, and keep a GPU fallback for after the reset.")
+    lines += local_gpu_lines(root)
     rs = [r for r in runs(root) if r.get("gpu_hours") and isinstance(r.get("folds_done"), dict)]
     rs = [r for r in rs if sum(len(v) for v in r["folds_done"].values())]
-    if rs:
-        lines.append("Measured costs (quota-hours per completed fold, sessions packed as run):")
+    for local in (False, True):  # a local GPU's speed is not a T4's: its costs never budget Kaggle hours
+        mine = [r for r in rs if (run_resource(r) == "LOCAL") == local]
+        if not mine:
+            continue
+        lines.append("Measured costs on the local GPU (wall hours per completed fold; not a T4's):" if local else
+                     "Measured costs (quota-hours per completed fold, sessions packed as run):")
         by = {}
-        for r in rs:
+        for r in mine:
             n = sum(len(v) for v in r["folds_done"].values())
             by.setdefault(", ".join(r["folds_done"]), []).append(r["gpu_hours"] / n)
         for k, v in list(by.items())[-8:]:
