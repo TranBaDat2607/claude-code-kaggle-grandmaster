@@ -7,24 +7,20 @@ allowed-tools:
   - Glob
   - Grep
   - Agent
-  - 'Bash(PYTHONPATH="${CLAUDE_PLUGIN_ROOT}" python -m kgkit blend *)'
-  - 'Bash(python -m kgkit blend *)'
-  - 'PowerShell(python -m kgkit blend *)'
-  - 'Bash(PYTHONPATH="${CLAUDE_PLUGIN_ROOT}" python -m kgkit ledger *)'
-  - 'Bash(python -m kgkit ledger *)'
-  - 'PowerShell(python -m kgkit ledger *)'
+  - 'Bash(kgkit blend *)'
+  - 'Bash(kgkit ledger *)'
 ---
 
 # /kg-ensemble
 
-Run kgkit with the Bash tool, as `PYTHONPATH="${CLAUDE_PLUGIN_ROOT}" python -m kgkit <command>`: this command
-pre-approves that form for the kgkit calls it makes. Submitting, pushing or publishing still asks (so does a
-PowerShell `$env:` assignment).
+Run kgkit with the Bash tool as `kgkit <command>`: the plugin puts it on PATH, also on Windows (Git Bash),
+and this command pre-approves the kgkit calls it makes. Older text that says `python -m kgkit` means the same
+command. Submitting, pushing or publishing still asks.
 
 Arguments: `$ARGUMENTS` (optional explicit experiment ids; otherwise choose from the ledger).
 
 Delegate to the `ensemble-architect` agent (or follow its procedure directly for small ledgers):
-candidate audit (same folds/row order/scale) → correlation & diversity → `python -m kgkit blend
+candidate audit (same folds/row order/scale) → correlation & diversity → `kgkit blend
 --exp ... --truth data/train.csv:<target> --folds data/folds.csv:fold --method hill --sample
 data/sample_submission.csv` (+ alternative methods) → compare in-sample vs honest scores → for large
 libraries `--prune 40` then `--method stack --levels 1|2`, or `--method residual --base <id>` → accept the

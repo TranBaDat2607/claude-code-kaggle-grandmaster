@@ -164,7 +164,7 @@ def log_gpu_pushes(payload: dict, pushes: list[dict]) -> list[str]:
         notes.append("kaggle-grandmaster: this command runs in the background and pushes a kernel from a folder the "
                      "hook cannot tell (typically after a `cd` with a variable, in a loop or in a pipe), so the run "
                      "is not in the GPU-hour log and, if it runs on a GPU or TPU, quota checks do not reserve its "
-                     "hours. Push each kernel with an absolute `-p` path, or with `python -m kgkit gpu push <dir>`, "
+                     "hours. Push each kernel with an absolute `-p` path, or with `kgkit gpu push <dir>`, "
                      "so the run is logged.")
     return [n for n in notes if n]
 
@@ -181,8 +181,8 @@ def note_deleted_kernels(payload: dict) -> str | None:
     if not gone:
         return None
     return (f"kaggle-grandmaster: {', '.join(gone)} deleted on Kaggle: {'its runs' if len(gone) == 1 else 'their runs'}"
-            " in the GPU log are marked deleted and hold no quota. Push it again with `python -m kgkit gpu push "
-            "<dir>` so the new run (version 1 again) is logged; `python -m kgkit gpu repush <kernel> --yes` does "
+            " in the GPU log are marked deleted and hold no quota. Push it again with `kgkit gpu push "
+            "<dir>` so the new run (version 1 again) is logged; `kgkit gpu repush <kernel> --yes` does "
             "the delete and the push in one step next time.")
 
 
@@ -208,9 +208,9 @@ def log_pending_push(root: Path, push: dict, target: tuple, since: dt.datetime) 
     return (f"kaggle-grandmaster: this command runs in the background, so Kaggle's reply to its {res} push of "
             f"{kernel} (with the version) is not in this result. The run is logged as pending, with its cap of "
             f"{hours}h of weekly quota reserved" + ("" if push.get("timeout") else " (no -t: the full session limit)")
-            + f", until Kaggle lists a version of it run after the command started. `python -m kgkit gpu wait "
+            + f", until Kaggle lists a version of it run after the command started. `kgkit gpu wait "
             f"{kernel}`, run in the background, waits for the push and then for the run (`gpu status` and `gpu "
-            f"quota` check it too). If the command ends without 'successfully pushed', run `python -m kgkit gpu "
+            f"quota` check it too). If the command ends without 'successfully pushed', run `kgkit gpu "
             f"release {kernel}`.")
 
 
@@ -228,8 +228,8 @@ def log_gpu_push(root: Path, push: dict, target: tuple, version: int) -> str | N
     return (f"kaggle-grandmaster: {res} kernel {kernel} v{version} logged (cap {hours}h of weekly quota"
             + (", a hard stop: Kaggle kills the session at it and keeps only the files already written"
                if push.get("timeout") else ": no -t, so the full session limit is reserved") + f").{queue} Poll "
-            f"with `python -m kgkit gpu wait {kernel}` in the background (not a tight loop); it releases the "
-            f"reservation when the run ends. `python -m kgkit gpu collect {kernel}` then brings its outputs back "
+            f"with `kgkit gpu wait {kernel}` in the background (not a tight loop); it releases the "
+            f"reservation when the run ends. `kgkit gpu collect {kernel}` then brings its outputs back "
             f"and accounts its hours: a kgkit-built kernel's results go into the ledger, any other kernel's files into "
             f"{C.G.kernel_output_dir(kernel)}/.")
 
@@ -272,7 +272,7 @@ def silent_failure_note(payload: dict) -> str | None:
     hint = ""
     if "session count" in m.group(0).lower():
         hint = (" Kaggle allows only so many batch sessions at once (2 GPU, 1 TPU): wait for a running kernel to "
-                "finish (`python -m kgkit gpu status`) and push again.")
+                "finish (`kgkit gpu status`) and push again.")
     return (f"kaggle-grandmaster: the Kaggle CLI printed `{C.SF.clean(m.group(0))[:300]}` but exited 0, so nothing "
             "was created or started and commands chained after it with && still ran. Do not wait for, attach or "
             f"submit this version.{hint}")
@@ -401,7 +401,7 @@ def _logged_note(root: Path, st, sub: dict, rec: dict, label: str) -> str:
     unknown = "" if rec["status"] == "submitted" else ", outcome unknown: Kaggle's reply is not in this output"
     via = f" (made by {Path(sub['script']).name})" if sub.get("script") else ""
     ctx = (f"kaggle-grandmaster: submission{label}{via} logged{unknown} ({count}). {_poll_hint(root, sub, st, slug)}; "
-           f"when the public score appears, run `python -m kgkit ledger lb {exp_id or '<exp_id>'} <score>` and "
+           f"when the public score appears, run `kgkit ledger lb {exp_id or '<exp_id>'} <score>` and "
            f"compare with CV.")
     if not exp_id:
         ctx += " (No ledger experiment id found in the message/file name — identify which experiment this was.)"
@@ -418,7 +418,7 @@ def unlogged_submit_note(payload: dict, subs: list[dict]) -> str | None:
         return None
     return ("kaggle-grandmaster: Kaggle replied to a submit in this output, but the command is not one the hook can "
             "read, so the submission is not in the local log (the daily count and the repeat-file check miss it). "
-            "`python -m kgkit status` adds it from Kaggle's list; call `kaggle competitions submit` in the command "
+            "`kgkit status` adds it from Kaggle's list; call `kaggle competitions submit` in the command "
             "or in a script it runs (and let it print Kaggle's reply) to have it logged with its file hash.")
 
 

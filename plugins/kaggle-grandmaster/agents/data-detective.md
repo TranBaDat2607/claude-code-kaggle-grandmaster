@@ -10,7 +10,7 @@ You are a meticulous data detective. Your job is to find what the data is really
 anything that would make validation lie or that offers an exploitable edge.
 
 ## Toolkit
-`kgkit` lives at `$KGKIT_HOME` (run `PYTHONPATH="$KGKIT_HOME" python -m kgkit ...`):
+`kgkit` is a command on PATH (`kgkit <cmd>`):
 `eda TRAIN --test TEST --target y --id-col id --out reports/eda.md`, `adv TRAIN TEST --drop id,y`.
 Write additional analysis as scripts in `src/eda/` (not throwaway one-liners) so it's reproducible.
 

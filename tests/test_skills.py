@@ -14,8 +14,8 @@ PLUGIN = Path(__file__).resolve().parents[1] / "plugins" / "kaggle-grandmaster"
 COMMANDS = sorted(p.parent.name for p in (PLUGIN / "skills").glob("kg-*/SKILL.md"))
 FRONT = re.compile(r"\A---\n(.*?)\n---\n(.*)\Z", re.S)
 BASE = {"Read", "Glob", "Grep", "Agent"}
-PINNED = 'Bash(PYTHONPATH="${{CLAUDE_PLUGIN_ROOT}}" python -m kgkit {} *)'
-RUN_FORM = 'PYTHONPATH="${CLAUDE_PLUGIN_ROOT}" python -m kgkit <command>'
+RUN_FORM = "Run kgkit with the Bash tool as `kgkit <command>`"  # bin/kgkit, on the Bash tool's PATH (#122)
+OLD_FORMS = re.compile(r"PYTHONPATH=|\$KGKIT_HOME|kgkit home|\$env:PYTHONPATH")
 # what a turn must never run unprompted: a submission, a push, an upload, anything public, quota spent
 OUTWARD = re.compile(r"\bsubmit\b|\bpush\b|datasets (create|version)|models? (create|instances)|\bgit\b|\bgh\b|"
                      r"\bvendor\b|\brecheck\b|visibility")
@@ -79,16 +79,41 @@ def test_allowed_tools_are_scoped_and_matchable(name):
         assert re.fullmatch(r"(Bash|PowerShell)\(.+ \*\)", r), f"{name}: {r!r} is not a scoped Bash/PowerShell rule"
         assert not OUTWARD.search(r), f"{name}: {r!r} would run an outward-facing command without a prompt"
         assert not re.search(r"kgkit \*\)$", r), f"{name}: {r!r} pre-approves every kgkit command (gpu push too)"
-    subs = {m.group(1) for r in tools for m in [re.fullmatch(r"Bash\(python -m kgkit (.+) \*\)", r)] if m}
+    subs = {m.group(1) for r in tools for m in [re.fullmatch(r"Bash\(kgkit (.+) \*\)", r)] if m}
     assert subs, f"{name}: no kgkit command pre-approved"
-    for sub in subs:  # the form the session brief and this skill run, and a vendored copy in Bash and PowerShell
-        assert PINNED.format(sub) in rules and f"PowerShell(python -m kgkit {sub} *)" in rules, (name, sub)
+    stale = [r for r in tools if "kgkit" in r and not re.fullmatch(r"Bash\(kgkit .+ \*\)", r)]
+    assert not stale, f"{name}: kgkit is the command on PATH now (#122), not {stale}"
     for r in tools:
         m = re.fullmatch(r"Bash\(kaggle (.+) \*\)", r)
         if m:
             assert f"PowerShell(kaggle {m.group(1)} *)" in rules, (name, r)
     assert RUN_FORM in body, f"{name}: say which form is pre-approved, or every kgkit call prompts"
     assert (fields.get("disable-model-invocation") is True) == (name in SIDE_EFFECTS), name
+
+
+@pytest.mark.parametrize("path", [*FILES, *sorted((PLUGIN / "skills").glob("*/references/*.md")),
+                                  PLUGIN / "templates" / "CLAUDE.competition.md"],
+                         ids=lambda p: f"{p.parent.name}/{p.name}")
+def test_kgkit_is_run_as_the_command_on_path(path):
+    """#122: one way to run kgkit. A path in the command (the brief's literal one, $KGKIT_HOME, ${CLAUDE_PLUGIN_ROOT})
+    never matched every allow rule, and $KGKIT_HOME is unset in PowerShell and absent from subagents' shells."""
+    text = path.read_text(encoding="utf-8")
+    bad = [line.strip() for line in text.splitlines() if OLD_FORMS.search(line)]
+    assert not bad, f"{path.relative_to(PLUGIN)}: {bad[:3]}"
+
+
+def test_bin_kgkit_runs_the_plugins_kgkit_from_anywhere(tmp_path):
+    launcher = PLUGIN / "bin" / "kgkit"
+    data = launcher.read_bytes()
+    assert data.startswith(b"#!/bin/sh")  # committed with LF (test_repo_files); Git Bash also runs a CRLF checkout
+    mode = subprocess.run(["git", "ls-files", "-s", str(launcher)], capture_output=True, text=True,
+                          cwd=PLUGIN).stdout.split()
+    assert mode and mode[0] == "100755", f"bin/kgkit must be executable in git: {mode}"
+    sh = shutil.which("sh")
+    if sh is None:
+        pytest.skip("needs sh")
+    r = subprocess.run([sh, str(launcher), "--help"], cwd=tmp_path, capture_output=True, text=True, timeout=120)
+    assert r.returncode == 0 and "usage: kgkit" in r.stdout, r.stdout + r.stderr
 
 
 def test_showcase_files_and_the_brief_point_to_it(tmp_path):

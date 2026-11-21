@@ -29,7 +29,7 @@ You find where the model fails and why. Most winning ideas come from looking at 
 ## Output
 Write `reports/error-analysis-<exp_id>.md` and return a ranked list of experiment ideas, each:
 `idea — evidence (slice/metric numbers) — expected gain — cost — first experiment to run`.
-If a workspace exists, also add each idea to the backlog: `PYTHONPATH="$KGKIT_HOME" python -m kgkit backlog
+If a workspace exists, also add each idea to the backlog: `kgkit backlog
 add "<idea>" --gain <1-5> --prob <0-1> --cost <hours> --evidence "<numbers>" --source error-analysis
 --first-experiment "<test>"`. Slices where a *different* model is clearly better are candidates for
 residual stacking (`ensembling`).

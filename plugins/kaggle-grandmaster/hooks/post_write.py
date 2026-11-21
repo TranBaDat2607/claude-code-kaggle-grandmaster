@@ -71,7 +71,7 @@ def note_for(path: Path, text: str, rel: str, seen: set, task_domain: str | None
         verb = "trains" if k == "train" else "runs"
         parts.append(f"{rel} {verb} a {dom} model. Apply the compute defaults before running it (skill "
                      f"kaggle-grandmaster:compute-efficiency; reference: {ref_path}): {defaults}. Measure before a "
-                     f"long run: `--bench` in the plugin's templates, or `python -m kgkit bench --run \"<command>\"`.")
+                     f"long run: `--bench` in the plugin's templates, or `kgkit bench --run \"<command>\"`.")
         keys.add(f"domain:{dom}")
     new = [f for f in SC.check(text) if f.level == "warn" and f"{rel}:{f.code}" not in seen]
     if new:

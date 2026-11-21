@@ -7,15 +7,9 @@ allowed-tools:
   - Glob
   - Grep
   - Agent
-  - 'Bash(PYTHONPATH="${CLAUDE_PLUGIN_ROOT}" python -m kgkit validate *)'
-  - 'Bash(python -m kgkit validate *)'
-  - 'PowerShell(python -m kgkit validate *)'
-  - 'Bash(PYTHONPATH="${CLAUDE_PLUGIN_ROOT}" python -m kgkit ledger *)'
-  - 'Bash(python -m kgkit ledger *)'
-  - 'PowerShell(python -m kgkit ledger *)'
-  - 'Bash(PYTHONPATH="${CLAUDE_PLUGIN_ROOT}" python -m kgkit status *)'
-  - 'Bash(python -m kgkit status *)'
-  - 'PowerShell(python -m kgkit status *)'
+  - 'Bash(kgkit validate *)'
+  - 'Bash(kgkit ledger *)'
+  - 'Bash(kgkit status *)'
   - 'Bash(kaggle kernels status *)'
   - 'PowerShell(kaggle kernels status *)'
 disable-model-invocation: true
@@ -23,9 +17,9 @@ disable-model-invocation: true
 
 # /kg-kernel
 
-Run kgkit with the Bash tool, as `PYTHONPATH="${CLAUDE_PLUGIN_ROOT}" python -m kgkit <command>`: this command
-pre-approves that form for the kgkit calls it makes. Submitting, pushing or publishing still asks (so does a
-PowerShell `$env:` assignment).
+Run kgkit with the Bash tool as `kgkit <command>`: the plugin puts it on PATH, also on Windows (Git Bash),
+and this command pre-approves the kgkit calls it makes. Older text that says `python -m kgkit` means the same
+command. Submitting, pushing or publishing still asks.
 
 Target: `$ARGUMENTS` (default: the best blend/experiment in the ledger).
 

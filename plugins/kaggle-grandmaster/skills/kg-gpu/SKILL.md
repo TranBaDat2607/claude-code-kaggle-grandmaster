@@ -7,58 +7,35 @@ allowed-tools:
   - Glob
   - Grep
   - Agent
-  - 'Bash(PYTHONPATH="${CLAUDE_PLUGIN_ROOT}" python -m kgkit gpu quota *)'
-  - 'Bash(python -m kgkit gpu quota *)'
-  - 'PowerShell(python -m kgkit gpu quota *)'
-  - 'Bash(PYTHONPATH="${CLAUDE_PLUGIN_ROOT}" python -m kgkit gpu plan *)'
-  - 'Bash(python -m kgkit gpu plan *)'
-  - 'PowerShell(python -m kgkit gpu plan *)'
-  - 'Bash(PYTHONPATH="${CLAUDE_PLUGIN_ROOT}" python -m kgkit gpu build *)'
-  - 'Bash(python -m kgkit gpu build *)'
-  - 'PowerShell(python -m kgkit gpu build *)'
-  - 'Bash(PYTHONPATH="${CLAUDE_PLUGIN_ROOT}" python -m kgkit gpu status *)'
-  - 'Bash(python -m kgkit gpu status *)'
-  - 'PowerShell(python -m kgkit gpu status *)'
-  - 'Bash(PYTHONPATH="${CLAUDE_PLUGIN_ROOT}" python -m kgkit gpu wait *)'
-  - 'Bash(python -m kgkit gpu wait *)'
-  - 'PowerShell(python -m kgkit gpu wait *)'
-  - 'Bash(PYTHONPATH="${CLAUDE_PLUGIN_ROOT}" python -m kgkit gpu collect *)'
-  - 'Bash(python -m kgkit gpu collect *)'
-  - 'PowerShell(python -m kgkit gpu collect *)'
-  - 'Bash(PYTHONPATH="${CLAUDE_PLUGIN_ROOT}" python -m kgkit gpu release *)'
-  - 'Bash(python -m kgkit gpu release *)'
-  - 'PowerShell(python -m kgkit gpu release *)'
-  - 'Bash(PYTHONPATH="${CLAUDE_PLUGIN_ROOT}" python -m kgkit gpu log *)'
-  - 'Bash(python -m kgkit gpu log *)'
-  - 'PowerShell(python -m kgkit gpu log *)'
-  - 'Bash(PYTHONPATH="${CLAUDE_PLUGIN_ROOT}" python -m kgkit backlog *)'
-  - 'Bash(python -m kgkit backlog *)'
-  - 'PowerShell(python -m kgkit backlog *)'
-  - 'Bash(PYTHONPATH="${CLAUDE_PLUGIN_ROOT}" python -m kgkit ledger *)'
-  - 'Bash(python -m kgkit ledger *)'
-  - 'PowerShell(python -m kgkit ledger *)'
-  - 'Bash(PYTHONPATH="${CLAUDE_PLUGIN_ROOT}" python -m kgkit status *)'
-  - 'Bash(python -m kgkit status *)'
-  - 'PowerShell(python -m kgkit status *)'
+  - 'Bash(kgkit gpu quota *)'
+  - 'Bash(kgkit gpu plan *)'
+  - 'Bash(kgkit gpu build *)'
+  - 'Bash(kgkit gpu status *)'
+  - 'Bash(kgkit gpu wait *)'
+  - 'Bash(kgkit gpu collect *)'
+  - 'Bash(kgkit gpu release *)'
+  - 'Bash(kgkit gpu log *)'
+  - 'Bash(kgkit backlog *)'
+  - 'Bash(kgkit ledger *)'
+  - 'Bash(kgkit status *)'
 disable-model-invocation: true
 ---
 
 # /kg-gpu: quota-aware remote training
 
-Run kgkit with the Bash tool, as `PYTHONPATH="${CLAUDE_PLUGIN_ROOT}" python -m kgkit <command>`: this command
-pre-approves that form for the kgkit calls it makes. Submitting, pushing or publishing still asks (so does a
-PowerShell `$env:` assignment).
+Run kgkit with the Bash tool as `kgkit <command>`: the plugin puts it on PATH, also on Windows (Git Bash),
+and this command pre-approves the kgkit calls it makes. Older text that says `python -m kgkit` means the same
+command. Submitting, pushing or publishing still asks.
 
 Request: `$ARGUMENTS` (default: `plan`).
 
-Load the `kaggle-gpu` skill first and follow its protocol. Commands below are
-`python -m kgkit gpu ...` (PYTHONPATH=$KGKIT_HOME).
+Load the `kaggle-gpu` skill first and follow its protocol. Commands below are `kgkit gpu ...`.
 
 ## Always first
 1. `gpu quota` and `gpu log`: GPU and TPU hours plannable, reset time, runs in flight (and which pushes
    hold a reservation), measured cost per fold. With several accounts registered in the Kaggle pane,
    `gpu quota --all` (the hours on each) and `gpu plan` (quota-bound or time-bound, counting them all).
-2. `python -m kgkit status` and `python -m kgkit ledger baseline`: the accepted baseline, its fold
+2. `kgkit status` and `kgkit ledger baseline`: the accepted baseline, its fold
    scores and std.
 
 ## plan
@@ -79,7 +56,7 @@ use-it-or-lose-it hours before the reset.
    promote: z >= 2"), then confirm with the user (quota is spent) and `gpu push`. Run `gpu wait <kernel> --collect`
    in the background.
 4. Decide with a paired test against the control on that fold:
-   `python -m kgkit ledger compare artifacts/<a> artifacts/<control> --truth data/train.csv:<target>
+   `kgkit ledger compare artifacts/<a> artifacts/<control> --truth data/train.csv:<target>
    --folds data/folds.csv:fold --fold 0`. PROMOTE (z ≥ 2) / DISCARD / RE-TEST (positive but within noise:
    second fold or seed). Record it on the backlog item (`kgkit backlog set <n> --screen-gain <gain>`); CLAUDE.md
    `## Current state` changes only if the plan does.

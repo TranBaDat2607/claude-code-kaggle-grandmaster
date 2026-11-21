@@ -7,28 +7,18 @@ allowed-tools:
   - Glob
   - Grep
   - Agent
-  - 'Bash(PYTHONPATH="${CLAUDE_PLUGIN_ROOT}" python -m kgkit adv *)'
-  - 'Bash(python -m kgkit adv *)'
-  - 'PowerShell(python -m kgkit adv *)'
-  - 'Bash(PYTHONPATH="${CLAUDE_PLUGIN_ROOT}" python -m kgkit validate *)'
-  - 'Bash(python -m kgkit validate *)'
-  - 'PowerShell(python -m kgkit validate *)'
-  - 'Bash(PYTHONPATH="${CLAUDE_PLUGIN_ROOT}" python -m kgkit score *)'
-  - 'Bash(python -m kgkit score *)'
-  - 'PowerShell(python -m kgkit score *)'
-  - 'Bash(PYTHONPATH="${CLAUDE_PLUGIN_ROOT}" python -m kgkit ledger *)'
-  - 'Bash(python -m kgkit ledger *)'
-  - 'PowerShell(python -m kgkit ledger *)'
-  - 'Bash(PYTHONPATH="${CLAUDE_PLUGIN_ROOT}" python -m kgkit status *)'
-  - 'Bash(python -m kgkit status *)'
-  - 'PowerShell(python -m kgkit status *)'
+  - 'Bash(kgkit adv *)'
+  - 'Bash(kgkit validate *)'
+  - 'Bash(kgkit score *)'
+  - 'Bash(kgkit ledger *)'
+  - 'Bash(kgkit status *)'
 ---
 
 # /kg-debug
 
-Run kgkit with the Bash tool, as `PYTHONPATH="${CLAUDE_PLUGIN_ROOT}" python -m kgkit <command>`: this command
-pre-approves that form for the kgkit calls it makes. Submitting, pushing or publishing still asks (so does a
-PowerShell `$env:` assignment).
+Run kgkit with the Bash tool as `kgkit <command>`: the plugin puts it on PATH, also on Windows (Git Bash),
+and this command pre-approves the kgkit calls it makes. Older text that says `python -m kgkit` means the same
+command. Submitting, pushing or publishing still asks.
 
 Symptom: `$ARGUMENTS`
 
@@ -38,7 +28,7 @@ Follow the `cv-lb-debugging` skill:
    inference path on a validation fold (parity with OOF), CV-LB correlation from the ledger, public
    LB noise estimate.
 3. In parallel, launch the `validation-auditor` agent on the relevant code and folds.
-4. If shift is suspected: `python -m kgkit adv` and drop/transform tests.
+4. If shift is suspected: `kgkit adv` and drop/transform tests.
 5. Conclude with the root cause (or ranked hypotheses with the experiment that would distinguish
    them), the fix, and how it changes trust in CV vs LB going forward. Record it in `reports/journal.md`
    (or a `studies/<name>/README.md` when a script decided it), and one line in CLAUDE.md `## Current state`

@@ -178,7 +178,7 @@ def test_kg_update_is_a_slash_command_that_asks_before_it_updates():
     assert "disable-model-invocation: true" in front
     rules = re.findall(r"^  - '?(.+?)'?$", front, re.M)
     assert [r for r in rules if "claude plugin" in r] == []  # the update itself is approved by the user each time
-    assert 'Bash(PYTHONPATH="${CLAUDE_PLUGIN_ROOT}" python -m kgkit update-check *)' in rules
+    assert "Bash(kgkit update-check *)" in rules
     body = text.split("---", 2)[2]
     assert "update-check" in body and "claude plugin update" in body and "/reload-plugins" in body
 

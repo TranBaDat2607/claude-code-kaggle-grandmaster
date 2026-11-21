@@ -11,7 +11,7 @@ Contents: [Budget and measurement](#budget-and-measurement) · [GPU inference](#
 - Time each stage: loading and preprocessing, each model, TTA, post-processing. Print the elapsed time in the kernel.
   On 4 CPU cores, preprocessing is often the slowest stage.
 - Model loading, compiling and engine building are fixed costs. Extrapolate from a 5-10 % slice only after them.
-- Locally, `python -m kgkit bench --run "python kernels/infer/inference_kernel.py"` times the code path and reports
+- Locally, `kgkit bench --run "python kernels/infer/inference_kernel.py"` times the code path and reports
   GPU utilisation. The real number comes from a Kaggle run.
 - `inference_kernel.py` runs members in priority order, skips optional ones when the budget runs short, and always
   writes a valid submission.

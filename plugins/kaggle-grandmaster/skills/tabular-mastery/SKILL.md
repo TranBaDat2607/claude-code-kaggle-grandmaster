@@ -57,7 +57,7 @@ the best few hundred; pairwise categorical combinations (8 columns → 28 crosse
 source. `kgkit features search` does this on the frozen folds:
 
 ```bash
-python -m kgkit features search data/train.csv --target <y> --test data/test.csv \
+kgkit features search data/train.csv --target <y> --test data/test.csv \
     --folds data/folds.csv:fold --kinds cnt,te,grp,num2 --aggs mean,std,nunique,diff_mean,rank \
     --batch 40 --max-candidates 5000 --screen-folds 0,1 --recheck-seed 7 --minutes 60
 ```
@@ -145,7 +145,7 @@ of it is a member the libraries lack, and the generator is the usual place to fi
 ## 8. Ensembling for tabular
 
 LightGBM + CatBoost + XGBoost + NN + (optional) linear/kNN/SVR on different feature views →
-`python -m kgkit blend --exp ... --method hill --folds data/folds.csv:fold`. Level-2 stacking
+`kgkit blend --exp ... --method hill --folds data/folds.csv:fold`. Level-2 stacking
 with ridge/logistic on OOFs (+ a few raw features) can add more; validate with nested CV.
 
 Playground-scale ensembles are much bigger: the March 2026 churn winner was a 4-level stack of 150

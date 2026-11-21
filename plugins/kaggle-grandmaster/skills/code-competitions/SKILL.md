@@ -86,4 +86,4 @@ today.`, and scoring waits for Kaggle to rerun the notebook on the hidden test, 
 submissions list every ~30 minutes in the background.
 
 Reproduce locally with a scaled-up synthetic test; add defensive logging; validate the output
-with `python -m kgkit validate` logic inside the kernel (assert row counts/ids/no NaNs).
+with `kgkit validate` logic inside the kernel (assert row counts/ids/no NaNs).

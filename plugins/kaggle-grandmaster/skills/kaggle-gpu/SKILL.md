@@ -18,13 +18,13 @@ Re-check the regime whenever an account is added, the quota resets, or the deadl
 ## 1. Facts to work from (verify live, they change)
 
 - `kaggle quota` (CLI ≥ 2.2): GPU hours (30 h/week) and **TPU hours (20 h/week, a separate quota)**
-  used/remaining and `refreshAt` (weekly reset, UTC). `python -m kgkit gpu quota` caches both in
+  used/remaining and `refreshAt` (weekly reset, UTC). `kgkit gpu quota` caches both in
   `.kaggle-gm/gpu_quota.json`, re-checks the runs it has as in flight (finished ones release their
   reservation), lists what still holds hours, and warns when hours are about to expire unused. The live call is
   tried twice; when it still fails the report says `NOT LIVE`, why, and how old the cached value is, and counts the
   runs logged since against it (it cannot see sessions started elsewhere, such as the website or another machine:
   run `gpu quota` again before committing hours on a cached figure). With several accounts registered in the Kaggle
-  pane (`~/.kaggle/kg_accounts.json`), `python -m kgkit gpu quota --all` reads each one's hours (as that account, never
+  pane (`~/.kaggle/kg_accounts.json`), `kgkit gpu quota --all` reads each one's hours (as that account, never
   printing a token) and the session brief lists them; runs still go to the active account, which the person switches
   in the pane.
 - Per-session limit 12 h (GPU/CPU), 9 h (TPU). The push timeout `-t` (`--hours`) caps a run below that, and a
@@ -72,7 +72,7 @@ Re-check the regime whenever an account is added, the quota resets, or the deadl
 - Output: `/kaggle/working` is saved, about 20 GB. A kernel's output can be attached as input to another
   kernel (`kernel_sources`), which is how resume and train→inference chaining work.
 
-## 2. The pipeline (`python -m kgkit gpu ...`)
+## 2. The pipeline (`kgkit gpu ...`)
 
 ```
 quota / plan        ->  how many hours (GPU and TPU), until when, what to reserve, what holds a reservation
@@ -103,7 +103,7 @@ reservation. After a `cd` it cannot trace (a variable, a loop) the hook reports 
 `-p` an absolute path there. A push in a command that runs in the background (say, a loop that retries until
 a session slot frees up) is logged as pending: its whole cap stays reserved until Kaggle lists a version of
 the kernel run after it, which `gpu status` and `gpu wait <kernel>` check (`gpu release <kernel>` if the
-push never went through). Your username (for `"id"` in kernel-metadata.json): `python -m kgkit whoami`.
+push never went through). Your username (for `"id"` in kernel-metadata.json): `kgkit whoami`.
 
 The runner links the attached inputs into `./data` and points `./artifacts` and `./subs` into
 `/kaggle/working`. Your training command then runs unchanged, with the same relative paths and the same frozen
@@ -120,10 +120,10 @@ checked byte for byte.
 
 ```bash
 # full 5-fold run of a promoted idea: folds 0-4 spread over both T4s
-python -m kgkit gpu build --name cnx384 --hours 7 --dataset me/knee-png-512 \
+kgkit gpu build --name cnx384 --hours 7 --dataset me/knee-png-512 \
     --cmd "python src/train_image.py --name cnx384 --img-size 384 --folds {fold}"
-python -m kgkit gpu push .kaggle-gm/build/cnx384-train # outward-facing: confirm with the user first
-python -m kgkit gpu wait me/cnx384-train --collect     # background
+kgkit gpu push .kaggle-gm/build/cnx384-train # outward-facing: confirm with the user first
+kgkit gpu wait me/cnx384-train --collect     # background
 ```
 
 Custom scripts work if they follow the contract: accept `--folds <k>` and `--assemble`, write
@@ -159,7 +159,7 @@ and a `collect` finding, and so is a missing `--resume-from` kernel, whose folds
 
 ```bash
 # CPU stack over many OOF libraries (no GPU quota): every library keeps its own files
-python -m kgkit gpu build --name stack --hours 2 --accelerator none --input-layout nested \
+kgkit gpu build --name stack --hours 2 --accelerator none --input-layout nested \
     --dataset megayak/s6e10-oof mitudru/s6e10-oof=data/ext/mitudru-oof --kernel thisray/s6e10-stack \
     --cmd "python src/stack.py"
 ```
@@ -231,7 +231,7 @@ python -m kgkit gpu build --name stack --hours 2 --accelerator none --input-layo
       `TrainBudget` agrees across ranks by itself; save, log and write OOFs on rank 0 only (`tb.is_main`).
       The plugin's image and transformer templates run one process per fold, not DDP.
 
-## 4. Budgeting until the deadline (`python -m kgkit gpu plan`)
+## 4. Budgeting until the deadline (`kgkit gpu plan`)
 
 - Total ≈ hours left now + resets before the deadline × weekly quota. Count the resets from
   `refreshAt` in 7-day steps; one that lands before the deadline counts, even on the last day.
@@ -298,7 +298,7 @@ step, bf16 losses matching the T4 run to 3-4 decimals. The catch is the queue:
 
 - `kgkit gpu push` (and raw `kaggle kernels push` with GPU or TPU) spends the user's quota and is
   outward-facing. Confirm with the user unless they authorised remote runs for this task.
-- Never print credentials. The username comes from `python -m kgkit whoami` (`KAGGLE_USERNAME`, the
+- Never print credentials. The username comes from `kgkit whoami` (`KAGGLE_USERNAME`, the
   `username` field of kaggle.json, or `kaggle config view` for token logins). It never reads the key.
 - Deleting a kernel (the only way to drop a queued TPU job) destroys every version and output: the user
   decides.

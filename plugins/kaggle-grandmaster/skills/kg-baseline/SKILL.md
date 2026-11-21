@@ -6,22 +6,16 @@ allowed-tools:
   - Read
   - Glob
   - Grep
-  - 'Bash(PYTHONPATH="${CLAUDE_PLUGIN_ROOT}" python -m kgkit ledger *)'
-  - 'Bash(python -m kgkit ledger *)'
-  - 'PowerShell(python -m kgkit ledger *)'
-  - 'Bash(PYTHONPATH="${CLAUDE_PLUGIN_ROOT}" python -m kgkit validate *)'
-  - 'Bash(python -m kgkit validate *)'
-  - 'PowerShell(python -m kgkit validate *)'
-  - 'Bash(PYTHONPATH="${CLAUDE_PLUGIN_ROOT}" python -m kgkit status *)'
-  - 'Bash(python -m kgkit status *)'
-  - 'PowerShell(python -m kgkit status *)'
+  - 'Bash(kgkit ledger *)'
+  - 'Bash(kgkit validate *)'
+  - 'Bash(kgkit status *)'
 ---
 
 # /kg-baseline
 
-Run kgkit with the Bash tool, as `PYTHONPATH="${CLAUDE_PLUGIN_ROOT}" python -m kgkit <command>`: this command
-pre-approves that form for the kgkit calls it makes. Submitting, pushing or publishing still asks (so does a
-PowerShell `$env:` assignment).
+Run kgkit with the Bash tool as `kgkit <command>`: the plugin puts it on PATH, also on Windows (Git Bash),
+and this command pre-approves the kgkit calls it makes. Older text that says `python -m kgkit` means the same
+command. Submitting, pushing or publishing still asks.
 
 Arguments: `$ARGUMENTS`
 
@@ -29,7 +23,7 @@ Arguments: `$ARGUMENTS`
    `data/folds.csv` is missing).
 2. Choose the template from `${CLAUDE_PLUGIN_ROOT}/templates/` by task: tabular → `train_gbdt.py`;
    images → `train_image.py`; text → `train_transformer.py`. Copy into `src/`, vendor kgkit with
-   `PYTHONPATH="$KGKIT_HOME" python -m kgkit vendor third_party/` so `from kgkit import ...` works (the templates
+   `kgkit vendor third_party/` so `from kgkit import ...` works (the templates
    look in `third_party/`), and adapt the CONFIG block
    (paths, target, id, metric, features, model).
 3. Smoke test (1 fold, tiny settings), then the full run. Keep the baseline simple and fast — its
@@ -44,7 +38,7 @@ Arguments: `$ARGUMENTS`
    to check). Their OOFs are kept for the blend. Images/text: one fast backbone is enough on day 1;
    a second family comes in the exploration phase.
 5. Ensure each run logs to the ledger with OOF + test predictions and writes `subs/<exp_id>.csv`.
-6. Mark the main baseline as the reference: `python -m kgkit ledger decide <exp_id> baseline "<why>"`.
-7. `python -m kgkit validate subs/<exp_id>.csv data/sample_submission.csv`.
+6. Mark the main baseline as the reference: `kgkit ledger decide <exp_id> baseline "<why>"`.
+7. `kgkit validate subs/<exp_id>.csv data/sample_submission.csv`.
 8. Report CV ± std, per-fold scores, runtime per family, and recommend submitting the main baseline
    (via `/kg-submit`) to calibrate CV↔LB.

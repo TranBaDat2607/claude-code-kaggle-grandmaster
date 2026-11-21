@@ -7,26 +7,18 @@ allowed-tools:
   - Glob
   - Grep
   - Agent
-  - 'Bash(PYTHONPATH="${CLAUDE_PLUGIN_ROOT}" python -m kgkit backlog *)'
-  - 'Bash(python -m kgkit backlog *)'
-  - 'PowerShell(python -m kgkit backlog *)'
-  - 'Bash(PYTHONPATH="${CLAUDE_PLUGIN_ROOT}" python -m kgkit kernels pull *)'
-  - 'Bash(python -m kgkit kernels pull *)'
-  - 'PowerShell(python -m kgkit kernels pull *)'
-  - 'Bash(PYTHONPATH="${CLAUDE_PLUGIN_ROOT}" python -m kgkit ledger *)'
-  - 'Bash(python -m kgkit ledger *)'
-  - 'PowerShell(python -m kgkit ledger *)'
-  - 'Bash(PYTHONPATH="${CLAUDE_PLUGIN_ROOT}" python -m kgkit status *)'
-  - 'Bash(python -m kgkit status *)'
-  - 'PowerShell(python -m kgkit status *)'
+  - 'Bash(kgkit backlog *)'
+  - 'Bash(kgkit kernels pull *)'
+  - 'Bash(kgkit ledger *)'
+  - 'Bash(kgkit status *)'
 disable-model-invocation: true
 ---
 
 # /kg-grind — autonomous grandmaster loop
 
-Run kgkit with the Bash tool, as `PYTHONPATH="${CLAUDE_PLUGIN_ROOT}" python -m kgkit <command>`: this command
-pre-approves that form for the kgkit calls it makes. Submitting, pushing or publishing still asks (so does a
-PowerShell `$env:` assignment).
+Run kgkit with the Bash tool as `kgkit <command>`: the plugin puts it on PATH, also on Windows (Git Bash),
+and this command pre-approves the kgkit calls it makes. Older text that says `python -m kgkit` means the same
+command. Submitting, pushing or publishing still asks.
 
 Budget / focus: `$ARGUMENTS` (default: 6 experiments, no specific focus).
 
@@ -45,16 +37,16 @@ baseline beyond the paired noise, which `kgkit status` reports. The loop never f
   first), repeated crashes, disk/GPU memory issues, or the budget is spent.
 
 ## Loop
-1. **Orient**: `python -m kgkit status` (accepted baseline, decisions on these folds, backlog top),
+1. **Orient**: `kgkit status` (accepted baseline, decisions on these folds, backlog top),
    CLAUDE.md `## Current state`, `reports/` (recon, eda, error analyses, `journal.md`).
-2. **Backlog**: `python -m kgkit backlog list`. Refill it when fewer than ~5 open ideas by
+2. **Backlog**: `kgkit backlog list`. Refill it when fewer than ~5 open ideas by
    (a) dispatching `error-analyst` on the accepted baseline, (b) the domain skill's untried levers,
    (c) `solution-researcher` / `kgkit kernels pull` for prior art, (d) when runs are long or `gpu collect` reports
    an idle or input-bound GPU, a speed fix from `compute-efficiency`: a faster loop buys more experiments. Add each with
    `kgkit backlog add "<idea>" --gain --prob --cost --evidence --source`.
 3. **Pick** the top idea by (gain × probability) / cost, favouring cheap high-information tests early
    and scaling runs late. When it starts a new direction (a model family, new data, ensembling), name the phase
-   first: `python -m kgkit ledger phase "<name>"`. Batch independent cheap experiments in parallel when hardware allows
+   first: `kgkit ledger phase "<name>"`. Batch independent cheap experiments in parallel when hardware allows
    (e.g. two GPUs → two `experiment-runner` agents). Without a local GPU, run GPU experiments
    through `/kg-gpu` (1-fold screens, two per Kaggle session, with pruning). Pushing spends the
    user's weekly quota, so it needs their authorisation for this loop.
@@ -68,7 +60,7 @@ baseline beyond the paired noise, which `kgkit status` reports. The loop never f
 6. Every ~3 kept improvements: refresh the ensemble (`ensemble-architect`) and prepare a candidate
    submission file with its honest CV.
 7. When `status` warns about many decisions on the same folds, or every ~20 decisions: run
-   `python -m kgkit recheck --seed <new> --run "<old pipeline>" --run "<current pipeline>" --exp <root_id>
+   `kgkit recheck --seed <new> --run "<old pipeline>" --run "<current pipeline>" --exp <root_id>
    <baseline_id> --truth data/train.csv:<target>` (root from `kgkit ledger lineage`). If the gain
    shrank or did not survive, reverse-ablate the marginal KEEPs before adding new ideas
    (`grandmaster-playbook`, "Guarding against overfitting the CV itself"). If `kgkit backlog fidelity` shows

@@ -9,7 +9,7 @@ color: cyan
 You run exactly one experiment with scientific discipline.
 
 ## Protocol
-1. Read CLAUDE.md, `.kaggle-gm/competition.json`, and `PYTHONPATH="$KGKIT_HOME" python -m kgkit
+1. Read CLAUDE.md, `.kaggle-gm/competition.json`, and `kgkit
    status` to learn the metric, folds, the **accepted baseline** (`kgkit ledger baseline`: the last
    KEEP, not necessarily the best CV) and its code path.
 2. State the hypothesis and the single change. Use the accepted baseline as the comparison unless
@@ -19,12 +19,12 @@ You run exactly one experiment with scientific discipline.
    `work/`. The record also keeps the exact code it ran from (a snapshot under `refs/kg/` when the tree has
    uncommitted changes), so commit at natural points rather than before every run.
 4. Smoke-test on a tiny subset (1 fold, few iterations/epochs) to catch crashes quickly. Then check the script
-   against the compute defaults: `PYTHONPATH="$KGKIT_HOME" python -m kgkit speedcheck <script>` names slow
-   patterns and the domain's reference (`$KGKIT_HOME/skills/compute-efficiency/references/`). When the change
+   against the compute defaults: `kgkit speedcheck <script>` names slow
+   patterns and the domain's reference (`${CLAUDE_PLUGIN_ROOT}/skills/compute-efficiency/references/`). When the change
    touches the input pipeline, resolution or model size, run the template's `--bench` and report its rates.
 5. Run the full experiment on the frozen folds with the same seed(s) as the baseline. For long
    runs use background execution and check on progress rather than blocking. With no local GPU,
-   the run goes to Kaggle via `python -m kgkit gpu build/push/wait/collect` (skill `kaggle-gpu`).
+   the run goes to Kaggle via `kgkit gpu build/push/wait/collect` (skill `kaggle-gpu`).
    Push only if the delegating request says remote GPU runs are authorised; otherwise build the
    kernel and report the push command.
 6. Log with `kgkit.experiment.Ledger().log(...)`: name, cv, fold_scores, params, features,

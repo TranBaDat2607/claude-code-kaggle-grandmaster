@@ -41,11 +41,12 @@ This repo is a Claude Code marketplace (`.claude-plugin/marketplace.json`) conta
 - Templates and `kgkit/kaggle_gpu_runner.py` print ASCII only (Windows consoles are often cp1252).
 - Skills: knowledge skills are model-invoked; `kg-*` skills are slash commands. Side-effectful commands
   (`kg-submit`, `kg-grind`, `kg-kernel`, `kg-gpu`, `kg-showcase`, `kg-update`) set `disable-model-invocation: true`.
-- A `kg-*` command's `allowed-tools` pre-approves only the kgkit and Kaggle CLI subcommands it runs. Each kgkit
-  one is listed three times: `Bash(PYTHONPATH="${CLAUDE_PLUGIN_ROOT}" python -m kgkit <sub> *)`, the bare
-  `Bash(python -m kgkit <sub> *)`, and the `PowerShell(...)` form of the bare one. The body says to run kgkit in
-  the first form. An allow rule can't match the session brief's literal path, or a `$env:` assignment in
-  PowerShell. Never a blanket `kgkit *`, and never a command that submits, pushes or publishes
+- Claude runs kgkit as `kgkit <cmd>`: `bin/kgkit` is on the Bash tool's PATH while the plugin is enabled (it runs
+  the plugin's own kgkit with the first real Python), in subagents too. Skills, agents and hook messages never put a
+  path in the command (`PYTHONPATH=`, `$KGKIT_HOME`: `tests/test_skills.py` checks). `bin/kgkit` is committed
+  executable (mode 100755) and with LF like every text file (no `.gitattributes`: the directory rejects it).
+- A `kg-*` command's `allowed-tools` pre-approves only the kgkit and Kaggle CLI subcommands it runs, one rule per
+  kgkit subcommand: `Bash(kgkit <sub> *)`. Never a blanket `kgkit *`, and never a command that submits, pushes or publishes
   (`tests/test_skills.py` enforces this).
 - When a new skill is added, add it to the `no-plugin-skill` grader of every `negative` eval case
   (`tests/test_evals.py` enforces this). If the model should load it from a plain-language prompt (a knowledge

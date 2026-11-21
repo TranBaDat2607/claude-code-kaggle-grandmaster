@@ -27,7 +27,7 @@ Every training loop starts with these defaults. Load the `compute-efficiency` sk
 loop: it has the measurement, the per-domain how-to and what runs on which GPU.
 
 - **Measure first**: the templates' `--bench` times the data loader alone, the training step alone and the real
-  loop (`python -m kgkit bench --run "<cmd>"` for any script). Input-bound: fix the pipeline. Compute-bound: less
+  loop (`kgkit bench --run "<cmd>"` for any script). Input-bound: fix the pipeline. Compute-bound: less
   compute (AMP, compile, smaller inputs).
 - AMP (above), `channels_last` for CNNs, `cudnn.benchmark = True` for fixed input sizes, fused AdamW, SDPA attention.
 - Inputs cached once at training size (images as uint8 npy/PNG, text as token ids). `num_workers` = CPU cores ÷

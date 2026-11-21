@@ -40,7 +40,7 @@ at 0.85 correlation can add a lot.
 |---|---|
 | Simple mean of top-k diverse models | robust baseline; hard to overfit |
 | Rank average | AUC/ranking metrics; models with different calibration |
-| **Hill climbing (Caruana)** with replacement | default; `python -m kgkit blend --method hill` |
+| **Hill climbing (Caruana)** with replacement | default; `kgkit blend --method hill` |
 | Constrained weights (SLSQP, simplex) | smooth metrics (logloss/RMSE), few models |
 | Geometric mean / power average | probabilities for logloss; power>1 for AUC-ish sharpening |
 | Stacking (ridge/logistic/shallow GBDT meta on OOFs) | many models; potentially non-linear interactions; `--method stack` |

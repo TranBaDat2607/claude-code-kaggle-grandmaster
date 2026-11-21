@@ -6,7 +6,7 @@ description: Optimising directly for the Kaggle evaluation metric — choosing t
 # Metric Optimisation
 
 Step 1 is always: implement the exact metric (read the host's code if published), test it,
-and know whether it is global, per-group-averaged, or weighted. `python -m kgkit metrics`
+and know whether it is global, per-group-averaged, or weighted. `kgkit metrics`
 lists the built-in implementations (`kgkit.metrics.get(name)`).
 
 ## Metric → training & post-processing

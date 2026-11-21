@@ -19,7 +19,7 @@ only features validated on the frozen CV, built leak-free, count.
   goal is relative comparison. Confirm winners with the full model.
 - Large data (millions of rows): vectorised feature code (no `apply(axis=1)` / `iterrows`), polars or `cudf.pandas`
   for groupbys on a GPU, and `features search --model xgb --device cuda` to screen on the GPU
-  (`$KGKIT_HOME/skills/compute-efficiency/references/tabular.md`).
+  (`${CLAUDE_PLUGIN_ROOT}/skills/compute-efficiency/references/tabular.md`).
 - Log every ablation: `Ledger().log(name="fe_<family>", cv=..., fold_scores=..., features=cols,
   notes="+<family>", parent=<base_id>, oof=..., test_pred=...)`.
 - Accept with a paired comparison, not the fold std: `kgkit ledger compare <new> <base> --truth ...
@@ -31,7 +31,7 @@ only features validated on the frozen CV, built leak-free, count.
 2. Propose a ranked list of feature families with the hypothesis behind each.
 3. Implement and ablate one family at a time (add-one-in against the current base).
    Then run the brute-force search over what hand design misses (count / target encodings of pairs,
-   groupby aggregates, pairwise arithmetic): `python -m kgkit features search data/train.csv --target
+   groupby aggregates, pairwise arithmetic): `kgkit features search data/train.csv --target
    <y> --test data/test.csv --folds data/folds.csv:fold --screen-folds 0,1 --recheck-seed 7 --minutes 60`.
    Trust its recheck line (independent split), not the screen CV. Add the kept specs to
    `src/features.py` as one family (`kgkit.featsearch.materialize(load_specs(...), ...)`) and confirm with

@@ -4,7 +4,7 @@
    or credentials.json; Python that loads one and prints anything but the username field; KAGGLE_KEY /
    KAGGLE_API_TOKEN; `kaggle auth print-access-token`; and Kaggle CLI calls with VERBOSE / VERBOSE_OUTPUT on
    for that call (the CLI then prints request headers, bearer token included). Text that only mentions the
-   file (a heredoc saved with cat/tee, a commit message) passes; `python -m kgkit whoami` gives the username.
+   file (a heredoc saved with cat/tee, a commit message) passes; `kgkit whoami` gives the username.
 2. Blocks a dataset or model upload whose folder holds credential-like files or links to files outside it.
 3. Before each `kaggle competitions submit -f FILE` in the command: validates FILE against sample_submission
    (deny with reasons when invalid), and asks for confirmation when the same file was already submitted, when
@@ -124,7 +124,7 @@ def secret_reason(cmd: str) -> str | None:
     text = strip_text_heredocs(cmd)
     if SECRET_READ.search(text) or python_prints_secret(text):
         return ("this command would print Kaggle API credentials. Never display or copy the key; check auth with "
-                "`kaggle competitions list`, and get the username alone with `python -m kgkit whoami`.")
+                "`kaggle competitions list`, and get the username alone with `kgkit whoami`.")
     if PRINT_TOKEN.search(cmd):
         return "`kaggle auth print-access-token` prints a live access token. Never display it."
     if verbose_kaggle_call(cmd):
@@ -162,7 +162,7 @@ def gpu_push_guard(payload: dict, push: dict) -> bool:
         return False
     q = C.G.cached_quota(root, res)
     if q is None:
-        sys.stderr.write(f"kaggle-grandmaster: {res} quota unknown - run `python -m kgkit gpu quota` before pushing.\n")
+        sys.stderr.write(f"kaggle-grandmaster: {res} quota unknown - run `kgkit gpu quota` before pushing.\n")
         return False
     avail = C.G.available_hours(root, q, res)
     try:
@@ -177,7 +177,7 @@ def gpu_push_guard(payload: dict, push: dict) -> bool:
         decide(permissionDecision="ask",
                permissionDecisionReason=f"kaggle-grandmaster: the weekly Kaggle {res} quota looks exhausted: "
                                         f"{avail:.2f}h plannable after running kernels{when}. Push {kernel} anyway? "
-                                        "(`python -m kgkit gpu quota` re-checks runs that already finished)")
+                                        "(`kgkit gpu quota` re-checks runs that already finished)")
         return True
     if cap is not None and cap > avail:
         decide(permissionDecision="ask",
@@ -186,7 +186,7 @@ def gpu_push_guard(payload: dict, push: dict) -> bool:
         return True
     if cap is None:
         sys.stderr.write(f"kaggle-grandmaster: {res} push without -t: a hung session can burn up to "
-                         f"{C.G.session_limit(res):g}h of quota. Prefer `python -m kgkit gpu push <dir> [--hours H]` "
+                         f"{C.G.session_limit(res):g}h of quota. Prefer `kgkit gpu push <dir> [--hours H]` "
                          "(quota check + cap + run log).\n")
     return False
 

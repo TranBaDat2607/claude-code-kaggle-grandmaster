@@ -73,7 +73,7 @@ public signals: LB position over time, discussion posts, past write-ups.
 - **Submission-count rule at merge time**: the merged team's combined submissions usually must not exceed
   what a single team could have made by the merge date. Two teams that each used every daily slot may be
   unable to merge.
-- Team size limits and the merger deadline (the rules page, `python -m kgkit pages --page rules`;
+- Team size limits and the merger deadline (the rules page, `kgkit pages --page rules`;
   `discussions sync` also prints both, plus whether merging is banned, when Meta Kaggle's
   Competitions.csv is cached). External-data and pretrained-model rules apply to every member's pipeline.
 
@@ -82,7 +82,7 @@ public signals: LB position over time, discussion posts, past write-ups.
    it. The ledger's `folds_hash` shows who trained on what.
 2. **Exchange OOF + test predictions** in one format (`.npy`, same row order as train / sample
    submission, probabilities not labels). Each member imports the others' predictions:
-   `python -m kgkit ledger import <name> oof.npy --test test.npy --truth data/train.csv:<target>
+   `kgkit ledger import <name> oof.npy --test test.npy --truth data/train.csv:<target>
    --folds data/folds.csv:fold --source teammate`. CV is recomputed on the shared folds, not copied
    from a message.
 3. **Mismatched folds**: re-train cheap models on the shared folds. Expensive models that can't be

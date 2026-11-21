@@ -1,0 +1,25 @@
+#!/bin/sh
+# kgkit as a command: Claude Code puts the plugin's bin/ on the Bash tool's PATH while kaggle-grandmaster is
+# enabled, so Claude runs `kgkit <command>` with no path to the plugin in it (#122). Allow rules match it
+# (`Bash(kgkit status *)`), it works the same in subagents, and after /kg-update + /reload-plugins it is the new
+# version's.
+#
+# It runs this plugin's own kgkit (../kgkit), with the first Python that is a real interpreter: KGKIT_PYTHON if set,
+# else python (an activated conda env or venv, which has numpy and pandas), python3, py. The Windows Store's
+# python stubs (...\WindowsApps\python*.exe) are skipped. Few processes (each costs ~50 ms on Windows) and exec, so
+# a call costs about what `python -m kgkit` does.
+case "$0" in
+  */* | *\\*) here="${0%[/\\]*}" ;;  # the folder of this file, from a / or a Windows \ path
+  *) here=. ;;
+esac
+# native Windows Python reads C:/..., not /c/...: Git Bash's pwd -W gives that form, elsewhere it fails and pwd runs
+ROOT="$(cd "$here/.." && { pwd -W 2>/dev/null || pwd; })" || exit 1
+for py in ${KGKIT_PYTHON:+"$KGKIT_PYTHON"} python python3 py; do
+  found="$(command -v "$py")" || continue
+  case "$found" in
+    *WindowsApps*) continue ;;
+  esac
+  PYTHONPATH="$ROOT" exec "$found" -m kgkit "$@"
+done
+echo "kgkit: no Python found (tried ${KGKIT_PYTHON:+$KGKIT_PYTHON, }python, python3, py); set KGKIT_PYTHON" >&2
+exit 127

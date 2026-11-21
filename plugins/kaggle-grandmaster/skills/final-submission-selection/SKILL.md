@@ -11,7 +11,7 @@ than the public LB.
 
 ## 1. Gather evidence
 
-`python -m kgkit ledger best -n 20` and `python -m kgkit status`. For each candidate: CV mean/std,
+`kgkit ledger best -n 20` and `kgkit status`. For each candidate: CV mean/std,
 public LB, CV-LB agreement, number of models, use of risky elements (leaks, PL, LB-tuned weights,
 aggressive post-processing), and its correlation with other candidates.
 
@@ -21,7 +21,7 @@ Weight public LB by its statistical reliability:
 - Public set small (a few thousand rows or fewer), noisy metric, or adversarial AUC high → trust CV.
 - Public set large and drawn like private, CV-LB correlation strong → LB and CV mostly agree; use both.
 - Private is a *future* period → favour robustness (simpler, ensemble-heavy, less feature drift).
-Formalise per pair of candidates: `python -m kgkit ledger compare <a> <b> --public-n <rows>` gives the
+Formalise per pair of candidates: `kgkit ledger compare <a> <b> --public-n <rows>` gives the
 paired SE of their gap at the public-set size (both are scored on the same public rows, so this is far
 smaller than the SE of one score); treat LB gaps below ~2 paired SE as ties broken by CV. The SE of one
 absolute score (`kgkit ledger noise <id> --public-n <rows>`) is for judging one candidate's CV-LB gap,
@@ -63,7 +63,7 @@ measured about 3x too small on a binary AUC task.
 - Check prediction distributions vs OOF, no NaNs, correct id coverage.
 - Make sure the selection is actually set on the website (the user must tick the submissions;
   otherwise Kaggle auto-selects the best public scores, which are often the fitted files). Kaggle has no API
-  to select, but `python -m kgkit final` reads the selection back. In the last 3 days `kgkit status` and the
+  to select, but `kgkit final` reads the selection back. In the last 3 days `kgkit status` and the
   session brief warn until it has confirmed the selection; earlier, only when a fitted file would be auto-selected.
 
 ## 5. Endgame timeline (back-planned from the deadline)

@@ -7,31 +7,25 @@ allowed-tools:
   - Glob
   - Grep
   - Agent
-  - 'Bash(PYTHONPATH="${CLAUDE_PLUGIN_ROOT}" python -m kgkit backlog *)'
-  - 'Bash(python -m kgkit backlog *)'
-  - 'PowerShell(python -m kgkit backlog *)'
-  - 'Bash(PYTHONPATH="${CLAUDE_PLUGIN_ROOT}" python -m kgkit ledger *)'
-  - 'Bash(python -m kgkit ledger *)'
-  - 'PowerShell(python -m kgkit ledger *)'
-  - 'Bash(PYTHONPATH="${CLAUDE_PLUGIN_ROOT}" python -m kgkit status *)'
-  - 'Bash(python -m kgkit status *)'
-  - 'PowerShell(python -m kgkit status *)'
+  - 'Bash(kgkit backlog *)'
+  - 'Bash(kgkit ledger *)'
+  - 'Bash(kgkit status *)'
 ---
 
 # /kg-experiment
 
-Run kgkit with the Bash tool, as `PYTHONPATH="${CLAUDE_PLUGIN_ROOT}" python -m kgkit <command>`: this command
-pre-approves that form for the kgkit calls it makes. Submitting, pushing or publishing still asks (so does a
-PowerShell `$env:` assignment).
+Run kgkit with the Bash tool as `kgkit <command>`: the plugin puts it on PATH, also on Windows (Git Bash),
+and this command pre-approves the kgkit calls it makes. Older text that says `python -m kgkit` means the same
+command. Submitting, pushing or publishing still asks.
 
 Hypothesis: `$ARGUMENTS`
 
 Follow the experiment protocol (`grandmaster-playbook` §2):
 
-1. `python -m kgkit status` and `python -m kgkit ledger baseline` → the **accepted baseline** id
+1. `kgkit status` and `kgkit ledger baseline` → the **accepted baseline** id
    (last KEEP, not the highest CV), its CV ± std and code path. If nothing is accepted yet, decide one
-   first (`python -m kgkit ledger decide <id> baseline`). If the idea is in the backlog, mark it
-   `python -m kgkit backlog set <n> --status running --first-experiment "<command you will run>"`; otherwise add
+   first (`kgkit ledger decide <id> baseline`). If the idea is in the backlog, mark it
+   `kgkit backlog set <n> --status running --first-experiment "<command you will run>"`; otherwise add
    it (same options).
 2. Restate the hypothesis, the *single* change, the baseline id, and the success criterion:
    paired gain ≥ ~2 standard errors of the per-fold differences (or of the OOF bootstrap) with most
@@ -42,7 +36,7 @@ Follow the experiment protocol (`grandmaster-playbook` §2):
 3. Implement behind a flag/config in the existing script, never in a copy of it (`train_v2.py`): the record keeps
    the command it ran, so the flag says what changed. A quick probe that is not the experiment goes in `work/`. Smoke test, then full run on frozen folds
    with the baseline's seed(s). When the change touches the input pipeline, the resolution / `max_len` or the
-   model size, run the script's `--bench` (or `python -m kgkit bench --run "<cmd>"`) after the smoke test, so the
+   model size, run the script's `--bench` (or `kgkit bench --run "<cmd>"`) after the smoke test, so the
    cost in GPU time is known before the run. A pure speed change (AMP, compile, caching) is an experiment too:
    keep it on its speed-up with the score unchanged (skill `compute-efficiency`). For long runs (> ~10 min) run in the background and keep working on
    analysis meanwhile; or delegate the whole run to the `experiment-runner` agent.
@@ -51,21 +45,21 @@ Follow the experiment protocol (`grandmaster-playbook` §2):
    it predicts: the templates early-stop on an inner slice / keep the last epoch and log `oof_selection`. When
    `ledger compare` says the baseline was selected otherwise, re-run the baseline before deciding a small gain.
 5. Decide with numbers:
-   `python -m kgkit ledger compare <new> --truth data/train.csv:<target> --folds data/folds.csv:fold`
+   `kgkit ledger compare <new> --truth data/train.csv:<target> --folds data/folds.csv:fold`
    (add `--groups data/train.csv:<group>` when rows are clustered). In a `holdout+lb` workspace log the
-   run with its holdout predictions instead, `python -m kgkit ledger add <new> auto --pred <FILE>:<cols>`:
+   run with its holdout predictions instead, `kgkit ledger add <new> auto --pred <FILE>:<cols>`:
    the score is recomputed and compared, paired, with the accepted baseline right away (no folds).
    KEEP / DISCARD / INCONCLUSIVE: INCONCLUSIVE → second seed, logged with the same `--variant` so its
    spread counts as seed noise (or keep only if it adds no complexity/runtime); `--rope <gain>` marks
    changes too small to matter; a flagged huge jump → `validation-auditor` before accepting.
-6. Record it: `python -m kgkit ledger decide <new> keep|discard|inconclusive "<gain, folds k/K>"
+6. Record it: `kgkit ledger decide <new> keep|discard|inconclusive "<gain, folds k/K>"
    --parent <baseline>`; KEEP makes it the new baseline (the accepted decision made last is the baseline;
    `decide <id> baseline` restores any record). A model kept only as a member of the accepted ensemble:
-   `decide <new> keep --member`, which leaves the baseline alone. `python -m kgkit backlog set <n> --status done
+   `decide <new> keep --member`, which leaves the baseline alone. `kgkit backlog set <n> --status done
    --exp <new> --result "<decision + gain>"`: the learning goes in these two (the decision's "why" and the
    result), not in CLAUDE.md, which loads into every session. Rewrite `## Current state` in CLAUDE.md only when
    this decision changes it (the plan, a direction now closed, a new standing gotcha); a longer narrative goes in
    `reports/journal.md`. Commit code. A sweep of runs is decided at once: `python -m
    kgkit ledger decide 12..20 discard "<why>"`.
 7. Suggest the next experiment based on what was learned. When it changes direction (a new model family, new data,
-   ensembling, the final week), name the new phase first: `python -m kgkit ledger phase "<name>"`.
+   ensembling, the final week), name the new phase first: `kgkit ledger phase "<name>"`.

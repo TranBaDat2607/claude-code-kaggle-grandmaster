@@ -82,7 +82,7 @@ def vendored_note(root: Path) -> str:
     one = len(found) == 1
     return (f"Vendored kgkit not at the plugin's version {KGKIT_VERSION}: {copies}. Scripts that import a copy, and "
             f"`python -m kgkit` run from one, run its version. Refresh {'it' if one else 'each'} with the plugin's "
-            f"kgkit: `PYTHONPATH=\"{KGKIT_HOME}\" python -m kgkit vendor {found[0][0] if one else '<folder>'}` (later "
+            f"kgkit: `kgkit vendor {found[0][0] if one else '<folder>'}` (later "
             "experiments then run the new code).")
 
 
@@ -197,7 +197,7 @@ def brief(root: Path) -> str:
     if not holdout and not (root / "data" / "folds.csv").exists():
         lines.append("No data/folds.csv yet — freeze the CV scheme before comparing experiments (/kg-cv). If "
                      "decisions are made on a fixed holdout + the public LB instead, record that: "
-                     "`python -m kgkit config validation=holdout+lb holdout_n=<rows>`.")
+                     "`kgkit config validation=holdout+lb holdout_n=<rows>`.")
     try:
         vendored = vendored_note(root)
     except OSError:
@@ -236,15 +236,16 @@ def no_workspace(cwd: str) -> str:
     return (f"This repo looks like existing Kaggle work ({seen}) but has no .kaggle-gm/ workspace, so submission "
             f"logging, the daily-budget checks, this status brief and `kgkit status`/`ledger` are off. Adopt it in "
             f"place with /kaggle-grandmaster:kg-adopt {slug} (writes only .kaggle-gm/, imports past submissions; "
-            f"or `python -m kgkit adopt {slug}{flags} --deadline <date>`). Use /kg-start only for a new competition: "
+            f"or `kgkit adopt {slug}{flags} --deadline <date>`). Use /kg-start only for a new competition: "
             f"it bootstraps data, folds and a baseline from scratch.")
 
 
 def main() -> None:
     payload = C.read_input()
     _export_env()
-    parts = [f"[kaggle-grandmaster] kgkit home: {KGKIT_HOME} — run `PYTHONPATH=\"{KGKIT_HOME}\" python -m kgkit <cmd>` "
-             f"(PowerShell: `$env:PYTHONPATH=\"{KGKIT_HOME}\"; python -m kgkit <cmd>`); templates in {KGKIT_HOME}/templates."]
+    parts = ["[kaggle-grandmaster] kgkit is a command on the Bash tool's PATH: run `kgkit <cmd>` with the Bash tool "
+             "(also on Windows; `kgkit --help` lists the commands). Text that says `python -m kgkit` means the same "
+             f"command. Templates in {KGKIT_HOME}/templates."]
     root = C.workspace(payload)
     if root is not None:
         b = brief(root)

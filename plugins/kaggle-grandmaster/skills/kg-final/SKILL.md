@@ -6,35 +6,29 @@ allowed-tools:
   - Glob
   - Grep
   - Agent
-  - 'Bash(PYTHONPATH="${CLAUDE_PLUGIN_ROOT}" python -m kgkit final *)'
-  - 'Bash(python -m kgkit final *)'
-  - 'PowerShell(python -m kgkit final *)'
-  - 'Bash(PYTHONPATH="${CLAUDE_PLUGIN_ROOT}" python -m kgkit ledger *)'
-  - 'Bash(python -m kgkit ledger *)'
-  - 'PowerShell(python -m kgkit ledger *)'
-  - 'Bash(PYTHONPATH="${CLAUDE_PLUGIN_ROOT}" python -m kgkit status *)'
-  - 'Bash(python -m kgkit status *)'
-  - 'PowerShell(python -m kgkit status *)'
+  - 'Bash(kgkit final *)'
+  - 'Bash(kgkit ledger *)'
+  - 'Bash(kgkit status *)'
   - 'Bash(kaggle competitions submissions *)'
   - 'PowerShell(kaggle competitions submissions *)'
 ---
 
 # /kg-final
 
-Run kgkit with the Bash tool, as `PYTHONPATH="${CLAUDE_PLUGIN_ROOT}" python -m kgkit <command>`: this command
-pre-approves that form for the kgkit calls it makes. Submitting, pushing or publishing still asks (so does a
-PowerShell `$env:` assignment).
+Run kgkit with the Bash tool as `kgkit <command>`: the plugin puts it on PATH, also on Windows (Git Bash),
+and this command pre-approves the kgkit calls it makes. Older text that says `python -m kgkit` means the same
+command. Submitting, pushing or publishing still asks.
 
 Follow the `final-submission-selection` skill.
 
-1. Evidence table from `python -m kgkit ledger best -n 20` + all submissions with LB scores:
+1. Evidence table from `kgkit ledger best -n 20` + all submissions with LB scores:
    id, CV ± std, honest blend CV, public LB, risk elements, correlation with the top candidate.
    Records tagged `public-lb-fitted` (files tilted toward an estimate of the public labels; `kgkit status`
    marks them `[public-LB fitted]`) go in their own group, "display only": never pick 1, pick 2 or the hedge.
-   A file that is fitted but not tagged yet: `python -m kgkit ledger tag <id> public-lb-fitted`. Blends whose
+   A file that is fitted but not tagged yet: `kgkit ledger tag <id> public-lb-fitted`. Blends whose
    weights or members were picked by comparing public scores get `public-tuned` (`kgkit final` lists groups of
    blend variants that look probed): mark them `[public-tuned]` in the table.
-2. Estimate public-LB noise per pair of candidates (`python -m kgkit ledger compare <a> <b> --public-n <rows>`:
+2. Estimate public-LB noise per pair of candidates (`kgkit ledger compare <a> <b> --public-n <rows>`:
    paired SE of their LB gap; not the SE of one score, see `cv-lb-debugging`) and the CV-LB correlation.
    LB-only records (blends with public files) are left out of that correlation; in a `holdout+lb` workspace
    compare candidates on their stored holdout predictions (`kgkit status` prints the measured paired noise).
@@ -48,7 +42,7 @@ Follow the `final-submission-selection` skill.
    CV-chosen alternative next to it.
 4. Robustness checks: reproduce the chosen files from code (or confirm the kernel versions ran on
    the hidden test with runtime margin); validate files.
-5. Run `python -m kgkit final`: it asks Kaggle which submissions are selected. With none selected, Kaggle
+5. Run `kgkit final`: it asks Kaggle which submissions are selected. With none selected, Kaggle
    auto-selects the best public scores, which late in a Playground are often the fitted files: say which ones
    they are. Then tell the user to **select the picks on the website** before the deadline (Kaggle has no API
    for it), with the steps and the deadline in UTC and local time that `kgkit final` prints. Once they have

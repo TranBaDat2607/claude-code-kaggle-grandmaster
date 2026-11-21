@@ -19,12 +19,15 @@ every `kgkit` command, the templates, GPU training, how it is tested, and what g
 
 ## Permissions
 
-The `kg-*` commands don't pre-approve any shell, file-write or web tools, so
-Claude asks before each one according to your own permission settings. If you want `/kg-grind` to
-run hands-off, allow the toolkit in your workspace's `.claude/settings.json`:
+Claude runs the toolkit as `kgkit <command>`: the plugin's `bin/kgkit` is on the Bash tool's PATH while the plugin is
+enabled. Each `kg-*` command pre-approves the read-only and bookkeeping kgkit subcommands it runs (for that turn
+only), never one that submits, pushes or publishes. Other tools (file writes, training runs, web reads) ask according
+to your own permission settings. If you want `/kg-grind` to run hands-off, allow what it needs in your workspace's
+`.claude/settings.json`, for example:
 
 ```json
-{ "permissions": { "allow": ["Bash(python -m kgkit:*)", "Edit(./src/**)", "Write(./src/**)"] } }
+{ "permissions": { "allow": ["Bash(kgkit status *)", "Bash(kgkit ledger *)", "Bash(kgkit backlog *)",
+                             "Edit(./src/**)", "Write(./src/**)"] } }
 ```
 
 Kaggle submissions and GPU pushes still go through the plugin's hooks, which check them either way.
@@ -175,7 +178,8 @@ plugin works as before.
 ## `kgkit` toolkit
 
 ```bash
-PYTHONPATH="$KGKIT_HOME" python -m kgkit <command>     # KGKIT_HOME is set by the SessionStart hook
+kgkit <command>                                  # in Claude Code: bin/kgkit is on the Bash tool's PATH
+PYTHONPATH="<plugin folder>" python -m kgkit <command>   # in your own terminal
 ```
 
 `python -m kgkit vendor third_party` copies the package into the project so training scripts can `import kgkit` (the

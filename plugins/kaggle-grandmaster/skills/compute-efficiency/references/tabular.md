@@ -10,8 +10,8 @@ Contents: [Where the time goes](#where-the-time-goes) · [GPU dataframes](#gpu-d
 Split feature building from model fitting before optimising either:
 
 ```bash
-python -m kgkit bench --run "python src/features.py"
-python -m kgkit bench --run "python src/train_gbdt.py --smoke" --run "python src/train_gbdt.py --smoke --device cuda"
+kgkit bench --run "python src/features.py"
+kgkit bench --run "python src/train_gbdt.py --smoke" --run "python src/train_gbdt.py --smoke --device cuda"
 python -m cudf.pandas --profile src/features.py    # which pandas calls ran on the GPU, which fell back to the CPU
 ```
 

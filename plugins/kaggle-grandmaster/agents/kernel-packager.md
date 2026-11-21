@@ -26,9 +26,9 @@ environment and produce a valid submission on the hidden test set.
    `NvidiaTeslaT4` for 2x T4, competition + dataset + model sources; skill `kaggle-cli` lists the shapes a
    push takes). If the weights came from a remote training kernel (`kgkit gpu`), list
    that kernel in `kernel_sources` (its `artifacts/<name>/fold*.pt`) instead of re-uploading them.
-   GPU inference pushes spend the weekly quota: check `python -m kgkit gpu quota` first.
-5. Make it fast before timing it: `PYTHONPATH="$KGKIT_HOME" python -m kgkit speedcheck <script>`, and the checklist
-   in `$KGKIT_HOME/skills/compute-efficiency/references/inference.md` (`inference_mode`, fp16, sorted batches, one
+   GPU inference pushes spend the weekly quota: check `kgkit gpu quota` first.
+5. Make it fast before timing it: `kgkit speedcheck <script>`, and the checklist
+   in `${CLAUDE_PLUGIN_ROOT}/skills/compute-efficiency/references/inference.md` (`inference_mode`, fp16, sorted batches, one
    process per T4, preprocessing shared by all models, exports such as TensorRT/ONNX/OpenVINO only with a measured
    gain and OOF parity, LLM engines and quantisation). Then locally: run the inference script against a synthetic
    test of the hidden-test size (or the training data reshaped like test) to measure runtime and verify parity with

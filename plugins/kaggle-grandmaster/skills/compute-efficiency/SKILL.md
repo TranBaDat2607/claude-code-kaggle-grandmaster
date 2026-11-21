@@ -40,7 +40,7 @@ The general PyTorch loop (precision, memory, input pipeline, fold-parallel vs DD
   loop. It prints samples/s for each, the verdict and the peak GPU memory, then the speed-up against the previous
   bench of the same run name and the settings that changed (kept in `reports/bench.jsonl`). It trains nothing and
   logs nothing to the ledger.
-- **Any command** (GBDT, cuDF features, an inference script): `python -m kgkit bench --run "<command>"` runs it,
+- **Any command** (GBDT, cuDF features, an inference script): `kgkit bench --run "<command>"` runs it,
   samples GPU utilisation and memory with `nvidia-smi` and prints the wall time and a verdict. With a second
   `--run` it prints the speed-up of each run against the first. Use reduced settings (one fold, fewer rounds, a
   slice of the test set) so a run takes minutes.
