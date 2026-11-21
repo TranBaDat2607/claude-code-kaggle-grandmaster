@@ -26,6 +26,7 @@ Commands
   vendor      copy kgkit into a project or a Kaggle dataset folder (for offline kernels)
   whoami      your Kaggle username (KAGGLE_USERNAME, kaggle.json or `kaggle config view`; never the key)
   update-check  is a newer kaggle-grandmaster released, and the command that installs it (/kg-update)
+  permissions   the allow rules for kgkit's bookkeeping calls; --write adds them to .claude/settings.local.json
   datasets    pull  — download a dataset, file by file when the whole-dataset download returns 404
   gpu         quota | plan | build | push | status | wait | collect | repush | release | cancel | log  — Kaggle GPUs/TPUs
 """
@@ -482,6 +483,33 @@ def cmd_final(a):
     print("\n".join(FN.steps(st)))
 
 
+def cmd_permissions(a):
+    """List the allow rules, which are already set, and with --write merge the missing ones into the workspace's
+    .claude/settings.local.json."""
+    from pathlib import Path
+
+    from . import permissions as PM
+    from . import state as S
+
+    root = S.find_root() or Path.cwd()
+    if a.write:
+        try:
+            path, added = PM.write(root)
+        except ValueError as e:
+            raise SystemExit(str(e))
+        print(f"{path}: added {len(added)} rule(s)" if added else f"{path}: every rule was already there")
+        print("kgkit calls outside these still ask, and so do submits, pushes and uploads.")
+        return
+    have = PM.present(root)
+    print(f"Allow rules for kgkit's local bookkeeping and read-only calls ({len(have)} of {len(PM.rules())} set):")
+    for r in PM.rules():
+        print(f"  {'set    ' if r in have else 'missing'}  {r}")
+    print("Never included: " + ", ".join(f"kgkit {n}" for n in PM.NEVER) + " (they spend quota, publish, run a "
+          "command they are given, or redraw the folds), nor any Kaggle submit, push or upload.")
+    if len(have) < len(PM.rules()):
+        print("`kgkit permissions --write` adds the missing ones to .claude/settings.local.json (personal, git-ignored).")
+
+
 def cmd_standing(a):
     """Where the team stands on the leaderboard Kaggle shows (the private one once revealed), read whole through the
     SDK: ``kaggle competitions leaderboard --download`` returns the public one even after the end, and ``--show``
@@ -544,6 +572,10 @@ def cmd_status(a):
             print(f"added {added} submission(s) from Kaggle's list that the local log was missing")
     print(S.submissions_line(root, st))
     print(G.quota_line(root) or "Kaggle GPU quota: not fetched yet (`python -m kgkit gpu quota` caches it)")
+    from . import permissions as PM
+
+    if PM.status_line(root):
+        print(PM.status_line(root))
     print(f"experiments logged: {len(recs)}")
     if recs:
         best = led.best(1)
@@ -2422,6 +2454,13 @@ def build_parser() -> argparse.ArgumentParser:
 
     s = sub.add_parser("whoami", help="your Kaggle username (never the key or token)")
     s.set_defaults(fn=cmd_whoami)
+
+    s = sub.add_parser("permissions", help="allow rules for kgkit's local bookkeeping and read-only calls, so they "
+                                           "stop asking after the user's next message and in subagents (#123)")
+    s.add_argument("--write", action="store_true",
+                   help="merge them into the workspace's .claude/settings.local.json (personal, git-ignored); "
+                        "ask the user first")
+    s.set_defaults(fn=cmd_permissions)
 
     s = sub.add_parser("update-check", help="is a newer kaggle-grandmaster released, and the `claude plugin update` "
                                             "command that installs it (/kg-update; then /reload-plugins)")

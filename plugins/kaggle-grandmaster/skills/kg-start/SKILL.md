@@ -38,13 +38,13 @@ Follow the `grandmaster-playbook` and `competition-recon` skills. Steps:
    `kaggle competitions files <slug>`; on 401/403 tell the user to create an API token and/or
    accept the competition rules on the website — do not proceed with downloads until fixed. Never
    print credentials.
-2. **Workspace**: create/enter the directory; `git init` if not a repo.
+2. **Workspace**: create/enter the directory; `git init` if not a repo. Run `kgkit permissions`. If rules are missing, offer to add them once (`kgkit permissions --write`: local bookkeeping and read-only kgkit calls only, into the git-ignored `.claude/settings.local.json`). This command's pre-approvals end at the user's next message and never reach the agents it starts; those rules last.
 3. **Recon** (in parallel with the download): launch the `competition-analyst` agent for the slug
    (and optionally `solution-researcher` for prior art). Meanwhile:
 4. **Data**: `kaggle competitions download <slug> -p data/` and extract. List files and sizes.
 5. **Init**: `kgkit init <slug> --metric <m> --task <t> --target <col> --id-col <id>
    [--code-competition --runtime-hours H --no-internet] --deadline <date>` using facts from recon
-   (ask the user only for facts you cannot determine). It makes `.gitignore` cover `data/`, and adds it to a
+   (ask the user only for facts you cannot determine, all in one message, so the bootstrap continues after one reply). It makes `.gitignore` cover `data/`, and adds it to a
    `.gitignore` that exists. Then run `kgkit audit-repo`. It says whether the GitHub remote is public
    and checks that nothing from the competition's files is in git. Kaggle's rules forbid publishing them, and
    that covers copies and subsets too. Init also makes `work/` (scratch: probes, logs; ignored) and `studies/`

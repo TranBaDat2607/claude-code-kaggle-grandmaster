@@ -26,6 +26,9 @@ If the target is a public rank or score ("public top 10", "LB 0.965"), say once 
 has zero expected private value. Grind toward the honest equivalent instead: a validation gain over the accepted
 baseline beyond the paired noise, which `kgkit status` reports. The loop never fits or probes the public LB.
 
+## Before the loop
+Ask everything the budget needs in one message, before the first experiment: whether remote GPU runs are authorised and for how many hours, and anything the focus leaves open. Then the loop runs without waiting on the user. If `kgkit status` prints a **Permissions** line, offer `kgkit permissions --write` first: otherwise every kgkit call after the user's reply, and in each `experiment-runner`, asks.
+
 ## Guardrails
 - **Never submit to Kaggle** unless the user explicitly authorised autonomous submissions in this
   request; prepare and validate submission files instead.

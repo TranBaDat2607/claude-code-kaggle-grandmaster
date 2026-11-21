@@ -20,10 +20,13 @@ every `kgkit` command, the templates, GPU training, how it is tested, and what g
 ## Permissions
 
 Claude runs the toolkit as `kgkit <command>`: the plugin's `bin/kgkit` is on the Bash tool's PATH while the plugin is
-enabled. Each `kg-*` command pre-approves the read-only and bookkeeping kgkit subcommands it runs (for that turn
-only), never one that submits, pushes or publishes. Other tools (file writes, training runs, web reads) ask according
-to your own permission settings. If you want `/kg-grind` to run hands-off, allow what it needs in your workspace's
-`.claude/settings.json`, for example:
+enabled. Each `kg-*` command pre-approves the read-only and bookkeeping kgkit subcommands it runs, but only until your
+next message, and never in the agents it starts. `kgkit permissions` lists allow rules for those calls, and
+`kgkit permissions --write` merges them into the workspace's `.claude/settings.local.json` (personal, git-ignored),
+where they hold for every turn, session and subagent; `/kg-start`, `/kg-adopt`, `/kg-grind` and `/kg-status` offer it
+once. They never cover a call that spends quota, publishes, runs a command it is given (`bench`, `recheck`) or redraws
+the folds, nor any Kaggle submit, push or upload. Other tools (file writes, training runs, web reads) ask according to
+your own permission settings. To let `/kg-grind` edit code hands-off too, add for example:
 
 ```json
 { "permissions": { "allow": ["Bash(kgkit status *)", "Bash(kgkit ledger *)", "Bash(kgkit backlog *)",
@@ -219,6 +222,7 @@ the plugin's kgkit) to update it.
 | `gpu quota\|plan\|build\|push\|status\|wait\|collect\|release\|cancel\|log` | train on Kaggle GPUs and TPUs: live quota (GPU + TPU) and what holds it, budget to the deadline, remote training kernels, push of any kernel folder with a cap, ledger import, GPU/TPU-hour accounting ([below](#training-on-kaggle-gpus)) |
 | `datasets pull <owner/slug> <dir> [--files GLOB]` | download a dataset; falls back to one request per file when the whole-dataset archive returns 404 |
 | `update-check` | is a newer kaggle-grandmaster released: the running version against the latest GitHub release, what changed, and the exact `claude plugin update` command for this session's install (run by `/kg-update`, which you approve); after the update, that it waits for `/reload-plugins`, the folder kgkit runs from after the reload, and the older `kgkit vendor` copies in the workspace |
+| `permissions [--write]` | allow rules for kgkit's local bookkeeping and read-only calls, which a kg-* command pre-approves only until your next message; `--write` merges them into `.claude/settings.local.json` and makes git ignore that file |
 | `whoami` · `config [key=value ...]` | your Kaggle username (never the key) · show or set `competition.json` fields, e.g. `validation=holdout+lb holdout_n=58` |
 
 Python API highlights: `kgkit.cv.assign_folds` (stratified / group / stratified-group /

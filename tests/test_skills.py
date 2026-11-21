@@ -18,7 +18,7 @@ RUN_FORM = "Run kgkit with the Bash tool as `kgkit <command>`"  # bin/kgkit, on 
 OLD_FORMS = re.compile(r"PYTHONPATH=|\$KGKIT_HOME|kgkit home|\$env:PYTHONPATH")
 # what a turn must never run unprompted: a submission, a push, an upload, anything public, quota spent
 OUTWARD = re.compile(r"\bsubmit\b|\bpush\b|datasets (create|version)|models? (create|instances)|\bgit\b|\bgh\b|"
-                     r"\bvendor\b|\brecheck\b|visibility")
+                     r"\bvendor\b|\brecheck\b|\bbench\b|\bpermissions\b|visibility")
 SIDE_EFFECTS = {"kg-submit", "kg-grind", "kg-kernel", "kg-gpu", "kg-showcase", "kg-update"}
 
 

@@ -54,6 +54,7 @@ does around the existing work: submission logging and the daily budget, the sess
    continue; the import can be re-run later with `--submissions-file`. Re-running is safe: existing
    state is kept and already-logged submissions are skipped.
    It then runs `kgkit audit-repo` (step 3).
+   Run `kgkit permissions`. If rules are missing, offer to add them once (`kgkit permissions --write`: local bookkeeping and read-only kgkit calls only, into the git-ignored `.claude/settings.local.json`). This command's pre-approvals end at the user's next message and never reach the agents it starts; those rules last.
 3. **Competition data in git.** The repo has been in git, maybe on a public GitHub, for weeks. The adopt output
    ends with the audit: whether the GitHub remote is public, and what git holds that comes from the competition's
    files. It compares contents, so a file made from `train.csv` under another name counts, and it checks every

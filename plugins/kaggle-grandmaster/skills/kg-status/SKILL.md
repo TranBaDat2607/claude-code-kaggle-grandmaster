@@ -31,15 +31,16 @@ command. Submitting, pushing or publishing still asks.
    the latest scores not yet attached to the ledger. Offer to attach them: `kgkit ledger sync-lb` does
    it for every submission that names its record; `kgkit ledger lb` does one by hand.
 3. If the GPU quota is stale or missing and remote runs are planned: `kgkit gpu quota`.
-4. `kgkit backlog list` and CLAUDE.md `## Current state` (`reports/journal.md` for the history). Flag experiments that were run but never
+4. If `status` prints a **Permissions** line, offer `kgkit permissions --write` once (it lists what it adds).
+5. `kgkit backlog list` and CLAUDE.md `## Current state` (`reports/journal.md` for the history). Flag experiments that were run but never
    decided (no `decision` in the ledger table) and offer to compare/decide them.
-5. If `status` warned about many decisions on the same folds, recommend the CV re-check
+6. If `status` warned about many decisions on the same folds, recommend the CV re-check
    (`grandmaster-playbook`, "Guarding against overfitting the CV itself").
-6. The public-LB line leads with the best score that is not public-LB fitted. Fitted files follow it,
+7. The public-LB line leads with the best score that is not public-LB fitted. Fitted files follow it,
    "display only": never present one as the team's standing. If `status` prints **LB-FITTING** (most recent
    submissions fit or probe the public LB while the honest track is flat), say so first: those files cannot
    raise the private score.
-7. If `status` prints **PLATEAU** or **CROWD**, make `/kg-ideas` the first recommended action, aimed at what
+8. If `status` prints **PLATEAU** or **CROWD**, make `/kg-ideas` the first recommended action, aimed at what
    the stack lacks (a new model family, data view or signal), with the GPU hours it names. Do not recommend
    more members of an existing family, or public-LB fitting. If PLATEAU says no public board is cached, offer
    `kgkit standing`: it reads the whole board, which can take a few minutes, and
