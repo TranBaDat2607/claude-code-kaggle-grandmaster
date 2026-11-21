@@ -202,6 +202,12 @@ def brief(root: Path) -> str:
     gq = C.G.quota_line(root)
     if gq:
         lines.append(gq)
+    try:
+        cpu_torch = C.G.cpu_torch_line()
+    except Exception:
+        cpu_torch = ""
+    if cpu_torch:
+        lines.append(cpu_torch)
     if not holdout and not (root / "data" / "folds.csv").exists():
         lines.append("No data/folds.csv yet — freeze the CV scheme before comparing experiments (/kg-cv). If "
                      "decisions are made on a fixed holdout + the public LB instead, record that: "

@@ -612,6 +612,8 @@ def cmd_status(a):
             print(f"added {added} submission(s) from Kaggle's list that the local log was missing")
     print(S.submissions_line(root, st))
     print(G.quota_line(root) or "Kaggle GPU quota: not fetched yet (`python -m kgkit gpu quota` caches it)")
+    if G.cpu_torch_line():
+        print(G.cpu_torch_line())
     from . import permissions as PM
 
     if PM.status_line(root):

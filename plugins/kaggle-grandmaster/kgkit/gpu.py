@@ -637,6 +637,47 @@ def accounts_line(root: str | Path) -> str:
     return s + ". Runs go to the active account; the person switches it in the Kaggle pane."
 
 
+TORCH_VERSION_RE = re.compile(r"""^__version__\s*=\s*["']([^"']+)["']""", re.M)
+TORCH_CUDA_RE = re.compile(r"""^cuda\s*(?::[^=\n]*)?=\s*(?:None|["']([^"']*)["'])""", re.M)
+
+
+def installed_torch(paths: list[str] | None = None) -> dict | None:
+    """The torch this interpreter would import (``paths``: where to look, default sys.path), read from its
+    version.py without importing it (an import takes seconds): {"version", "cuda" (None for a CPU-only build),
+    "dir"}. None when torch is not installed or its version.py is unreadable."""
+    from importlib.machinery import PathFinder
+    try:
+        spec = PathFinder.find_spec("torch", paths)
+    except (ImportError, ValueError, OSError):
+        return None
+    if spec is None or not spec.origin:
+        return None
+    try:
+        text = (Path(spec.origin).parent / "version.py").read_text(encoding="utf-8")
+    except OSError:
+        return None
+    v, c = TORCH_VERSION_RE.search(text), TORCH_CUDA_RE.search(text)
+    if c is None:
+        return None
+    return {"version": v.group(1) if v else "?", "cuda": c.group(1) or None, "dir": str(Path(spec.origin).parent)}
+
+
+def cpu_torch_line(paths: list[str] | None = None) -> str:
+    """A warning when the machine has an NVIDIA driver (nvidia-smi on PATH) but the installed torch is a CPU-only
+    build: local training then runs on the CPU, many times slower, and nothing fails to say so. '' otherwise.
+    No subprocess and no torch import, so the session brief can afford it."""
+    if not shutil.which("nvidia-smi"):
+        return ""
+    t = installed_torch(paths)
+    if t is None or t["cuda"] is not None:
+        return ""
+    return (f"LOCAL GPU UNUSED: this machine has an NVIDIA GPU (nvidia-smi is on PATH) but torch {t['version']} in "
+            f"{sys.executable} is a CPU-only build, so local training runs on the CPU. Tell the user and offer to "
+            "install the CUDA build of the same torch version (and the matching torchvision) from "
+            "https://download.pytorch.org/whl/cu<XYZ> (pick a CUDA version the driver supports, see `nvidia-smi`; "
+            "an RTX 50-series GPU needs CUDA 12.8 or newer); installing changes their environment, so ask first.")
+
+
 def resets_before(q: dict, deadline: str | None) -> int:
     """Weekly resets from the quota's refreshAt (7-day steps) that land before the deadline day ends."""
     if not deadline:
