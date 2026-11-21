@@ -26,6 +26,7 @@ import hashlib
 import io
 import json
 import os
+import re
 import statistics
 import sys
 import time
@@ -292,11 +293,18 @@ def lb_fitted(rec: dict) -> bool:
 ACCEPTED = ("baseline", "keep")
 
 
+def kept(rec: dict) -> bool:
+    """True for a kept node of the experiment tree: decided keep/baseline (an ensemble member kept with
+    ``--member`` too), not a re-check on re-drawn folds, not fitted to the public LB. What branches from it is
+    compared with it."""
+    return (isinstance(rec, dict) and rec.get("decision") in ACCEPTED and not rec.get("recheck")
+            and not lb_fitted(rec))
+
+
 def accepted(rec: dict) -> bool:
-    """True for a record that can be the accepted baseline: decided keep/baseline, not kept only as an ensemble
-    member (``decide keep --member``), not a re-check on re-drawn folds, not fitted to the public LB."""
-    return (isinstance(rec, dict) and rec.get("decision") in ACCEPTED and not rec.get("member")
-            and not rec.get("recheck") and not lb_fitted(rec))
+    """True for a record that can be the accepted baseline of its track: kept, and not kept only as an ensemble
+    member (``decide keep --member``)."""
+    return kept(rec) and not rec.get("member")
 
 
 def decision_order(rec: dict) -> tuple[int, str]:
@@ -305,11 +313,155 @@ def decision_order(rec: dict) -> tuple[int, str]:
     return int(rec.get("decision_seq") or 0), str(rec.get("decided_at") or rec.get("time") or "")
 
 
-def accepted_baseline(recs: list[dict]) -> dict | None:
-    """The accepted baseline: the accepted record decided last (not the last one in the ledger, so
-    ``decide <earlier-id> baseline`` works). Ties keep ledger order. None when nothing is accepted."""
-    cands = [(decision_order(r), i, r) for i, r in enumerate(recs) if accepted(r)]
-    return max(cands, key=lambda t: t[:2])[2] if cands else None
+# ---------------------------------------------------------------------------- model lines (#133)
+MAIN, ENSEMBLE = "main", "ensemble"
+_TRACK_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,39}")
+
+
+def check_track(name: str) -> str:
+    """A track name: one short word (letters, digits, ``-_.``), e.g. gbdt, cnn, vit-l."""
+    if not isinstance(name, str) or not _TRACK_RE.fullmatch(name):
+        raise ValueError(f"track {name!r}: one short word of letters, digits and -_. (gbdt, cnn, vit-l)")
+    return name
+
+
+def track_of(rec: dict, by_id: dict) -> str:
+    """The model line a record belongs to: its own ``track``, else ``ensemble`` for a blend, else its parent's
+    track, else ``main``. A track is a name on a root: what branches from it inherits it. A single model never
+    inherits the ensemble line: one decided against a blend (before #133 a kept blend was the one baseline) walks
+    on past it."""
+    single, seen = isinstance(rec, dict) and rec.get("model") != "blend", set()
+    while isinstance(rec, dict) and rec.get("id") not in seen:
+        own = rec.get("track") or (ENSEMBLE if rec.get("model") == "blend" else None)
+        if own and not (single and own == ENSEMBLE):
+            return str(own)
+        seen.add(rec.get("id"))
+        rec = by_id.get(rec.get("parent")) if rec.get("parent") else None
+    return MAIN
+
+
+def track_heads(recs: list[dict]) -> dict[str, dict]:
+    """The accepted baseline of each track: its accepted record decided last (not the last one in the ledger, so
+    ``decide <earlier-id> baseline`` works; ties keep ledger order). Main first, the ensemble last."""
+    by_id = {r.get("id"): r for r in recs}
+    best: dict[str, tuple] = {}
+    for i, r in enumerate(recs):
+        if accepted(r):
+            t, key = track_of(r, by_id), (decision_order(r), i)
+            if t not in best or key > best[t][0]:
+                best[t] = (key, r)
+    order = sorted(best, key=lambda t: (t != MAIN, t == ENSEMBLE, best[t][0]))
+    return {t: best[t][1] for t in order}
+
+
+def accepted_baseline(recs: list[dict], track: str | None = None) -> dict | None:
+    """The accepted baseline of ``track``; without one, the primary baseline: the main line's, else the model
+    line decided last, else the ensemble's. None when nothing is accepted."""
+    heads = track_heads(recs)
+    if track is not None:
+        return heads.get(track)
+    if MAIN in heads:
+        return heads[MAIN]
+    lines = [r for t, r in heads.items() if t != ENSEMBLE]
+    if lines:
+        return max(lines, key=decision_order)
+    return heads.get(ENSEMBLE)
+
+
+def base_for(rec: dict, recs: list[dict]) -> dict | None:
+    """What ``rec`` is compared with when no baseline is named: its nearest kept ancestor, else the parent it was
+    built from; without a parent, the accepted baseline of its track. None when the track has none yet. A parent
+    this ledger does not have raises KeyError (a local id named inside a remote run)."""
+    by_id = {r.get("id"): r for r in recs}
+    if rec.get("parent"):
+        if rec["parent"] not in by_id:
+            raise KeyError(rec["parent"])
+        seen, node = {rec.get("id")}, by_id[rec["parent"]]
+        while node is not None and node.get("id") not in seen:
+            if kept(node):
+                return node
+            seen.add(node.get("id"))
+            node = by_id.get(node.get("parent")) if node.get("parent") else None
+        return by_id[rec["parent"]]
+    track = track_of(rec, by_id)  # no main line yet (every line named): the primary baseline, as before tracks
+    return accepted_baseline(recs) if track == MAIN else accepted_baseline(recs, track)
+
+
+def resolve_members(rec: dict, recs: list[dict]) -> list[str]:
+    """The ledger ids a blend record was made of (``params.members``, else its weights' keys). Blends logged before
+    the ids were stored name their members as typed (``1``, ``0001``, a name): matched to the ids here."""
+    params = rec.get("params") or {}
+    ids = [r.get("id") for r in recs]
+    out = []
+    for ref in (str(m) for m in (params.get("members") or params.get("weights") or ())):
+        hit = next((i for i in ids if i == ref), None) or next(
+            (i for i in ids if ref.isdigit() and str(i).split("_")[0] == ref.zfill(4)), None) or next(
+            (r.get("id") for r in recs if r.get("name") == ref), None)
+        out.append(hit or ref)
+    return list(dict.fromkeys(out))
+
+
+def _hours_between(a: dict, b: dict) -> float | None:
+    import datetime as dt
+
+    try:
+        ta, tb = (dt.datetime.strptime(str(r.get("time")), "%Y-%m-%dT%H:%M:%S") for r in (a, b))
+    except ValueError:
+        return None
+    return (tb - ta).total_seconds() / 3600
+
+
+def track_stats(recs: list[dict], greater_is_better: bool = True) -> dict[str, dict]:
+    """Per model line, where the next hours go: ``head`` (its accepted baseline), ``root`` (the first record
+    accepted in it), ``records``, ``compared`` (decided keep/discard/inconclusive against a parent) and ``kept``,
+    ``gain`` (head over root, signed so that higher is better) and ``gain_per_hour`` (over the log times between
+    them). Lines with an accepted baseline first, in ``track_heads`` order. Re-checks are left out."""
+    by_id = {r.get("id"): r for r in recs}
+    heads = track_heads(recs)
+    groups: dict[str, list[dict]] = {}
+    for r in recs:
+        if isinstance(r, dict) and not r.get("recheck"):
+            groups.setdefault(track_of(r, by_id), []).append(r)
+    sign = 1 if greater_is_better else -1
+    out = {}
+    for t in [*heads, *(t for t in groups if t not in heads)]:
+        rs = groups.get(t, [])
+        compared = [r for r in rs if r.get("decision") in DECIDED and r.get("parent")]
+        acc = sorted((r for r in rs if accepted(r)), key=decision_order)
+        head, root = heads.get(t), (acc[0] if acc else None)
+        gain = per_hour = None
+        if head is not None and root is not None and head is not root \
+                and all(isinstance(r.get("cv"), (int, float)) for r in (head, root)):
+            gain = sign * (head["cv"] - root["cv"])
+            hours = _hours_between(root, head)
+            per_hour = gain / hours if hours and hours > 0 else None
+        out[t] = {"head": head, "root": root, "records": len(rs), "compared": len(compared),
+                  "kept": sum(1 for r in compared if r.get("decision") in ACCEPTED), "gain": gain,
+                  "gain_per_hour": per_hour}
+    return out
+
+
+def ensemble_advice(recs: list[dict], blend_args: str = " --truth FILE:COL --folds FILE:COL") -> list[str]:
+    """What the ensemble misses: no accepted blend while two model lines have a baseline, or a line's baseline
+    accepted after the ensemble's and not in it. Each line names the `kgkit blend` call that tests it (the new blend
+    is compared paired with the best accepted blend). ``blend_args``: the --truth/--folds of the workspace."""
+    heads = track_heads(recs)
+    lines = {t: h for t, h in heads.items() if t != ENSEMBLE}
+    ens = heads.get(ENSEMBLE)
+    cmd = "kgkit blend --exp " + " ".join(h["id"] for h in lines.values()) + blend_args
+    if ens is None:
+        if len(lines) < 2:
+            return []
+        return [f"no accepted blend of the {len(lines)} model lines yet: `{cmd}`, then `kgkit exp finish <blend> "
+                "baseline` makes it the ensemble's baseline"]
+    members = set(resolve_members(ens, recs))
+    missing = [(t, h) for t, h in lines.items() if h["id"] not in members
+               and decision_order(h) > decision_order(ens)]
+    if not missing:
+        return []
+    return [f"the ensemble {ens['id']} is behind: " + ", ".join(f"{h['id']} ({t})" for t, h in missing)
+            + f" not in the ensemble. Re-blend, `{cmd}`: the blend is compared paired with {ens['id']}, and "
+              "`kgkit exp finish <blend> keep` keeps it"]
 
 
 def public_tuned(rec: dict) -> bool:

@@ -55,7 +55,10 @@ verdict, the bookkeeping is two kgkit calls: mark the idea running, then `kgkit 
    an inner slice / keep the last epoch and log `oof_selection`. When the comparison says the baseline was selected
    otherwise, re-run the baseline before deciding a small gain. In a `holdout+lb` workspace log the run with its
    holdout predictions, `kgkit ledger add <new> auto --pred <FILE>:<cols>`: the score is recomputed and compared,
-   paired, with the accepted baseline right away (no folds).
+   paired, with the accepted baseline right away (no folds). A run of another model line (a CNN beside the GBDT, a
+   new backbone) takes `--track <name>`: the line's first run becomes its baseline (`kgkit exp finish <id>
+   baseline --track cnn`), and its later runs are compared with that, not with the main line's. A run is compared
+   with its nearest kept ancestor (`--parent`), else its line's baseline.
 5. Decide with numbers, from the verdict the run printed: KEEP / DISCARD / INCONCLUSIVE. INCONCLUSIVE → second
    seed, logged with the same `--variant` so its spread counts as seed noise (or keep only if it adds no
    complexity/runtime); a flagged huge jump → `validation-auditor` before accepting. The comparison needs other
@@ -66,8 +69,8 @@ verdict, the bookkeeping is two kgkit calls: mark the idea running, then `kgkit 
    It records the decision with the baseline it was compared against (KEEP makes it the new baseline: the accepted
    decision made last is the baseline; `exp finish <id> baseline` restores any record) and closes the backlog idea
    with the result (`inconclusive` keeps it running for the second seed). Deciding against the verdict is allowed
-   with the reason in the note. A model kept only as a member of the accepted ensemble: `--member`, which leaves
-   the baseline alone. The learning goes in the decision's "why" and the idea's result, not in CLAUDE.md, which
+   with the reason in the note. A model wanted for its diversity is not judged on its own CV: blend it
+   (`kgkit blend`), which compares the new blend, paired, with the best accepted blend. The learning goes in the decision's "why" and the idea's result, not in CLAUDE.md, which
    loads into every session. Rewrite `## Current state` in CLAUDE.md only when this decision changes it (the plan,
    a direction now closed, a new standing gotcha); a longer narrative goes in `reports/journal.md`. Commit code. A
    sweep of runs is decided at once: `kgkit ledger decide 12..20 discard "<why>"`.

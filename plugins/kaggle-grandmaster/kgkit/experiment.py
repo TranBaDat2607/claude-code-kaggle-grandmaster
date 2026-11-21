@@ -320,6 +320,7 @@ class Ledger:
         parent: str | None = None,
         decision: str | None = None,
         holdout_pred: np.ndarray | None = None,
+        track: str | None = None,
         **extra,
     ) -> dict:
         """Append an experiment. ``folds_hash`` fingerprints the CV split (``folds`` if given, else the fold
@@ -327,7 +328,10 @@ class Ledger:
         ``cv=None`` logs an LB-only record (tagged ``lb-only``): something that cannot be cross-validated,
         such as a blend with public submission files. ``holdout_pred`` stores per-row predictions on the
         workspace's labelled holdout (``eval_truth``), fingerprinted by ``eval_hash``, so two records can be
-        compared paired on it."""
+        compared paired on it. ``track``: the model line it starts (gbdt, cnn, ...); left out, it is its parent's
+        line (a blend's: ``ensemble``; no parent: ``main``)."""
+        if track:
+            E.check_track(track)
         recs = self.records()
         if cv is None and not set(tags) & set(LB_ONLY_TAGS):
             tags = [*tags, "lb-only"]
@@ -354,6 +358,7 @@ class Ledger:
             "folds_hash": self._folds_hash(folds),
             "recheck": os.environ.get("KG_RECHECK") or None,  # set by `kgkit recheck`: not on the frozen folds
             "parent": self._resolve_id(parent) if parent else None,
+            **({"track": track} if track else {}),
             "decision": _check_decision(decision) if decision else None,
             **({"decision_seq": self._next_decision_seq()} if decision else {}),
             "phase": (st.phase or None) if st else None,
@@ -421,12 +426,15 @@ class Ledger:
 
     @_locked
     def decide(self, exp_id: str, decision: str, note: str = "", parent: str | None = None,
-               member: bool = False) -> dict:
+               member: bool = False, track: str | None = None) -> dict:
         """Record the keep/discard decision (and optionally the baseline it was compared against). The accepted
         decision made last sets the baseline, whatever the ledger order. ``member``: kept as an ensemble member,
         without becoming the baseline. A ``public-lb-fitted`` record can be discarded but never accepted: it would
-        become the baseline new ideas are compared against."""
+        become the baseline new ideas are compared against. ``track``: put the record in that model line (with
+        ``baseline``: start the line)."""
         decision, rec = _check_decision(decision), self.get(exp_id)
+        if track:
+            E.check_track(track)
         if member and decision != "keep":
             raise ValueError(f"--member keeps a record as an ensemble member without making it the baseline: it goes "
                              f"with keep, not {decision}")
@@ -442,6 +450,8 @@ class Ledger:
             fields["decision_note"] = note
         if parent:
             fields["parent"] = self.get(parent)["id"]  # locally the baseline must exist
+        if track:
+            fields["track"] = track
         return self.update(exp_id, **fields)
 
     def _next_decision_seq(self) -> int:
@@ -470,17 +480,35 @@ class Ledger:
                         tags=[source], metric=metric, model=source, **extra)
 
     # ------------------------------------------------------------------ read
-    def baseline(self, fallback: bool = True) -> dict | None:
-        """The accepted baseline: the experiment decided ``keep`` or ``baseline`` most recently (not the last one in
-        the ledger), leaving out members kept with ``--member`` (``evalset.accepted_baseline``). Falls back to the
-        highest CV only when nothing has been accepted yet."""
-        r = E.accepted_baseline(self.records())
+    def baseline(self, fallback: bool = True, track: str | None = None) -> dict | None:
+        """The accepted baseline of ``track`` (default: the primary one, the main line's): the experiment of that
+        line decided ``keep`` or ``baseline`` most recently (not the last one in the ledger), leaving out members
+        kept with ``--member`` (``evalset.accepted_baseline``). Falls back to the highest CV only when nothing has
+        been accepted yet."""
+        recs = self.records()
+        r = E.accepted_baseline(recs, track)
+        if track is not None:
+            return r
         if r is not None:
             return r
         if fallback:
             best = self.best(1)
             return best[0] if best else None
         return None
+
+    def heads(self) -> dict[str, dict]:
+        """The accepted baseline of each model line, ``{track: record}`` (``evalset.track_heads``)."""
+        return E.track_heads(self.records())
+
+    def track(self, rec: dict) -> str:
+        """The model line of a record (``evalset.track_of``)."""
+        return E.track_of(rec, {r["id"]: r for r in self.records()})
+
+    def base_for(self, rec: dict) -> dict | None:
+        """What ``rec`` is compared with when no baseline is named (``evalset.base_for``): its nearest kept
+        ancestor, else its parent; without a parent, its track's accepted baseline. KeyError on a parent this
+        ledger does not have."""
+        return E.base_for(self.get(rec["id"]) if rec.get("id") else rec, self.records())
 
     def lineage(self, exp_id: str) -> list[dict]:
         """Chain of parents back to the root, oldest first — the list of changes a reverse ablation

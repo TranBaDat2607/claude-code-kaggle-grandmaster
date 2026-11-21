@@ -34,6 +34,10 @@ Delegate to the `ensemble-architect` agent, or follow these steps directly for a
 Blends that include public submission files (no OOF) cannot be scored this way: log them LB-only
 (`kgkit ledger add <name> lb-only --sub <file>`, then `kgkit ledger lb`) and follow `ensembling` §6.
 
-Report members, weights, single vs blended (honest) CV, and whether it deserves a submission slot. A new single
-model kept for its diversity is recorded `kgkit ledger decide <id> keep --member`: a plain keep would make it the
-accepted baseline, and the next `ledger compare` of an ensemble would run against it.
+Blends are their own model line (`ensemble`): each blend is logged as a child of the best accepted blend and
+compared with it, paired, when it is logged (with `--folds` its OOF and CV are the nested ones, so a blend with more
+members cannot win by fitting the OOFs). That is the test of a new model for its diversity: keep the blend with
+`kgkit exp finish <blend> keep`; the first one with `kgkit exp finish <blend> baseline`. Keeping a blend never moves
+a single model line's baseline. `kgkit ledger tracks` says when the ensemble misses a line's newer baseline.
+
+Report members, weights, single vs blended (honest) CV, and whether it deserves a submission slot.

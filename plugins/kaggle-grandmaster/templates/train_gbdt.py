@@ -315,6 +315,7 @@ def main():
     ap.add_argument("--params", type=json.loads, help='JSON overrides, e.g. \'{"num_leaves": 127}\'')
     ap.add_argument("--notes")
     ap.add_argument("--smoke", action="store_true", help="1 fold, 50 rounds, no ledger/submission")
+    ap.add_argument("--track", help="model line this run belongs to (gbdt, cnn, vit-l...): compared with that line's accepted baseline, not the main one; with exp finish ... baseline it starts the line")
     ap.add_argument("--parent", help="ledger id this experiment changes (the accepted baseline, usually)")
     ap.add_argument("--refit", action=argparse.BooleanOptionalAction, default=None,
                     help="after early stopping, refit on the whole training part with best_iteration / "
@@ -458,7 +459,7 @@ def main():
                           refit=bool(cfg["refit"] and es_on == "inner"),
                           es_slice=es_how if es_on == "inner" else None)
     rec = Ledger().log(
-        cfg["name"], cv, fold_scores=fold_scores, params=run_params, parent=args.parent,
+        cfg["name"], cv, fold_scores=fold_scores, params=run_params, parent=args.parent, track=args.track,
         features=feats, model=kind, notes=cfg["notes"], oof=oof, test_pred=test_pred,
         task=task, seeds=cfg["seeds"], best_iterations=best_iters, runtime_s=round(time.time() - t0, 1),
         train_scores=train_scores, oof_selection="scored-fold" if es_on == "scored-fold" else "independent",

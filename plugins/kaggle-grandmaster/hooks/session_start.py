@@ -174,6 +174,13 @@ def brief(root: Path) -> str:
         if accepted is not None:
             cv = f"CV {accepted['cv']:.5f}" if isinstance(accepted.get("cv"), (int, float)) else "LB-only"
             lines.append(f"Accepted baseline (compare new ideas against this): {accepted['id']} {cv}.")
+            others = [(t, h) for t, h in C.EV.track_heads(recs).items() if h["id"] != accepted["id"]]
+            if others:  # #133: each model line is compared with its own baseline, a blend with the best blend
+                lines.append("Other model lines (a record is compared with its nearest kept ancestor, else its "
+                             "track's baseline): " + "; ".join(
+                                 f"track {t} {h['id']}" + (f" CV {h['cv']:.5f}" if isinstance(h.get("cv"), (int, float))
+                                                          else "") for t, h in others) + ".")
+            lines.extend(C.EV.ensemble_advice(recs))
         elif len(scored) >= 2:
             lines.append("No accepted baseline yet: decide one (`kgkit ledger decide <id> baseline`) so experiments "
                          "are compared against a deliberate choice, not the luckiest CV.")

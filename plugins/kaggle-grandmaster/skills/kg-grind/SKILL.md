@@ -8,6 +8,7 @@ allowed-tools:
   - Grep
   - Agent
   - 'Bash(kgkit backlog *)'
+  - 'Bash(kgkit blend *)'
   - 'Bash(kgkit exp *)'
   - 'Bash(kgkit grind *)'
   - 'Bash(kgkit kernels pull *)'
@@ -54,6 +55,7 @@ Ask everything the budget needs in one message, before the first experiment: whe
 ## Loop
 1. **Orient**: `kgkit grind status --session ${CLAUDE_SESSION_ID}` (budget left, runs in flight; on BUDGET SPENT go
    to the final report), `kgkit status` (accepted baseline, decisions on these folds, backlog top),
+   `kgkit ledger tracks` (each model line's baseline and gain per hour, and whether the ensemble is behind),
    CLAUDE.md `## Current state`, `reports/` (recon, eda, error analyses, `journal.md`).
 2. **Backlog**: `kgkit backlog list`. Refill it when fewer than ~5 open ideas by
    (a) dispatching `error-analyst` on the accepted baseline, (b) the domain skill's untried levers,
@@ -61,7 +63,9 @@ Ask everything the budget needs in one message, before the first experiment: whe
    an idle or input-bound GPU, a speed fix from `compute-efficiency`: a faster loop buys more experiments. Add each with
    `kgkit backlog add "<idea>" --gain --prob --cost --evidence --source`.
 3. **Pick** the top idea by (gain × probability) / cost, favouring cheap high-information tests early
-   and scaling runs late. When it starts a new direction (a model family, new data, ensembling), name the phase
+   and scaling runs late. With several model lines, give the most hours to the line whose gain per hour is
+   highest (`kgkit ledger tracks`) and fewer to a plateaued one; when it says the ensemble is behind, re-blend
+   first (the `kgkit blend` call it prints), a cheap experiment. When it starts a new direction (a model family, new data, ensembling), name the phase
    first: `kgkit ledger phase "<name>"`. Batch independent cheap experiments in parallel when hardware allows
    (e.g. two GPUs → two `experiment-runner` agents). Without a local GPU, run GPU experiments
    through `/kg-gpu` (1-fold screens, two per Kaggle session, with pruning). Pushing spends the

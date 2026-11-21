@@ -340,6 +340,7 @@ def main():
     ap.add_argument("--notes")
     ap.add_argument("--smoke", action="store_true", help="1 fold, 2 batches per epoch, 1 epoch, nothing logged")
     ap.add_argument("--assemble", action="store_true", help="no training: assemble finished folds and log")
+    ap.add_argument("--track", help="model line this run belongs to (gbdt, cnn, vit-l...): compared with that line's accepted baseline, not the main one; with exp finish ... baseline it starts the line")
     ap.add_argument("--parent", help="ledger id this experiment changes (the accepted baseline, usually); the "
                     "run ends with the paired comparison against it")
     ap.add_argument("--bench", type=int, nargs="?", const=30, metavar="STEPS",
@@ -601,7 +602,7 @@ def main():
     if test_paths is not None:
         test_pred = np.mean([np.load(out_dir / f"fold{f}_test.npy") for f in all_folds], axis=0)
     rec = Ledger().log(cfg["name"], cv, fold_scores=fold_scores, model=cfg["backbone"], notes=cfg["notes"],
-                       parent=a.parent,
+                       parent=a.parent, track=a.track,
                        params={k: v for k, v in cfg.items() if k not in ("notes",)}, oof=oof, test_pred=test_pred,
                        runtime_s=round(time.time() - t0, 1),
                        oof_selection="scored-fold" if cfg["select"] == "best" else "independent")

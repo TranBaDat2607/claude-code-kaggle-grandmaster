@@ -636,6 +636,11 @@ def cmd_status(a):
                   f"compared against this, not against the best CV")
         else:
             print("no accepted baseline yet: mark one with `kgkit ledger decide <id> baseline`")
+        for t, h in led.heads().items():  # the other model lines (#133): each compared with its own baseline
+            if base is None or h["id"] != base["id"]:
+                print(f"  track {t}: {fmt_cv(h)} ({h['id']})")
+        for line in E.ensemble_advice(recs, _blend_args(led, st)):
+            print(line)
         n_dec = led.decisions_on_evalset()
         if st.holdout and n_dec >= 10:
             print(f"{n_dec} keep/discard decisions taken on this fixed holdout: each one spends a little of it, and "
@@ -779,6 +784,7 @@ def cmd_ledger(a):
     from .experiment import Ledger, fmt_cv
 
     led = Ledger()
+    _check_track_arg(a)
     if a.action == "list":
         print(led.table(a.n))
     elif a.action == "best":
@@ -803,6 +809,8 @@ def cmd_ledger(a):
         extra = {"variant": a.variant} if a.variant else {}
         if a.sub:
             extra["submission"] = a.sub
+        if a.track:
+            extra["track"] = a.track
         if a.pred:
             r = _ledger_add_preds(led, a, extra)
             _auto_compare(led, a, r)
@@ -829,8 +837,9 @@ def cmd_ledger(a):
     elif a.action == "decide":
         try:
             ids = led.ids(a.args[0])
-            before = led.baseline(fallback=False)
-            done = [led.decide(i, a.args[1], " ".join(a.args[2:]), parent=a.parent, member=a.member) for i in ids]
+            before = led.heads()
+            done = [led.decide(i, a.args[1], " ".join(a.args[2:]), parent=a.parent, member=a.member, track=a.track)
+                    for i in ids]
         except KeyError as e:
             raise SystemExit(str(e.args[0]) if e.args else str(e))
         except ValueError as e:
@@ -839,6 +848,7 @@ def cmd_ledger(a):
             print(f"{r['id']}: {r['decision']}" + (" (member)" if r.get("member") else "")
                   + (f" (vs {r['parent']})" if r.get("parent") else ""))
         _decide_baseline_note(led, done, before)
+        _member_note(led, [r for r in done if r.get("member")])
     elif a.action == "phase":
         _ledger_phase(led, a)
     elif a.action == "journey":
@@ -846,12 +856,26 @@ def cmd_ledger(a):
 
         J.main(led, a)
     elif a.action == "baseline":
+        if a.track:
+            r = led.baseline(track=a.track)
+            if r is None:
+                raise SystemExit(f"no accepted baseline in track {a.track} yet (lines with one: "
+                                 f"{', '.join(led.heads()) or 'none'})")
+            print(f"{r['id']}  CV {fmt_cv(r)}  [{r.get('decision')}, track {a.track}]")
+            return
         r = led.baseline()
         if r is None:
             print("(ledger is empty)")
         else:
             src = r.get("decision") if E.accepted(r) else "highest CV - nothing accepted yet"
             print(f"{r['id']}  CV {fmt_cv(r)}  [{src}]")
+            others = [(t, h) for t, h in led.heads().items() if h["id"] != r["id"]]
+            if others:
+                print("other model lines (a record is compared with its nearest kept ancestor, else its own track's):")
+                for t, h in others:
+                    print(f"  {t}: {h['id']}  CV {fmt_cv(h)}")
+    elif a.action == "tracks":
+        _ledger_tracks(led)
     elif a.action == "lineage":
         chain = led.lineage(a.args[0] if a.args else led.baseline()["id"])
         prev = None
@@ -872,7 +896,7 @@ def cmd_ledger(a):
         y = _truth(a.truth) if a.truth else None
         folds = _col(a.folds).to_numpy() if a.folds else None
         r = led.import_preds(a.args[0], arr(a.args[1]), arr(a.test) if a.test else None, y_true=y, folds=folds,
-                             cv=a.cv, notes=a.notes or "", source=a.source)
+                             cv=a.cv, notes=a.notes or "", source=a.source, **({"track": a.track} if a.track else {}))
         print(f"logged {r['id']}: CV {r['cv']:.5f}" + (f" +/- {E.fmt_se(r['cv_std'])}" if r.get("cv_std") else "")
               + f" [{a.source}]")
 
@@ -1058,11 +1082,11 @@ def _auto_compare(led, a, r: dict) -> None:
     has predictions on the same evaluation set."""
     import argparse
 
-    base = led.baseline(fallback=False)
+    base = _default_base(led, r)
     path = "holdout_path" if led._holdout() else "oof_path"
     if base is None or base["id"] == r["id"] or not base.get(path):
         if base is None:
-            print("no accepted baseline yet: `kgkit ledger decide <id> baseline`, then later records are compared "
+            print(f"{_no_baseline_yet(led, r)}: `kgkit ledger decide <id> baseline`, then later records are compared "
                   "with it automatically")
         return
     if led.eval_record_key(base) != led.eval_record_key(r):
@@ -1090,7 +1114,13 @@ def _ledger_compare(led, a, hint: bool = True, backlog: int | None = None) -> di
     if len(a.args) > 1:
         base_ref = a.args[1]
     else:
-        base = led.baseline()
+        base = None
+        if not Path(a.args[0]).is_dir() and not _is_file_ref(led, a.args[0]):
+            try:
+                base = _default_base(led, led.get(a.args[0]))
+            except KeyError:
+                pass  # a typo: reported below
+        base = base or led.baseline()
         if base is None:
             raise SystemExit("the ledger is empty: nothing to compare against")
         base_ref = base["id"]
@@ -1192,14 +1222,33 @@ def _ledger_compare(led, a, hint: bool = True, backlog: int | None = None) -> di
 
 
 def _default_base(led, rec: dict) -> dict | None:
-    """What a record is compared with when no baseline is named: its parent, else the accepted baseline."""
-    if rec.get("parent"):
+    """What a record is compared with when no baseline is named (``Ledger.base_for``): its nearest kept ancestor,
+    else its parent; without a parent, its track's accepted baseline."""
+    try:
+        return led.base_for(rec)
+    except KeyError:
+        raise SystemExit(f"{rec['id']}'s parent {rec['parent']} is not in this ledger: name the baseline with "
+                         "--parent <id>")
+
+
+def _no_baseline_yet(led, rec: dict) -> str:
+    """'no accepted baseline yet', naming the record's model line when it is not the main one."""
+    from . import evalset as E
+
+    track = led.track(rec)
+    if track == E.ENSEMBLE:
+        return "no accepted blend yet"
+    return "no accepted baseline yet" if track == E.MAIN else f"no accepted baseline in track {track} yet"
+
+
+def _check_track_arg(a) -> None:
+    from . import evalset as E
+
+    if getattr(a, "track", None):
         try:
-            return led.get(rec["parent"])
-        except KeyError:
-            raise SystemExit(f"{rec['id']}'s parent {rec['parent']} is not in this ledger: name the baseline with "
-                             "--parent <id>")
-    return led.baseline(fallback=False)
+            E.check_track(a.track)
+        except ValueError as e:
+            raise SystemExit(str(e))
 
 
 def _finish_command(led, new_id: str, base_id: str, decision: str, backlog: int | None = None) -> str:
@@ -1518,6 +1567,9 @@ def cmd_blend(a):
                 "stacked scores are optimistic. Re-run members on the shared folds, or keep the blend simple.\n")
     if len(oofs) <= 25:
         print("OOF correlation:\n" + E.oof_correlation(oofs).round(4).to_string() + "\n")
+    ids = [led.get(e)["id"] for e in oofs]  # the members as ledger ids, whatever ref was typed
+    ens = led.baseline(track="ensemble")  # the best accepted blend: this one is tested against it (#133)
+    parent = ens["id"] if ens is not None else None
     if a.method in ("stack", "residual"):
         if not a.folds:
             raise SystemExit(f"--method {a.method} needs --folds FILE:COLUMN (meta-models are fit out-of-fold)")
@@ -1528,20 +1580,22 @@ def cmd_blend(a):
             for i, ls in enumerate(res["layer_scores"], start=2):
                 print(f"level {i}: " + ", ".join(f"{k}={v:.6f}" for k, v in ls.items()))
             print(f"final blend of the last level: " + ", ".join(f"{k}={v:.3f}" for k, v in res["weights"].items()))
-            params = {"method": "stack", "levels": a.levels + 1, "members": list(oofs), "final_weights": res["weights"]}
+            params = {"method": "stack", "levels": a.levels + 1, "members": ids, "final_weights": res["weights"],
+                      "oof": "out-of-fold"}
         else:
             base = a.base or max(oofs, key=lambda e: M.score(metric, y, oofs[e]) * (1 if M.get(metric).greater_is_better else -1))
             res = E.residual_stack(oofs, tests, y, folds, base=base)
             print(f"residual stack on base {base}: base OOF {M.score(metric, y, oofs[base]):.6f}")
-            params = {"method": "residual", "base": base, "members": list(oofs)}
+            params = {"method": "residual", "base": base, "members": ids, "oof": "out-of-fold"}
         score = M.score(metric, y, res["oof"])
         print(f"meta OOF {metric}: {score:.6f} (out-of-fold; stacking on the same folds is still slightly optimistic)")
         if res.get("final_honest") is not None:
             print(f"honest (nested) final-blend {metric}: {res['final_honest']:.6f}")
         rec = led.log(a.name, score, model="blend", params=params, oof=res["oof"], test_pred=res["test"],
-                      notes=f"{a.method} of {', '.join(oofs)}", metric=metric)
+                      notes=f"{a.method} of {', '.join(oofs)}", metric=metric, parent=parent)
         print(f"logged {rec['id']}")
         _write_blend_sub(led, rec, res["test"], a)
+        _blend_compare(led, rec, a, in_sample=False)
         return
     if a.method == "hill":
         res = E.hill_climb(oofs, y, metric, allow_negative=a.allow_negative)
@@ -1552,6 +1606,7 @@ def cmd_blend(a):
         res["score"] = M.score(metric, y, E.blend(oofs, res["weights"], "rank"))
     print("weights: " + ", ".join(f"{k}={v:.3f}" for k, v in res["weights"].items()))
     print(f"blended OOF {metric}: {res['score']:.6f}")
+    honest = None
     if a.folds:
         honest = E.cv_blend_score(oofs, y, _col(a.folds).to_numpy(), metric,
                                   method="hill_climb" if a.method == "hill" else "weights")
@@ -1560,10 +1615,29 @@ def cmd_blend(a):
     blended_oof = E.blend(oofs, res["weights"], method)
     tests = {e: led.load_test(e) for e in res["weights"]}
     blended_test = E.blend(tests, res["weights"], method)
-    rec = led.log(a.name, res["score"], model="blend", params={"weights": res["weights"], "method": a.method},
-                  oof=blended_oof, test_pred=blended_test, notes=f"blend of {', '.join(a.exp)}", metric=metric)
-    print(f"logged {rec['id']}")
+    fitted = a.method in ("hill", "weights")  # rank: equal weights, nothing fit on the OOFs
+    nested = fitted and honest is not None  # the logged OOF and CV are the nested ones: not fit to the rows they score
+    params = {"weights": res["weights"], "method": a.method, "members": ids, "in_sample_cv": float(res["score"]),
+              "oof": "nested" if nested else ("in-sample" if fitted else "equal weights")}
+    rec = led.log(a.name, honest["oof_score"] if nested else res["score"], model="blend", params=params,
+                  oof=honest["oof"] if nested else blended_oof, test_pred=blended_test,
+                  notes=f"blend of {', '.join(a.exp)}", metric=metric, parent=parent)
+    print(f"logged {rec['id']}" + (" (its CV and OOF are the nested blend's; the test prediction uses the weights "
+                                   "fit on every fold)" if nested else ""))
     _write_blend_sub(led, rec, blended_test, a)
+    _blend_compare(led, rec, a, in_sample=fitted and not nested)
+
+
+def _blend_compare(led, rec: dict, a, in_sample: bool) -> None:
+    """The blend-gain test: a new blend, paired with the best accepted blend (its parent), on the same rows."""
+    try:
+        res = compare_logged(rec, truth=a.truth, folds=a.folds, root=led.root)
+    except SystemExit as e:
+        print(f"not compared with the best accepted blend: {e}")
+        return
+    if res is not None and in_sample:
+        print("note: these weights were fit on the OOFs they are scored on, so the gain is optimistic (a blend with "
+              "more members has more to fit): pass --folds for nested weights and an honest comparison")
 
 
 def _write_blend_sub(led, rec, blended_test, a):
@@ -1744,8 +1818,8 @@ def compare_logged(rec: dict, parent: str | None = None, truth: str | None = Non
     else:
         base = _default_base(led, rec)
     if base is None:
-        print(f"no accepted baseline yet: make this run the baseline with `kgkit exp finish {rec['id']} baseline "
-              "\"<why>\"`; later runs are compared with it when they log")
+        print(f"{_no_baseline_yet(led, rec)}: make this run the baseline with `kgkit exp finish {rec['id']} "
+              "baseline \"<why>\"`; later runs are compared with it when they log")
         return None
     if base["id"] == rec["id"]:
         return None
@@ -1795,6 +1869,7 @@ def cmd_exp(a):
     from .experiment import Ledger
 
     led = Ledger()
+    _check_track_arg(a)
     if a.action == "finish":
         _exp_finish(led, a)
 
@@ -1814,6 +1889,8 @@ def _exp_finish(led, a) -> None:
         rec = led.get(a.args[0])
     except KeyError as e:
         raise SystemExit(str(e.args[0]) if e.args else str(e))
+    if a.track and a.track != rec.get("track"):
+        rec = led.update(rec["id"], track=a.track)  # before the baseline is chosen: the line's own
     bl = Backlog(led.root)
     item, candidates = _finish_item(bl, led, rec["id"], a.backlog)
     res = base = None
@@ -1823,8 +1900,9 @@ def _exp_finish(led, a) -> None:
         except KeyError as e:
             raise SystemExit(str(e.args[0]) if e.args else str(e))
         if base is None or base["id"] == rec["id"]:
-            raise SystemExit(f"nothing to compare {rec['id']} with: no accepted baseline yet. Make it the baseline: "
-                             f"`kgkit exp finish {rec['id']} baseline \"<why>\"`, or name one with --parent <id>")
+            raise SystemExit(f"nothing to compare {rec['id']} with: {_no_baseline_yet(led, rec)}. Make it the "
+                             f"baseline: `kgkit exp finish {rec['id']} baseline \"<why>\"`, or name one with "
+                             "--parent <id>")
         opts = {k: getattr(a, k) for k in _PAIRED_DESTS if getattr(a, k, None) is not None}
         if a.method != "auto":
             opts["method"] = a.method
@@ -1850,7 +1928,7 @@ def _exp_finish(led, a) -> None:
     note = why
     if not note and res is not None:  # the numbers the decision rests on (and the verdict, when it went against it)
         note = _verdict_summary(res) + ("" if decision == suggested else f" (comparison: {res['decision']})")
-    before = led.baseline(fallback=False)
+    before = led.heads()
     try:
         r = led.decide(rec["id"], decision, note, parent=base["id"] if base is not None else None, member=a.member)
     except ValueError as e:
@@ -1858,6 +1936,7 @@ def _exp_finish(led, a) -> None:
     print(f"{r['id']}: {r['decision']}" + (" (member)" if r.get("member") else "")
           + (f" (vs {r['parent']})" if r.get("parent") else ""))
     _decide_baseline_note(led, [r], before)
+    _member_note(led, [r] if r.get("member") else [])
     if item is None:
         if candidates:
             print("backlog not updated: name the idea with --backlog <n> (open: "
@@ -2351,26 +2430,95 @@ class _CollectArgs(argparse.Action):
         namespace.args = [*getattr(namespace, "args", []), *(v for v in vals if v is not None)]
 
 
-def _decide_baseline_note(led, done: list[dict], before: dict | None) -> None:
-    """After `ledger decide`: the baseline `ledger baseline` returns now, and a warning when a record decided
-    keep/baseline does not become it."""
+def _decide_baseline_note(led, done: list[dict], before: dict[str, dict]) -> None:
+    """After `ledger decide` / `exp finish`: the accepted baseline of each model line that changed (``before``: the
+    heads, ``Ledger.heads``, before the decisions), and a warning when a record decided keep/baseline does not
+    become its line's."""
     from . import evalset as E
     from .experiment import fmt_cv
 
-    after = led.baseline(fallback=False)
+    after = led.heads()
+
+    def label(t):
+        return "accepted baseline" if t == E.MAIN else f"accepted baseline of track {t}"
+
+    changed = False
+    for t in [*before, *(t for t in after if t not in before)]:
+        b, n = before.get(t), after.get(t)
+        if n is not None and (b is None or n["id"] != b["id"]):
+            print(f"{label(t)} is now {n['id']} (CV {fmt_cv(n)})")
+            changed = True
+        elif n is None and b is not None:
+            print(f"no {label(t)} left: " + ("`ledger baseline` falls back to the highest CV; " if not after else "")
+                  + "decide one (`ledger decide <id> baseline" + ("" if t == E.MAIN else f" --track {t}") + "`)")
+            changed = True
     last = done[-1] if done else None
-    if after is not None and (before is None or after["id"] != before["id"]):
-        print(f"accepted baseline is now {after['id']} (CV {fmt_cv(after)})")
-    elif after is not None and last is not None and last["decision"] in E.ACCEPTED:
-        print(f"accepted baseline stays {after['id']} (CV {fmt_cv(after)})")
-    elif after is None and before is not None:
-        print("no accepted baseline left: `ledger baseline` falls back to the highest CV; decide one "
-              "(`ledger decide <id> baseline`)")
-    if last is not None and last["decision"] in E.ACCEPTED and not last.get("member") \
-            and (after is None or after["id"] != last["id"]):
+    if last is None or last["decision"] not in E.ACCEPTED:
+        return
+    t = led.track(last)
+    if not changed and after.get(t) is not None:
+        print(f"{label(t)} stays {after[t]['id']} (CV {fmt_cv(after[t])})")
+    if not last.get("member") and (after.get(t) is None or after[t]["id"] != last["id"]):
         why = (": it is a re-check on re-drawn folds (recheck), not comparable with the frozen folds"
                if last.get("recheck") else "")
-        print(f"warning: {last['id']} is {last['decision']} but is not the accepted baseline{why}")
+        print(f"warning: {last['id']} is {last['decision']} but is not the {label(t)}{why}")
+
+
+def _member_note(led, members: list[dict]) -> None:
+    """After keeping records with --member: their worth is what they add to the blend, tested paired."""
+    if members:
+        print(f"note: a member is worth what it adds to the ensemble: blend it, "
+              f"`{_blend_command(led, [m['id'] for m in members])}`; the blend is compared paired with the best "
+              "accepted blend, and `kgkit exp finish <blend> keep` keeps it")
+
+
+def _blend_command(led, ids: list[str]) -> str:
+    """The `kgkit blend` call over the model lines' accepted baselines, the ensemble's members and ``ids``, with this
+    workspace's labels and folds when they are known."""
+    from . import evalset as E
+    from . import state as S
+
+    recs = led.records()
+    heads = E.track_heads(recs)
+    pool = [h["id"] for t, h in heads.items() if t != E.ENSEMBLE]
+    if E.ENSEMBLE in heads:
+        pool += E.resolve_members(heads[E.ENSEMBLE], recs)
+    return "kgkit blend --exp " + " ".join(dict.fromkeys([*pool, *ids])) + _blend_args(led, S.load(led.root))
+
+
+def _blend_args(led, st) -> str:
+    truth = st.eval_truth if st is not None and st.eval_truth else "FILE:COL"
+    folds = "data/folds.csv:fold" if (Path(led.root) / "data" / "folds.csv").is_file() else "FILE:COL"
+    return f" --truth {truth} --folds {folds}"
+
+
+def _ledger_tracks(led) -> None:
+    """`ledger tracks`: one line per model line, then what the ensemble misses."""
+    from . import evalset as E
+    from . import state as S
+    from .experiment import fmt_cv
+
+    st = S.load(led.root)
+    recs = led.records()
+    stats = E.track_stats(recs, st.greater_is_better if st is not None else True)
+    if not stats:
+        print("(ledger is empty)")
+        return
+    for t, ts in stats.items():
+        head = ts["head"]
+        what = (f"{head['id']}  CV {fmt_cv(head)}" if head is not None else
+                f"no accepted baseline yet ({ts['records']} record(s): `kgkit exp finish <id> baseline"
+                + ("" if t == E.MAIN else f" --track {t}") + "`)")
+        bits = [f"{ts['kept']} kept of {ts['compared']} compared"]
+        if ts.get("gain") is not None:
+            bits.append(f"{E.fmt_gain(ts['gain'])} since {ts['root']['id']}"
+                        + (f" ({E.fmt_gain(ts['gain_per_hour'])}/h)" if ts.get("gain_per_hour") is not None else ""))
+        print(f"{t:10s} {what}  {'; '.join(bits)}")
+    for line in E.ensemble_advice(recs, _blend_args(led, st)):
+        print(line)
+    if len(stats) > 1:
+        print("spend the next hours where the gain per hour is highest; a line whose last decisions kept nothing has "
+              "plateaued: give it a bigger change, or its time to the other lines")
 
 
 def _action_parsers(p, actions: dict, options: list) -> None:
@@ -2423,7 +2571,10 @@ _LEDGER_OPTIONS = [
                                          "`kgkit status` warns while Kaggle would auto-select it")),
     ("--remove", dict(action="store_true", help="tag: remove the tags instead of adding them")),
     ("--member", dict(action="store_true", help="decide keep: keep it as an ensemble member without making it the "
-                                                "accepted baseline")),
+                                                "accepted baseline (its worth is tested by blending it: `kgkit blend`)")),
+    ("--track", dict(help="the model line the record belongs to (gbdt, cnn, vit-l...): each line has its own accepted "
+                          "baseline. Left out: its parent's line (a blend's: ensemble; no parent: main). With "
+                          "baseline: start the line")),
     ("--pred", dict(help="FILE:COL[,COL...] or .npy predictions on the evaluation set (holdout+lb: the holdout; else "
                          "OOF); the score is recomputed, the predictions stored and compared with the baseline")),
     ("--variant", dict(help="name shared by re-runs of one pipeline with other seeds (seed noise)")),
@@ -2459,40 +2610,45 @@ _LEDGER_ACTIONS = {
                                                "'lb-only': no validation score (fork of public notebooks, blend "
                                                "with public files)"),
                                   ("notes", "*", "free text")],
-            "--parent --tag --variant --notes --pred --sub " + _PAIRED),
+            "--parent --track --tag --variant --notes --pred --sub " + _PAIRED),
     "tag": ("add tags to a record, or remove them (--remove): mark a logged file public-lb-fitted or public-tuned",
             [_EXP, ("tag", "+", "tags to add (or remove)")], "--remove"),
     "compare": ("paired comparison of two experiments (or artifacts/<name> folders of per-fold OOFs)",
                 [("new", None, "ledger id/name or artifacts folder"),
-                 ("baseline", "?", "default: the accepted baseline")], _PAIRED + " --ref"),
+                 ("baseline", "?", "default: its nearest kept ancestor, else its track's accepted baseline")],
+                _PAIRED + " --ref"),
     "noise": ("noise of one absolute score: bounds its CV-LB gap, not a difference between two models",
               [_EXP], "--truth --groups --boot --method --public-n --metric"),
     "decide": ("record the decision on a compared experiment (or on several: a sweep decided at once)",
                [("exp_id", None, "ledger id or name, a list 3,7,9 or a range 12..20"),
                 ("baseline|keep|discard|inconclusive", None, "the decision"), ("note", "*", "why")],
-               "--parent --member"),
+               "--parent --member --track"),
     "phase": ("name the phase new records belong to (no name: list the phases), or put past records in one",
               [("name", "*", "the phase, e.g. stacking public OOFs")], "--records"),
     "journey": ("write journey/experiments.md: every record by phase, its parent, change, scores, decision and a "
                 "link to the code it ran from, and the lineage as a Mermaid graph", [], "--out --repo-url"),
-    "baseline": ("the accepted baseline (the highest CV while nothing is accepted)", [], ""),
+    "baseline": ("the accepted baseline (the highest CV while nothing is accepted), and the other model lines'",
+                 [], "--track"),
+    "tracks": ("each model line: its accepted baseline, kept/compared decisions and gain per hour (where the next "
+               "hours go), and whether the ensemble includes every line's latest baseline", [], ""),
     "lineage": ("the chain of decisions behind a record, for reverse ablation",
                 [("exp_id", "?", "default: the accepted baseline")], ""),
     "import": ("import predictions made elsewhere (teammate, public notebook)",
                [("name", None, "experiment name"), ("oof", None, "OOF predictions: .npy or FILE:COLUMN")],
-               "--test --truth --folds --cv --notes --source"),
+               "--test --truth --folds --cv --notes --source --track"),
 }
 
 _EXP_OPTIONS = [*_LEDGER_OPTIONS,
                 ("--backlog", dict(type=int, metavar="N", help="the backlog idea this experiment tests (default: the "
                                                                "open idea that lists it with --exp)"))]
 _EXP_ACTIONS = {
-    "finish": ("end an experiment in one call: the paired comparison with its parent (else the accepted baseline; the "
+    "finish": ("end an experiment in one call: the paired comparison with its nearest kept ancestor (else its track's "
+               "accepted baseline; the "
                "one made when the run was logged is reused), then, given a decision, record it and close the backlog "
                "idea (inconclusive keeps it running). Without a decision it prints the verdict and records nothing",
                [_EXP, ("keep|discard|inconclusive|baseline", "?", "the decision (left out: show the verdict only)"),
                 ("why", "*", "the note (default: the verdict's numbers)")],
-               "--parent --backlog --member " + _PAIRED),
+               "--parent --track --backlog --member " + _PAIRED),
 }
 
 _BACKLOG_OPTIONS = [

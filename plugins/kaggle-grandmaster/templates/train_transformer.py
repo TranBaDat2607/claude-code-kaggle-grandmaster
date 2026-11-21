@@ -356,6 +356,7 @@ def main():
     ap.add_argument("--folds", type=int, nargs="+")
     ap.add_argument("--smoke", action="store_true")
     ap.add_argument("--assemble", action="store_true", help="no training: assemble finished folds and log")
+    ap.add_argument("--track", help="model line this run belongs to (gbdt, cnn, vit-l...): compared with that line's accepted baseline, not the main one; with exp finish ... baseline it starts the line")
     ap.add_argument("--parent", help="ledger id this experiment changes (the accepted baseline, usually); the "
                     "run ends with the paired comparison against it")
     ap.add_argument("--bench", type=int, nargs="?", const=30, metavar="STEPS",
@@ -632,7 +633,7 @@ def main():
     cv = metric(y_metric, metric_input(task, metric, oof))
     test_pred = np.mean([np.load(out_dir / f"fold{f}_test.npy") for f in all_folds], axis=0) if test is not None else None
     rec = Ledger().log(cfg["name"], cv, fold_scores=fold_scores, model=cfg["model"], notes=cfg["notes"],
-                       parent=a.parent,
+                       parent=a.parent, track=a.track,
                        params={k: v for k, v in cfg.items() if k != "notes"},
                        oof=oof[:, 0] if n_out == 1 else oof,
                        test_pred=None if test_pred is None else (test_pred[:, 0] if n_out == 1 else test_pred),

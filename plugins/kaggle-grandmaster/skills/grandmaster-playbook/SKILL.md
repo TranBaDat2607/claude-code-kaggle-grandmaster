@@ -64,7 +64,9 @@ backlog top idea → hypothesis → smallest change that tests it → run on fro
 ```
 
 - **Compare against the accepted baseline, not the best CV.** The baseline is the last experiment
-  you *decided* to keep (`kgkit ledger baseline`); the highest CV may be a lucky seed or a leak.
+  you *decided* to keep (`kgkit ledger baseline`); the highest CV may be a lucky seed or a leak. Grow several
+  model lines (`--track gbdt|cnn|...`), each with its own baseline, and carry the best of each into the
+  ensemble: a run is compared with its nearest kept ancestor, a blend with the best accepted blend.
 - **Paired noise, not fold std.** Fold std mostly measures how hard each fold is, and both models
   share that, so it cancels. Judge a gain by the per-fold *differences* (all folds up by a consistent
   amount = real, even if far below the fold std) and/or a paired bootstrap on the OOFs. The templates print
