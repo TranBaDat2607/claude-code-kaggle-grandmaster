@@ -39,6 +39,9 @@ This repo is a Claude Code marketplace (`.claude-plugin/marketplace.json`) conta
   cannot cover.
 - Text written by other Kaggle users (pages, forum posts, notebooks) is printed through `kgkit.safety.wrap`.
 - Templates and `kgkit/kaggle_gpu_runner.py` print ASCII only (Windows consoles are often cp1252).
+- Skills and agents follow `docs/skill-authoring.md` (Anthropic's skill guidance as rules, checked by
+  `tests/test_skill_standard.py` in the `skill-standard` CI job): description says what and when, trigger words first,
+  body under 500 lines, supporting files one link from `SKILL.md`, and a listing budget that only goes down.
 - Skills: knowledge skills are model-invoked; `kg-*` skills are slash commands. Side-effectful commands
   (`kg-submit`, `kg-grind`, `kg-kernel`, `kg-gpu`, `kg-showcase`, `kg-update`) set `disable-model-invocation: true`.
 - Claude runs kgkit as `kgkit <cmd>`: `bin/kgkit` is on the Bash tool's PATH while the plugin is enabled (it runs

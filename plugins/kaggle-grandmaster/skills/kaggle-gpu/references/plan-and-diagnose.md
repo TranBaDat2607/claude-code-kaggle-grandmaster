@@ -56,7 +56,7 @@ with the speed-up against the previous bench.
     - Put the trade-off to the user when you plan recurring runs, with the numbers: "two copies per session:
       steadier result, ~12 h" vs "one copy on both GPUs: ~6-7 h, noisier, twice the ideas before the deadline".
     - The training loop must be DDP-safe (checklist in `compute-efficiency`,
-      [training-loop.md](../compute-efficiency/references/training-loop.md#ddp-checklist-for-your-own-loop)).
+      [training-loop.md](../../compute-efficiency/references/training-loop.md#ddp-checklist-for-your-own-loop)).
       `TrainBudget` agrees across ranks by itself; save, log and write OOFs on rank 0 only (`tb.is_main`).
       The plugin's image and transformer templates run one process per fold, not DDP.
 

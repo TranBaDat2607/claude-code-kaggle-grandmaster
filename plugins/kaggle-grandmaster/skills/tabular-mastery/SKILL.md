@@ -30,7 +30,7 @@ Playground data) a well-tuned MLP/TabM is competitive and strongly boosts the bl
   features and reports beating tuned GBDTs at that scale; check its licence and the competition rules)
   and AutoGluon (its OOF predictions can be stacking inputs). Validate both on the frozen folds like
   everything else.
-- Read `references/gbdt-params.md` for starting parameters and tuning order.
+- Read [references/gbdt-params.md](references/gbdt-params.md) for starting parameters and tuning order.
 
 ## 2. Feature engineering — where tabular competitions are won
 
@@ -140,7 +140,7 @@ of it is a member the libraries lack, and the generator is the usual place to fi
   from discriminative GBDTs and NNs, so it adds to a saturated stack. Fit it only on the training folds'
   labelled rows, exactly like any OOF member. A label-free density model of the rows usually adds ~0.
 - It is expensive, and the evidence so far is one competition: screen it on one fold first, and give it
-  `--gpu-hours` in the backlog. `references/synthetic-generators.md` has that competition's example.
+  `--gpu-hours` in the backlog. [references/synthetic-generators.md](references/synthetic-generators.md) has that competition's example.
 
 ## 8. Ensembling for tabular
 

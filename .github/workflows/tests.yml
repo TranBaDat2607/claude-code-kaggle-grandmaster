@@ -30,6 +30,20 @@ jobs:
       - name: Test
         run: python -m pytest tests -q -n auto
 
+  # docs/skill-authoring.md: Anthropic's skill guidance as checks, in its own job so a PR shows the standard by name
+  # and fails in seconds when a skill or agent breaks it.
+  skill-standard:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install
+        run: pip install pytest pyyaml numpy pandas
+      - name: Skill authoring standard
+        run: python -m pytest tests/test_skill_standard.py tests/test_skills.py tests/test_compaction.py -q -rs
+
   # Claude Code's own validator parses skill and agent frontmatter as the runtime does: a file it cannot parse
   # loads with empty metadata, silently (#120). It needs no login.
   validate:
