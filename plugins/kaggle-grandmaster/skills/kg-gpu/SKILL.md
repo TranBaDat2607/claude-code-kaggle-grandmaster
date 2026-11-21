@@ -1,7 +1,7 @@
 ---
 name: kg-gpu
 description: "Runs training on Kaggle GPUs within the weekly quota: plan, one-fold screens, full runs, resume, collect. Use to spend GPU hours on planned experiments."
-argument-hint: "[plan | screen <idea> [<idea2>] | run <experiment> | resume <kernel> | status | collect <kernel>]"
+argument-hint: "[plan | screen <idea> [<idea2>] | run <experiment> | local <experiment> | resume <kernel> | status | collect <kernel>]"
 allowed-tools:
   - Read
   - Glob
@@ -75,6 +75,12 @@ skipped and timed-out folds continue from their checkpoint.
 `gpu status` (re-checks every run still marked in flight and frees the quota of finished ones), or
 `gpu collect <kernel>`. Act on every diagnostic line (idle GPU, input-bound, deadline, pruned) as the
 skill's table says. A run that was deleted or never started: `gpu release <kernel>`.
+
+## local <experiment>
+On a machine with its own GPU, the same `gpu build` folder runs there: `gpu push <dir> --backend local [--hours H]`,
+then `gpu wait local/<slug> --collect` in the background. No quota is spent, so it needs no quota check; it still
+fills the user's GPU, so say what will run. Use it for screens and runs that fit the local card's memory, and Kaggle
+for the rest (the skill's section 2).
 
 ## Other kernels (notebooks, inference, holdout diagnostics)
 `gpu push <kernel-dir> --hours <cap>` works on any folder with `kernel-metadata.json`: same quota,

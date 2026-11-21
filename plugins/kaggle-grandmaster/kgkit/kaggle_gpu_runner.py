@@ -111,17 +111,44 @@ def find_source(found, ref, kind=None):
     return max(cands, key=rank)[0] if cands else None
 
 
+def junction(src, dst):
+    """A Windows directory junction (no symlink privilege needed); False where there is none."""
+    if os.name != "nt":
+        return False
+    try:
+        import _winapi
+        _winapi.CreateJunction(str(Path(src).resolve()), str(dst))
+        return True
+    except (ImportError, OSError):
+        return False
+
+
+def is_link(p):
+    """A symlink or a junction: a folder made inside it would be made in the input it points at."""
+    if p.is_symlink():
+        return True
+    try:
+        return os.name == "nt" and p.exists() and p.resolve() != p.parent.resolve() / p.name
+    except OSError:
+        return False
+
+
 def link(src, dst):
-    """Symlink (Kaggle/Linux); copy when symlinks are unavailable (Windows test runs)."""
+    """Symlink (Kaggle/Linux); on Windows without the symlink privilege (a local run, `gpu push --backend
+    local`) a junction for a folder or a hard link for a file, so the data is not copied; a copy as the last resort."""
     if dst.exists() or dst.is_symlink():
         return False
     try:
         os.symlink(str(src), str(dst), target_is_directory=src.is_dir())
     except (OSError, NotImplementedError):
         if src.is_dir():
-            shutil.copytree(str(src), str(dst))
+            if not junction(src, dst):
+                shutil.copytree(str(src), str(dst))
         else:
-            shutil.copy2(str(src), str(dst))
+            try:
+                os.link(str(src), str(dst))
+            except OSError:
+                shutil.copy2(str(src), str(dst))
     return True
 
 
@@ -132,7 +159,7 @@ def make_folder(dest, ref, taken):
     for i in range(1, len(parts) + 1):
         rel = "/".join(parts[:i])
         p, held = RUN / rel, taken.get(rel, "")
-        if held.startswith("linked") or p.is_symlink() or (p.exists() and not p.is_dir()):
+        if held.startswith("linked") or is_link(p) or (p.exists() and not p.is_dir()):
             return "%s is already %s" % (rel, held or "a file")
         if not p.exists():
             p.mkdir()
@@ -201,6 +228,8 @@ def link_dir(dst, target):
         os.symlink(str(target), str(dst), target_is_directory=True)
         return True
     except (OSError, NotImplementedError):
+        if junction(target, dst):
+            return True
         dst.mkdir(parents=True, exist_ok=True)
         return False
 
@@ -631,7 +660,8 @@ def stop_bad_machine(cfg, want, gpus):
 def main():
     cfg = json.loads(base64.b64decode(CONFIG_B64).decode("utf-8"))
     jobs = cfg["jobs"]
-    budget_s = float(cfg["hours"]) * 3600
+    hours = float(os.environ.get("KG_HOURS") or cfg["hours"])  # KG_HOURS: a local run's own cap
+    budget_s = hours * 3600
     safety_s = max(600.0, 0.08 * budget_s)
     deadline = T0 + budget_s - safety_s              # training must have checkpointed by now
     hard_deadline = T0 + budget_s - 0.4 * safety_s   # processes still alive are terminated here
@@ -828,7 +858,7 @@ def main():
         "jobs": job_reports, "accelerator": cfg.get("accelerator"), "resource": resource, "gpus": gpus,
         "devices": devices,
         "started_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(T0)),
-        "elapsed_s": round(time.time() - T0, 1), "budget_h": cfg["hours"],
+        "elapsed_s": round(time.time() - T0, 1), "budget_h": hours,
         "deadline_hit": any(s.get("status") in ("timeout", "killed", "not-started") for s in all_status),
         "gpu_util": sampler.summary(), "ledger": ledger, "git_commit": cfg.get("git_commit"),
         "git_dirty": cfg.get("git_dirty"), "git_snapshot": cfg.get("git_snapshot"), "build_id": cfg.get("build_id"),

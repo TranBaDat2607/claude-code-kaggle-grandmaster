@@ -2256,6 +2256,11 @@ def cmd_gpu(a):
             print("next: make room as the WARNING above says and build again (`gpu push` refuses this script)")
         else:
             print(f"next: smoke-test the command locally, then  python -m kgkit gpu push {kdir.as_posix()}")
+    elif a.gpu_cmd == "push" and a.backend == "local":
+        rec = G.push_local(None, a.dir, hours=a.hours, force=a.force)
+        print(f"started {rec['kernel']} v{rec['version']} on this machine (pid {rec['pid']}, cap {rec['hours']:g}h, "
+              f"log {rec['dir']}/session.log). Next: python -m kgkit gpu wait {rec['kernel']} --collect  (run it in "
+              "the background)")
     elif a.gpu_cmd == "push":
         rec = G.push(None, a.dir, force=a.force, hours=a.hours, check_sources=not a.no_source_check,
                      check_sessions=not a.no_session_check)
@@ -2301,11 +2306,22 @@ def cmd_gpu(a):
         n = G.release(root, a.kernel)
         print(f"{a.kernel}: {n} reservation(s) released" if n else f"{a.kernel}: nothing in flight in the run log")
         print(G.quota_report(root, refresh=False))
+    elif a.gpu_cmd == "cancel" and G.is_local(a.kernel):
+        root = G._root(None)
+        run = G.latest_run(root, a.kernel)
+        was = G.LR.status(run) if run else None
+        print(G.LR.cancel(run) if run else f"{a.kernel}: no local run of it in the run log")
+        if was == "running":
+            G.note_status(root, a.kernel, "cancelled")
     elif a.gpu_cmd == "cancel":
         s, _ = G.kernel_status(a.kernel)
         print(G.cancel_advice(a.kernel, s))
     elif a.gpu_cmd == "wait":
-        s = G.wait(None, a.kernel, interval=a.interval, max_hours=a.max_hours)
+        max_h = a.max_hours
+        if max_h is None:
+            max_h = (float(G.latest_run(G._root(None), a.kernel).get("hours") or 12) + 1
+                     if G.is_local(a.kernel) else 13)
+        s = G.wait(None, a.kernel, interval=a.interval, max_hours=max_h)
         if s == "complete" and a.collect:
             G.collect(None, a.kernel)
         sys.exit(0 if s == "complete" else 1)
@@ -2886,12 +2902,15 @@ def build_parser() -> argparse.ArgumentParser:
                         "the session slots look full, or the machine shape is not one Kaggle is known to accept")
     s.add_argument("--no-source-check", action="store_true", help="skip the check that input kernels have finished")
     s.add_argument("--no-session-check", action="store_true", help="skip the busy-session preflight")
+    s.add_argument("--backend", choices=["kaggle", "local"], default="kaggle",
+                   help="local: run the `gpu build` folder on this machine's GPU(s) as a background process (no "
+                        "quota; kernel id local/<slug>; --hours up to 168, default the build's cap)")
     s = gs.add_parser("status", help="status of active remote runs")
     s.add_argument("kernel", nargs="*")
     s = gs.add_parser("wait", help="poll a kernel until it finishes")
     s.add_argument("kernel")
     s.add_argument("--interval", type=float, default=90)
-    s.add_argument("--max-hours", type=float, default=13)
+    s.add_argument("--max-hours", type=float, default=None, help="default 13 (a local run: its cap + 1)")
     s.add_argument("--collect", action="store_true", help="collect the outputs when it completes")
     s = gs.add_parser("collect", help="bring a finished kernel's outputs back and account its GPU hours: a `gpu "
                                       "build` kernel's results go into the ledger, any other kernel's files into "
@@ -2906,7 +2925,8 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("kernel")
     s.add_argument("dir", nargs="?", help="the kernel folder (default: the one `gpu push` recorded)")
     s.add_argument("--yes", action="store_true", help="delete it: ask the user first, every version and output goes")
-    s = gs.add_parser("cancel", help="how to stop a running or queued kernel (prints the steps; deletes nothing)")
+    s = gs.add_parser("cancel", help="how to stop a running or queued kernel (prints the steps; deletes nothing); "
+                                     "a local run (local/<slug>) is stopped")
     s.add_argument("kernel")
     s = gs.add_parser("log", help="remote GPU runs and their cost")
     s.add_argument("-n", type=int, default=20)

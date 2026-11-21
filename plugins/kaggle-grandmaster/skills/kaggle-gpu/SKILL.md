@@ -91,6 +91,9 @@ Your command runs unchanged on Kaggle with the same relative paths and frozen fo
 per GPU. Before the first `gpu build`, read [references/pipeline.md](references/pipeline.md): the script contract,
 input layouts, a kernel of your own (caps, pruning, log echoes), resuming.
 
+**A local GPU runs the same build for free:** `gpu push <dir> --backend local` (no quota, kernel id
+`local/<slug>`); prefer it for runs that fit the card's memory: [references/local-gpu.md](references/local-gpu.md).
+
 ## 3. Grandmaster protocol for the most leaderboard per GPU-hour
 
 1. **Nothing gets debugged on Kaggle GPUs.** Run `--smoke` locally (CPU is fine) before every push.

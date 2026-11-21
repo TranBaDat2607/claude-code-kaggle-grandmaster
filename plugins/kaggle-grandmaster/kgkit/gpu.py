@@ -50,6 +50,11 @@ from . import safety
 from . import snapshot as SN
 from . import state as S
 
+try:
+    from . import localrun as LR
+except ImportError:  # a remote run's bundle leaves it out (BUNDLE_KGKIT_LOCAL_ONLY): no local runs there
+    LR = None
+
 # The runner is part of the package, not of the plugin around it: `kgkit vendor` copies only the package, and a copy
 # must fill in the runner its own config format was written for (the plugin's may be another version's).
 KGKIT_DIR = Path(__file__).resolve().parent
@@ -104,7 +109,7 @@ BUNDLE_EXCLUDE_DIRS = {"__pycache__", ".git", ".ipynb_checkpoints", "wandb", ".v
 # leaderboard after the deadline. Left out of the bundle, which counts toward Kaggle's source limit
 # (SOURCE_MAX_BYTES); `kgkit vendor` copies still have them.
 BUNDLE_KGKIT_LOCAL_ONLY = {"audit.py", "predictiveness.py", "journey.py", "layout.py", "monitor.py",
-                           "kaggle_monitor_cell.py"}
+                           "kaggle_monitor_cell.py", "localrun.py"}
 BUNDLE_EXCLUDE_SUFFIXES = {".pyc", ".pt", ".pth", ".bin", ".ckpt", ".safetensors", ".npy", ".npz", ".pkl",
                            ".parquet", ".feather", ".zip", ".png", ".jpg", ".jpeg", ".dcm"}
 # Kaggle refuses a kernel source of 1 MB or more with a bare 400 Bad Request from SaveKernel (its editor says it "must
@@ -1806,6 +1811,21 @@ def push(root: str | Path | None, kdir: str | Path, force: bool = False, hours: 
     return rec
 
 
+def push_local(root: str | Path | None, kdir: str | Path, hours: float | None = None, force: bool = False) -> dict:
+    """`gpu push --backend local`: run a `gpu build` output on this machine's GPU(s) as a background process
+    (`kgkit.localrun`). No Kaggle quota is spent or reserved; `gpu wait` / `gpu collect` / `gpu cancel` take its
+    kernel id, local/<slug>."""
+    root = _root(root)
+    st = S.load(root)
+    if st is None:
+        raise SystemExit("not inside a competition workspace (no .kaggle-gm/competition.json)")
+    S.ensure_state_ignores(root)
+    rec = LR.push(root, Path(kdir), runs(root), S.STATE_DIR, kernel_output_dir, st.slug, hours=hours, force=force,
+                  gpu_note=cpu_torch_line())
+    record_push(root, rec)
+    return rec
+
+
 def _add_monitor(kdir: Path, accelerator: str) -> None:
     """The hardware monitor in a hand-written kernel's code (`kgkit.monitor`): its readings for /kaggle-monitor,
     and a stop on a machine with fewer GPUs than ``accelerator`` promises. Never stops the push."""
@@ -1870,7 +1890,15 @@ def _one_line(text: str) -> str:
     return " ".join(text.split())
 
 
+def is_local(kernel: str | None) -> bool:
+    """A run on this machine (`gpu push --backend local`, `kgkit.localrun`), not a Kaggle kernel."""
+    return str(kernel or "").startswith("local/")
+
+
 def kernel_status(kernel: str) -> tuple[str, str]:
+    if is_local(kernel):  # a run on this machine (`gpu push --backend local`): its process and its report
+        s = LR.status(latest_run(_root(None), kernel))
+        return s, f"{kernel}: {s} (local run)"
     r = run_kaggle(["kernels", "status", kernel], timeout=120)
     text = (r.stdout or "") + (r.stderr or "")
     return (normalize_status(text) if r.returncode == 0 else "unknown"), text.strip()
@@ -2039,6 +2067,13 @@ def report_stop(root: str | Path, kernel: str, status: str, text: str = "", watc
     ``watched_s``: how long ``wait`` saw it run, which bounds a log that stops well before the end."""
     if text:
         print(text)
+    if is_local(kernel):
+        run = latest_run(root, kernel)
+        if tail:
+            print("\n".join(LR.log_tail(run)))
+        print(f"{kernel}: {status} - the run ended without its report (kg_run.json); the log is "
+              f"{Path(run.get('dir') or '.') / 'session.log'}. Folds it finished are in {run.get('out')}/artifacts.")
+        return
     files, more, log, why = session_output(kernel)
     if not log:
         try:
@@ -2447,6 +2482,14 @@ def collect(root: str | Path | None, kernel: str, from_dir: str | Path | None = 
     confirm_pending(root, [kernel])  # a push from a background command that Kaggle ran is the run collected here
     kslug = kernel.split("/")[-1]
     kstatus = None  # what Kaggle reports for the kernel; `status` below is the runner's account of its jobs
+    if from_dir is None and is_local(kernel):  # its output is on this machine already
+        lrun = latest_run(root, kernel)
+        kstatus = LR.status(lrun)
+        if kstatus in ("running", "unknown"):
+            raise SystemExit(f"{kernel} is {kstatus}" + (f": `python -m kgkit gpu wait {kernel} --collect` collects "
+                                                         "when it ends." if kstatus == "running" else
+                                                         " (no local run of it in the run log)"))
+        from_dir = lrun["out"]
     if from_dir is None:
         kstatus = _status_of(kernel)
         if kstatus in ("queued", "running"):
