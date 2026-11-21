@@ -33,7 +33,7 @@ only tell the journey the ledger recorded, so rule 9 below matters from day one.
 
 1. **The CV scheme is frozen** in `data/folds.csv` (or a documented time split). Every model uses those exact folds so OOFs are blendable. Change it only with a written reason in the ledger notes, and then re-run the models that matter.
 2. **Every run is logged** with `kgkit.experiment.Ledger().log(...)` — CV, fold scores, params, features, OOF and test predictions. No unlogged results, no "I think it was 0.812".
-3. **One change per experiment, compared and decided.** Compare against the *accepted baseline* (`kgkit ledger baseline`), not the highest CV, with the same seed(s) and folds: `kgkit ledger compare <new> --truth data/train.csv:<target> --folds data/folds.csv:fold`. Judge noise by the paired per-fold differences, not the fold std (fold difficulty cancels). Record the verdict with `kgkit ledger decide <new> keep|discard|inconclusive "<why>" --parent <baseline>`: the accepted decision made last is the baseline (`decide <id> baseline` restores any record); a model kept only as an ensemble member is `keep --member` and leaves the baseline alone. Ideas live in `kgkit backlog`.
+3. **One change per experiment, compared and decided.** Compare against the *accepted baseline* (`kgkit ledger baseline`), not the highest CV, with the same seed(s) and folds: the training templates print the paired comparison with `--parent <baseline>` when they log the run (`kgkit ledger compare <new> --truth data/train.csv:<target> --folds data/folds.csv:fold` compares any two records). Judge noise by the paired per-fold differences, not the fold std (fold difficulty cancels). Record the verdict and close the backlog idea in one call: `kgkit exp finish <new> keep|discard|inconclusive "<why>" --backlog <n>`: the accepted decision made last is the baseline (`exp finish <id> baseline` restores any record); a model kept only as an ensemble member is `keep --member` and leaves the baseline alone. Ideas live in `kgkit backlog`.
 4. **Trust CV, verify with LB.** Record every public LB score with `kgkit ledger lb <id> <score>` and watch the CV↔LB correlation. A rising LB with flat CV is overfitting the public split.
 5. **No target leakage**: target-derived statistics are computed out-of-fold; scalers/encoders/feature selection are fit inside the fold; no future information in time-series features.
 6. **Validate every submission** with `kgkit validate subs/<file>.csv data/sample_submission.csv` before submitting. A wrapper script may do this and submit, but let `kaggle competitions submit` print Kaggle's reply (no `-q`, no redirect): the hook reads the script and logs the submit from that reply; any submit it misses, `kgkit status` adds from Kaggle's list.
@@ -73,7 +73,7 @@ only tell the journey the ledger recorded, so rule 9 below matters from day one.
 Rewrite this section in place; never append to it. Keep it under ~20 lines: this file loads into every session and
 most subagents. Only what the tools can't tell you goes here: the baseline, CV, LB and decisions come from
 `kgkit status` and the ledger. The dated narrative (what was tried, day by day) goes in `reports/journal.md`,
-which loads only when opened; results go in `kgkit ledger decide` and `kgkit backlog set --result`.
+which loads only when opened; results go in `kgkit exp finish` (the decision and the backlog result).
 
 - Plan: (the next experiments, in order)
 - Closed directions: (one line each, with the reason and the ledger id)

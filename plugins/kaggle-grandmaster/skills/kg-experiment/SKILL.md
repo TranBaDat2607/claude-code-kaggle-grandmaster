@@ -8,6 +8,7 @@ allowed-tools:
   - Grep
   - Agent
   - 'Bash(kgkit backlog *)'
+  - 'Bash(kgkit exp *)'
   - 'Bash(kgkit ledger *)'
   - 'Bash(kgkit status *)'
 ---
@@ -20,13 +21,18 @@ command. Submitting, pushing or publishing still asks.
 
 Hypothesis: `$ARGUMENTS`
 
-Follow the experiment protocol (`grandmaster-playbook` §2):
+Workspace state when this command loaded (`kgkit status --offline`):
 
-1. `kgkit status` and `kgkit ledger baseline` → the **accepted baseline** id
-   (last KEEP, not the highest CV), its CV ± std and code path. If nothing is accepted yet, decide one
-   first (`kgkit ledger decide <id> baseline`). If the idea is in the backlog, mark it
-   `kgkit backlog set <n> --status running --first-experiment "<command you will run>"`; otherwise add
-   it (same options).
+!`kgkit status --offline -n 10 || true`
+
+Follow the experiment protocol (`grandmaster-playbook` §2). Besides the training run, which prints its own paired
+verdict, the bookkeeping is two kgkit calls: mark the idea running, then `kgkit exp finish`.
+
+1. The state above names the **accepted baseline** (last KEEP, not the highest CV) and its CV ± std; run
+   `kgkit status` only if it is missing or out of date. If nothing is accepted yet, make one first
+   (`kgkit exp finish <id> baseline "<why>"`). If the idea is in the backlog, mark it
+   `kgkit backlog set <n> --status running --first-experiment "<command you will run>"`; otherwise add it (same
+   options). Keep its number `<n>` for step 6.
 2. Restate the hypothesis, the *single* change, the baseline id, and the success criterion:
    paired gain ≥ ~2 standard errors of the per-fold differences (or of the OOF bootstrap) with most
    folds improving. Not "Δ > fold std": the fold std measures fold difficulty, which cancels in a
@@ -41,25 +47,29 @@ Follow the experiment protocol (`grandmaster-playbook` §2):
    keep it on its speed-up with the score unchanged (skill `compute-efficiency`). For long runs (> ~10 min) run in the background and keep working on
    analysis meanwhile; or delegate the whole run to the `experiment-runner` agent.
 4. Log to the ledger with OOF/test preds and `parent=<baseline id>` (notes: hypothesis); the templates take
-   `--parent <baseline id>`. Nothing about the model (stopping round, epoch, checkpoint) may be chosen on the fold
-   it predicts: the templates early-stop on an inner slice / keep the last epoch and log `oof_selection`. When
-   `ledger compare` says the baseline was selected otherwise, re-run the baseline before deciding a small gain.
-5. Decide with numbers:
-   `kgkit ledger compare <new> --truth data/train.csv:<target> --folds data/folds.csv:fold`
-   (add `--groups data/train.csv:<group>` when rows are clustered). In a `holdout+lb` workspace log the
-   run with its holdout predictions instead, `kgkit ledger add <new> auto --pred <FILE>:<cols>`:
-   the score is recomputed and compared, paired, with the accepted baseline right away (no folds).
-   KEEP / DISCARD / INCONCLUSIVE: INCONCLUSIVE → second seed, logged with the same `--variant` so its
-   spread counts as seed noise (or keep only if it adds no complexity/runtime); `--rope <gain>` marks
-   changes too small to matter; a flagged huge jump → `validation-auditor` before accepting.
-6. Record it: `kgkit ledger decide <new> keep|discard|inconclusive "<gain, folds k/K>"
-   --parent <baseline>`; KEEP makes it the new baseline (the accepted decision made last is the baseline;
-   `decide <id> baseline` restores any record). A model kept only as a member of the accepted ensemble:
-   `decide <new> keep --member`, which leaves the baseline alone. `kgkit backlog set <n> --status done
-   --exp <new> --result "<decision + gain>"`: the learning goes in these two (the decision's "why" and the
-   result), not in CLAUDE.md, which loads into every session. Rewrite `## Current state` in CLAUDE.md only when
-   this decision changes it (the plan, a direction now closed, a new standing gotcha); a longer narrative goes in
-   `reports/journal.md`. Commit code. A sweep of runs is decided at once: `python -m
-   kgkit ledger decide 12..20 discard "<why>"`.
+   `--parent <baseline id>`. When they log, they print the paired comparison with it (per-fold deltas, folds
+   improved, the paired SE, a row-level test on the target) and end with the `kgkit exp finish` call that records
+   it: no separate comparison call. A script of your own does the same with
+   `kgkit.experiment.report_comparison(rec, truth="data/train.csv:<target>")` after `Ledger().log`. Nothing about
+   the model (stopping round, epoch, checkpoint) may be chosen on the fold it predicts: the templates early-stop on
+   an inner slice / keep the last epoch and log `oof_selection`. When the comparison says the baseline was selected
+   otherwise, re-run the baseline before deciding a small gain. In a `holdout+lb` workspace log the run with its
+   holdout predictions, `kgkit ledger add <new> auto --pred <FILE>:<cols>`: the score is recomputed and compared,
+   paired, with the accepted baseline right away (no folds).
+5. Decide with numbers, from the verdict the run printed: KEEP / DISCARD / INCONCLUSIVE. INCONCLUSIVE → second
+   seed, logged with the same `--variant` so its spread counts as seed noise (or keep only if it adds no
+   complexity/runtime); a flagged huge jump → `validation-auditor` before accepting. The comparison needs other
+   options (`--groups data/train.csv:<group>` when rows are clustered and `eval_groups` is unset, `--rope <gain>`
+   for changes too small to matter)? Give them to `exp finish`: it then compares afresh. With no verdict printed
+   (an older script), `kgkit exp finish <new>` alone compares and records nothing.
+6. Record it, in one call: `kgkit exp finish <new> keep|discard|inconclusive "<gain, folds k/K>" --backlog <n>`.
+   It records the decision with the baseline it was compared against (KEEP makes it the new baseline: the accepted
+   decision made last is the baseline; `exp finish <id> baseline` restores any record) and closes the backlog idea
+   with the result (`inconclusive` keeps it running for the second seed). Deciding against the verdict is allowed
+   with the reason in the note. A model kept only as a member of the accepted ensemble: `--member`, which leaves
+   the baseline alone. The learning goes in the decision's "why" and the idea's result, not in CLAUDE.md, which
+   loads into every session. Rewrite `## Current state` in CLAUDE.md only when this decision changes it (the plan,
+   a direction now closed, a new standing gotcha); a longer narrative goes in `reports/journal.md`. Commit code. A
+   sweep of runs is decided at once: `kgkit ledger decide 12..20 discard "<why>"`.
 7. Suggest the next experiment based on what was learned. When it changes direction (a new model family, new data,
    ensembling, the final week), name the new phase first: `kgkit ledger phase "<name>"`.

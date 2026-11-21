@@ -91,6 +91,38 @@ def test_allowed_tools_are_scoped_and_matchable(name):
     assert (fields.get("disable-model-invocation") is True) == (name in SIDE_EFFECTS), name
 
 
+INJECT = re.compile(r"!`([^`]+)`")  # Claude Code runs it when the skill loads and puts its output in the text
+STATE_FIRST = ("kg-status", "kg-experiment", "kg-ideas", "kg-final")
+
+
+@pytest.mark.parametrize("name", STATE_FIRST)
+def test_state_arrives_with_the_skill(name):
+    """#127: the workspace state is injected when the command loads, so its first turn is not a `kgkit status`."""
+    _, rules, body = _skill(name)
+    cmds = INJECT.findall(body)
+    assert any(c.startswith("kgkit status") for c in cmds), f"{name}: inject the state with !`kgkit status ... || true`"
+
+
+@pytest.mark.parametrize("name", COMMANDS)
+def test_injected_commands_are_pre_approved_and_never_fail_the_load(name):
+    """A `!` command that is not pre-approved asks before the skill loads; one that fails stops it loading."""
+    _, rules, body = _skill(name)
+    for cmd in INJECT.findall(body):
+        assert cmd.rstrip().endswith("|| true"), f"{name}: !`{cmd}` must end with `|| true`"
+        first = cmd.split("||")[0].strip()
+        assert any(re.fullmatch(r"Bash\((.+) \*\)", r) and first.startswith(r[5:-3] + " ") for r in rules), (
+            f"{name}: !`{cmd}` is not pre-approved by allowed-tools")
+        assert not OUTWARD.search(first), f"{name}: !`{cmd}` would run an outward-facing command at load"
+
+
+@pytest.mark.parametrize("name", ["kg-experiment", "kg-grind"])
+def test_an_experiment_is_finished_in_one_call(name):
+    """#127: compare, decide and close the backlog item with `kgkit exp finish`, not three separate calls."""
+    _, rules, body = _skill(name)
+    assert "Bash(kgkit exp *)" in rules and "kgkit exp finish" in body, name
+    assert "kgkit ledger compare" not in body and "kgkit ledger decide <new>" not in body, name
+
+
 @pytest.mark.parametrize("path", [*FILES, *sorted((PLUGIN / "skills").glob("*/references/*.md")),
                                   PLUGIN / "templates" / "CLAUDE.competition.md"],
                          ids=lambda p: f"{p.parent.name}/{p.name}")

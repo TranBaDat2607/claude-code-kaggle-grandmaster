@@ -20,7 +20,11 @@ Run kgkit with the Bash tool as `kgkit <command>`: the plugin puts it on PATH, a
 and this command pre-approves the kgkit calls it makes. Older text that says `python -m kgkit` means the same
 command. Submitting, pushing or publishing still asks.
 
-1. `kgkit status -n 15`. It prints
+Workspace state when this command loaded (`kgkit status -n 15`):
+
+!`kgkit status -n 15 || true`
+
+1. Read the status above (run `kgkit status -n 15` again only if it is missing). It prints
    the deadline with days left and the endgame phase (see `final-submission-selection`), submissions
    logged today (UTC) against the daily limit (plus Kaggle's own count when the last submit printed
    one) and the cached GPU quota. It first adds to the log the submissions Kaggle lists that the hooks

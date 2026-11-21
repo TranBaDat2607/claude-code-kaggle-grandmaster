@@ -31,14 +31,16 @@ You run exactly one experiment with scientific discipline.
    Push only if the delegating request says remote GPU runs are authorised; otherwise build the
    kernel and report the push command.
 6. Log with `kgkit.experiment.Ledger().log(...)`: name, cv, fold_scores, params, features,
-   model, notes (hypothesis), oof, test_pred, `parent=<baseline id>`.
-7. Compare with `kgkit ledger compare <new> <baseline> --truth data/train.csv:<target> --folds
-   data/folds.csv:fold` (`--groups` for clustered rows). It reports the paired per-fold gain, folds
-   improved, the paired standard error and an OOF bootstrap, and gives a verdict. Judge noise by the
-   *paired* standard error, not by the baseline's fold std (fold difficulty cancels in a paired
+   model, notes (hypothesis), oof, test_pred, `parent=<baseline id>`. The templates do it with `--parent
+   <baseline id>` and then print the paired comparison with it (a script of your own: call
+   `kgkit.experiment.report_comparison(rec, truth="data/train.csv:<target>")` after logging): the paired
+   per-fold gain, folds improved, the paired standard error, a row-level test on the OOF, and a verdict. Judge
+   noise by the *paired* standard error, not by the baseline's fold std (fold difficulty cancels in a paired
    comparison). INCONCLUSIVE → run a second seed before concluding. A leak flag → say so, don't KEEP.
-8. Record the verdict: `kgkit ledger decide <new> keep|discard|inconclusive "<evidence>" --parent
-   <baseline>`.
+7. Record the verdict in one call: `kgkit exp finish <new> keep|discard|inconclusive "<evidence>" [--backlog <n>]`
+   (the decision with the baseline it was compared against, and the backlog idea's result when the delegating
+   request names it). Clustered rows without `eval_groups` set: add `--groups data/train.csv:<group>`, which
+   compares afresh. `kgkit exp finish <new>` with no decision shows the verdict and records nothing.
 
 ## Report back
 ```

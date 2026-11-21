@@ -58,17 +58,19 @@ or a simple signal, and the blend needs them later anyway.
 
 ```
 backlog top idea → hypothesis → smallest change that tests it → run on frozen folds
-→ log to ledger (parent = accepted baseline) → kgkit ledger compare <new>
-→ KEEP / DISCARD / INCONCLUSIVE → kgkit ledger decide → backlog set --result → CLAUDE.md Current state if it changed
+→ log to ledger (parent = accepted baseline): the template prints the paired verdict against it
+→ KEEP / DISCARD / INCONCLUSIVE → kgkit exp finish <new> <decision> "<why>" --backlog <n> (decision + backlog result)
+→ CLAUDE.md Current state if it changed
 ```
 
 - **Compare against the accepted baseline, not the best CV.** The baseline is the last experiment
   you *decided* to keep (`kgkit ledger baseline`); the highest CV may be a lucky seed or a leak.
 - **Paired noise, not fold std.** Fold std mostly measures how hard each fold is, and both models
   share that, so it cancels. Judge a gain by the per-fold *differences* (all folds up by a consistent
-  amount = real, even if far below the fold std) and/or a paired bootstrap on the OOFs:
-  `kgkit ledger compare <new> --truth data/train.csv:<target> --folds data/folds.csv:fold`
-  (add `--groups` when rows are clustered, e.g. images per patient). Positive but within ~2 paired
+  amount = real, even if far below the fold std) and/or a paired bootstrap on the OOFs. The templates print
+  both when they log a run with `--parent`; `kgkit ledger compare <new> --truth data/train.csv:<target> --folds
+  data/folds.csv:fold` compares any two records (add `--groups` when rows are clustered, e.g. images per patient;
+  `exp finish` takes the same options). Positive but within ~2 paired
   standard errors = INCONCLUSIVE: run a second seed, or keep it only if it costs nothing. The same holds
   on a fixed holdout and on the public LB: two models scored on the same rows differ far less by chance
   than one score varies, so never judge a gap by the SE of one score (or a binomial formula of n).

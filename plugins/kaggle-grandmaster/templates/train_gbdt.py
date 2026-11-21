@@ -29,6 +29,8 @@ What it guarantees:
     scaled by 1 / (1 - es_fraction), so no fold model loses 10% of its data (--no-refit for quick screens).
     --es-on-valid restores the old behaviour, to reproduce records logged before it.
   * per-fold training scores next to the CV (the train/validation gap), and the record's --parent
+  * the run ends with the paired comparison against --parent (else the accepted baseline) and the
+    `kgkit exp finish` call that records the decision (#127)
   * every run logged to the experiment ledger with OOF/test artefacts and a submission file
 """
 
@@ -53,6 +55,10 @@ from kgkit import metrics as M
 from kgkit import state as S
 from kgkit.cv import split_indices
 from kgkit.experiment import Ledger, seed_everything
+try:  # a kgkit vendored before #127 has no report_comparison: the run then ends without the verdict
+    from kgkit.experiment import report_comparison
+except ImportError:
+    report_comparison = None
 from kgkit.thresholds import OptimizedRounder, best_threshold
 
 # ----------------------------------------------------------------------------- config
@@ -479,6 +485,8 @@ def main():
     sub.to_csv(out, index=False)
     Ledger().update(rec["id"], submission=str(out).replace("\\", "/"))
     print(f"logged {rec['id']} -> {out}")
+    if report_comparison is not None:
+        report_comparison(rec, parent=args.parent, truth=f"{cfg['train']}:{target}")
 
 
 if __name__ == "__main__":

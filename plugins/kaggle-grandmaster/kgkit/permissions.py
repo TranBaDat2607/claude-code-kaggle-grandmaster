@@ -22,7 +22,7 @@ from pathlib import Path
 
 # subcommand -> also allowed with no arguments (Bash(kgkit status) next to Bash(kgkit status *))
 SUBCOMMANDS: dict[str, bool] = {
-    "status": True, "ledger": False, "backlog": False, "final": True, "standing": True, "config": True,
+    "status": True, "ledger": False, "exp": False, "backlog": False, "final": True, "standing": True, "config": True,
     "eda": False, "adv": False, "validate": False, "metrics": True, "score": False, "speedcheck": False,
     "blend": False, "features": False, "pages": True, "discussions": False, "kernels top": True,
     "kernels pull": False, "datasets": False, "audit-repo": True, "whoami": True, "update-check": True,

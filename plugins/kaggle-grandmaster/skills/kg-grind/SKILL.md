@@ -8,6 +8,7 @@ allowed-tools:
   - Grep
   - Agent
   - 'Bash(kgkit backlog *)'
+  - 'Bash(kgkit exp *)'
   - 'Bash(kgkit grind *)'
   - 'Bash(kgkit kernels pull *)'
   - 'Bash(kgkit ledger *)'
@@ -69,10 +70,12 @@ Ask everything the budget needs in one message, before the first experiment: whe
    run: `kgkit grind note --session ${CLAUDE_SESSION_ID} --started <run name> --cmd "<command>"`, so a later session
    finds it. A local fold of more than ~30 min: add the template's `--checkpoint-every 1` (or every few epochs), so
    a killed run resumes mid-fold. Parent = accepted
-   baseline, `kgkit ledger compare`, `kgkit ledger decide`. For a promoted screen, record both gains on
-   the backlog item (`--screen-gain`, `--full-gain`).
-5. **Update**: `kgkit backlog set <n> --status done --exp <id> --result ...` (the learning goes there and in
-   the decision's "why"), commit. Rewrite CLAUDE.md `## Current state` only when it changed; never one line
+   baseline (`--parent`): the template prints the paired verdict against it when it logs, so there is no
+   separate comparison call. For a promoted screen, record both gains on the backlog item (`--screen-gain`,
+   `--full-gain`).
+5. **Update**, in one call: `kgkit exp finish <id> keep|discard|inconclusive "<gain, folds k/K>" --backlog <n>`
+   records the decision and closes the idea with its result (the learning goes there and in the decision's
+   "why"; inconclusive keeps the idea running for a second seed), then commit. Rewrite CLAUDE.md `## Current state` only when it changed; never one line
    per experiment (it loads into every session). At the end of the loop: `kgkit backlog render`, and a dated
    entry in `reports/journal.md` for what the loop tried and learned.
 6. Every ~3 kept improvements: refresh the ensemble (`ensemble-architect`) and prepare a candidate

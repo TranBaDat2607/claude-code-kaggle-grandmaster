@@ -19,6 +19,10 @@ Run kgkit with the Bash tool as `kgkit <command>`: the plugin puts it on PATH, a
 and this command pre-approves the kgkit calls it makes. Older text that says `python -m kgkit` means the same
 command. Submitting, pushing or publishing still asks.
 
+Workspace state when this command loaded (`kgkit status`, submissions checked against Kaggle's list):
+
+!`kgkit status -n 10 || true`
+
 Follow the `final-submission-selection` skill.
 
 1. Evidence table from `kgkit ledger best -n 20` + all submissions with LB scores:

@@ -17,8 +17,9 @@ was compared against) and carry a ``decision`` (baseline / keep / discard / inco
 *accepted baseline* is the latest kept experiment, not simply the highest CV, so a lucky seed
 or a leaky run never silently becomes the thing every new idea is measured against::
 
-    python -m kgkit ledger compare 0012 0009 --truth data/train.csv:target
-    python -m kgkit ledger decide 0012 keep "focal loss, +0.0021, 5/5 folds"
+    rec = Ledger().log(..., parent="0009")
+    report_comparison(rec, truth="data/train.csv:target")   # the paired verdict vs 0009, printed by the run
+    kgkit exp finish 0012 keep "focal loss, +0.0021, 5/5 folds" --backlog 4   # decision + backlog in one call
 
 Each record also says where its code is: ``git_commit`` and, when the workspace's code differed from that commit,
 ``git_snapshot`` (a commit of the code as it ran, kept under ``refs/kg/<id>``: :mod:`kgkit.snapshot`), the command
@@ -138,6 +139,27 @@ def selection_note(new: dict, base: dict) -> str | None:
     return (f"{old['id']} was logged before kgkit recorded how an OOF was selected. If its template early-stopped "
             f"or picked its best epoch on the scored fold, its OOF is optimistic: re-run it with this kgkit's "
             f"template before deciding a small gain.")
+
+
+def report_comparison(rec: dict, parent: str | None = None, truth: str | None = None, folds: str | None = None,
+                      fallback: bool = True, root: str | Path | None = None) -> dict | None:
+    """Right after ``Ledger.log``: print the paired comparison of ``rec`` with ``parent`` (else its own parent, else
+    the accepted baseline) and the `kgkit exp finish` call that records the decision, so the training output ends
+    with the verdict (#127). ``truth`` (FILE:COL[,COL...], default eval_truth or the target in data/train.csv)
+    adds the OOF bootstrap; with ``fallback`` a truth that does not fit gives way to the per-fold scores. Returns
+    the verdict, or None. Never raises: a run that trained is not failed by its bookkeeping. A re-check on
+    re-drawn folds (``KG_RECHECK``) is not compared: its split is not the baseline's."""
+    if os.environ.get("KG_RECHECK"):
+        return None
+    try:
+        from . import cli
+
+        return cli.compare_logged(rec, parent=parent, truth=truth, folds=folds, fallback=fallback, root=root)
+    except SystemExit as e:
+        print(f"not compared: {e}")
+    except Exception as e:  # noqa: BLE001
+        print(f"not compared ({type(e).__name__}: {e})")
+    return None
 
 
 def _check_decision(d: str) -> str:

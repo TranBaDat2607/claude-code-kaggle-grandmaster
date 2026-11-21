@@ -76,6 +76,28 @@ def test_gbdt_template_hgb(tmp_path, plugin_root, kind):
         assert (sub["y"] > 0).all() and rec["cv"] < 0.6
 
 
+@pytest.mark.parametrize("kind", ["binary", "multiclass"])
+def test_gbdt_template_compares_the_run_with_its_parent_when_it_logs(tmp_path, plugin_root, kind):
+    """#127: the training output ends with the paired verdict against --parent (else the accepted baseline), so the
+    experiment needs no separate `ledger compare` call."""
+    ws = _make_ws(tmp_path, plugin_root, kind)
+    run = ["src/train_gbdt.py", "--model", "hgb"]
+    out = _run([*run, "--name", "base", "--params", '{"max_iter": 30}'], ws, plugin_root)
+    assert "no accepted baseline yet" in out and "kgkit exp finish 0001_base baseline" in out
+    _run(["-m", "kgkit", "exp", "finish", "0001", "baseline", "first model"], ws, plugin_root)
+    out = _run([*run, "--name", "more", "--params", '{"max_iter": 120}', "--parent", "0001"], ws, plugin_root)
+    tail = out[out.index("logged 0002_more"):]
+    assert "0002_more vs 0001_base:" in tail and "folds:" in tail
+    # accuracy scores decoded labels while the ledger keeps raw probabilities: per-fold scores, no row-level test
+    assert ("rows)" in tail) == (kind == "binary")
+    assert "kgkit exp finish 0002_more" in tail and out.isascii()
+    comps = (ws / ".kaggle-gm" / "comparisons.jsonl").read_text(encoding="utf-8")
+    assert '"new": "0002_more"' in comps and '"base": "0001_base"' in comps
+    # no --parent: compared with the accepted baseline
+    out = _run([*run, "--name", "less", "--params", '{"max_iter": 10}'], ws, plugin_root)
+    assert "0003_less vs 0001_base:" in out
+
+
 @pytest.mark.parametrize("model,kind", [("linear", "binary"), ("knn", "multiclass"), ("svm", "regression"),
                                         ("mlp", "binary")])
 def test_tabular_template_diverse_families(tmp_path, plugin_root, model, kind):
@@ -159,8 +181,11 @@ def test_image_template_tiny(tmp_path, plugin_root):
     assert rec["name"] == "r18" and len(rec["fold_scores"]) == 3
     # #109: the OOF is the last epoch's (EMA) weights, not the epoch that scored best on the fold it predicts
     assert rec["oof_selection"] == "independent" and rec["params"]["select"] == "last"
-    out = _run([*args, "--epochs", "2", "--name", "r18_best", "--select", "best"], tmp_path, plugin_root)
-    assert Ledger(tmp_path).records()[-1]["oof_selection"] == "scored-fold" and "optimistic" in out
+    out = _run([*args, "--epochs", "2", "--name", "r18_best", "--select", "best", "--parent", rec["id"]], tmp_path,
+               plugin_root)
+    best = Ledger(tmp_path).records()[-1]
+    assert best["oof_selection"] == "scored-fold" and "optimistic" in out
+    assert best["parent"] == rec["id"] and f"{best['id']} vs {rec['id']}:" in out  # #127: compared when logged
     # #119: early stopping done legally - the epoch is chosen on rows held out of the training part
     out = _run([*args, "--epochs", "3", "--name", "r18_es", "--es-holdout", "0.2", "--es-patience", "1"], tmp_path,
                plugin_root)
@@ -244,9 +269,11 @@ def test_transformer_template_tiny(tmp_path, plugin_root):
     es = Ledger(tmp_path).records()[-1]
     assert "select holdout" in out and "holdout rmse" in out
     assert es["oof_selection"] == "independent" and es["params"]["select"] == "holdout"
-    out = _run([*args, "--epochs", "2", "--name", "tiny_best", "--select", "best"], tmp_path, plugin_root)
+    out = _run([*args, "--epochs", "2", "--name", "tiny_best", "--select", "best", "--parent", rec["id"]], tmp_path,
+               plugin_root)
     best = Ledger(tmp_path).records()[-1]
     assert best["oof_selection"] == "scored-fold" and "optimistic" in out
+    assert best["parent"] == rec["id"] and f"{best['id']} vs {rec['id']}:" in out  # #127: compared when logged
     assert rec["cv"] < df["score"].std()  # learned something beyond predicting the mean
     res = validate_submission(tmp_path / rec["submission"], tmp_path / "data" / "sample_submission.csv")
     assert res["ok"], res

@@ -15,6 +15,7 @@ Commands
               journey
   final       which submissions Kaggle has selected as finals, and whether auto-selection would pick a fitted file
   standing    rank, team count, medal cut-offs and ties on the leaderboard Kaggle shows (private after the end)
+  exp         finish  - compare a logged run with its baseline, record the decision, close its backlog idea
   backlog     add | list | set | render | fidelity  — the ranked idea backlog (human vs GPU hours)
   features    search  — generate and screen thousands of candidate features on the frozen folds
   kernels     top | pull | review  — study and reproduce public notebooks
@@ -1070,7 +1071,10 @@ def _auto_compare(led, a, r: dict) -> None:
     _ledger_compare(led, argparse.Namespace(**{**vars(a), "args": [r["id"], base["id"]], **folds}))
 
 
-def _ledger_compare(led, a):
+def _ledger_compare(led, a, hint: bool = True, backlog: int | None = None) -> dict | None:
+    """`ledger compare`: print the paired comparison and return the verdict (``compare.verdict`` plus ``new``,
+    ``base``, ``se``, ``k`` and ``folds_improved``), or None when the two were compared on their test files.
+    ``hint``: end with the `exp finish` command that records it."""
     import numpy as np
 
     from . import metrics as M
@@ -1175,8 +1179,37 @@ def _ledger_compare(led, a):
             lb = estimate(y, pa, pb, m.name, method=_method(a), n_boot=a.boot, groups=groups, mask=ok, size=public_n)
             print(f"  public LB (n={public_n}): {describe(lb)}: LB gaps between these two under "
                   f"~{fmt_se(2 * lb['se'])} are noise (assumes the public rows look like the evaluation rows)")
-    _log_comparison(led, new_id, base_id, folds_res, boot, lb, v["decision"])
-    print(f"\nrecord it: python -m kgkit ledger decide {new_id} keep|discard|inconclusive \"<why>\" --parent {base_id}")
+    _log_comparison(led, new_id, base_id, folds_res, boot, lb, v["decision"], v["flags"])
+    src = boot if boot is not None else folds_res
+    res = {**v, "new": new_id, "base": base_id, "se": src["se"],
+           "k": folds_res["k"] if folds_res is not None else None,
+           "folds_improved": folds_res["folds_improved"] if folds_res is not None else None}
+    if hint:
+        print(f"\nrecord it: {_finish_command(led, new_id, base_id, res['decision'].lower(), backlog)}")
+    return res
+
+
+def _default_base(led, rec: dict) -> dict | None:
+    """What a record is compared with when no baseline is named: its parent, else the accepted baseline."""
+    if rec.get("parent"):
+        try:
+            return led.get(rec["parent"])
+        except KeyError:
+            raise SystemExit(f"{rec['id']}'s parent {rec['parent']} is not in this ledger: name the baseline with "
+                             "--parent <id>")
+    return led.baseline(fallback=False)
+
+
+def _finish_command(led, new_id: str, base_id: str, decision: str, backlog: int | None = None) -> str:
+    """The `exp finish` call that records a decision on ``new_id`` compared with ``base_id`` (--parent only when
+    `exp finish` would not pick that baseline itself)."""
+    try:
+        default = _default_base(led, led.get(new_id))
+    except (KeyError, SystemExit):  # an artefact folder, or a parent this ledger does not have
+        default = None
+    parent = "" if default is not None and default["id"] == base_id else f" --parent {base_id}"
+    return (f"kgkit exp finish {new_id} {decision} \"<why>\"{parent}"
+            + (f" --backlog {backlog}" if backlog is not None else " [--backlog <n>]"))
 
 
 def _is_file_ref(led, ref: str) -> bool:
@@ -1386,9 +1419,10 @@ def _add_seed_noise(led, res: dict, new_ref: str, base_ref: str) -> dict:
 
 
 def _log_comparison(led, new_id: str, base_id: str, folds_res: dict | None, boot: dict | None, lb: dict | None,
-                    decision: str) -> None:
+                    decision: str, flags: list[str] | None = None) -> None:
     """Append the measured paired noise to .kaggle-gm/comparisons.jsonl: `status` and the session hook read it
-    there instead of re-running a bootstrap (or guessing from the size of the evaluation set)."""
+    there instead of re-running a bootstrap (or guessing from the size of the evaluation set), and `exp finish`
+    reads the verdict back (``k``, ``folds_improved``, ``flags``) instead of comparing the pair again."""
     import math
 
     from . import evalset as EV
@@ -1405,6 +1439,10 @@ def _log_comparison(led, new_id: str, base_id: str, folds_res: dict | None, boot
              "method": boot["method"] if boot is not None else "fold-paired t",
              "unit": boot["unit"] if boot is not None else "folds",
              "n_units": boot["n_units"] if boot is not None else folds_res["k"]}
+    if folds_res is not None:
+        entry.update(k=folds_res["k"], folds_improved=folds_res["folds_improved"])
+    if flags:
+        entry["flags"] = list(flags)
     if lb is not None:
         entry.update(public_n=lb["size"], se_public=lb["se"])
     EV.log_comparison(led.root, entry)
@@ -1577,6 +1615,255 @@ def cmd_backlog(a):
             if f["sign_agreement"] < 0.7 or f["spearman"] < 0.5:
                 print("screens are a poor proxy here: screen on 2 folds, at closer-to-final resolution/epochs, "
                       "or with 2 seeds before promoting")
+
+
+# ---------------------------------------------------------------------------- exp: one call per experiment (#127)
+DECISIONS = ("keep", "discard", "inconclusive", "baseline")
+# the options of the paired test: given any of them, `exp finish` compares afresh instead of reusing the log
+_PAIRED_DESTS = ("truth", "folds", "fold", "groups", "boot", "rope", "public_n", "metric")
+
+
+def _ledger_namespace(**kw) -> argparse.Namespace:
+    """The options `ledger compare` reads, at their defaults, with ``kw`` set."""
+    common = argparse.ArgumentParser(add_help=False)
+    for flag, opt in _LEDGER_OPTIONS:
+        common.add_argument(flag, **opt)
+    return argparse.Namespace(**{**vars(common.parse_args([])), "args": [], **kw})
+
+
+def _spec_path(root: Path, path: Path) -> str:
+    """A file in a FILE:COL spec: relative to the working directory when it is inside it."""
+    try:
+        return path.resolve().relative_to(Path.cwd().resolve()).as_posix()
+    except ValueError:
+        return path.resolve().as_posix()
+
+
+def _csv_header(path: Path) -> list[str]:
+    import csv
+
+    try:
+        with path.open(encoding="utf-8", newline="") as f:
+            return next(csv.reader(f), [])
+    except (OSError, UnicodeDecodeError):
+        return []
+
+
+def _default_truth(root: Path, st) -> str | None:
+    """The labels to bootstrap on when none are given: eval_truth, else the competition's target in data/train.csv."""
+    if st is None:
+        return None
+    if st.eval_truth:
+        return st.eval_truth
+    train = Path(root) / "data" / "train.csv"
+    if st.target and st.target in _csv_header(train):
+        return f"{_spec_path(root, train)}:{st.target}"
+    return None
+
+
+def _default_folds(root: Path) -> str | None:
+    from . import evalset as E
+
+    f = E.folds_path(root)
+    return f"{_spec_path(root, f)}:fold" if "fold" in _csv_header(f) else None
+
+
+def exp_compare(led, new_id: str, base_id: str, opts: dict | None = None, fallback: bool = False,
+                hint: bool = True, backlog: int | None = None) -> dict | None:
+    """The paired comparison of ``new_id`` with ``base_id``, printed, its verdict returned (`_ledger_compare`).
+    Without ``truth``, the OOF bootstrap runs on the workspace's labels (eval_truth, else the target column of
+    data/train.csv) and the per-fold pairing on the frozen folds. ``fallback``: a truth that was not given by the
+    user and does not fit (another row count, a label metric over raw outputs) gives way to the stored per-fold
+    scores instead of failing the comparison."""
+    import contextlib
+    import io
+
+    from . import metrics as M
+    from . import state as S
+
+    opts = {k: v for k, v in (opts or {}).items() if v is not None}
+    st = S.load(led.root)
+    holdout = st is not None and st.holdout
+    new, base = led.get(new_id), led.get(base_id)
+    pred_key = "holdout_path" if holdout else "oof_path"
+    defaulted = fallback or "truth" not in opts
+    if "truth" not in opts and new.get(pred_key) and base.get(pred_key):
+        truth = _default_truth(led.root, st)
+        if truth:
+            opts["truth"] = truth
+    metric = opts.get("metric") or (st.metric if st else None)
+    try:
+        label = bool(metric) and M.get(metric).kind == "label"
+    except KeyError:
+        label = False
+    if label and defaulted and not holdout and opts.get("truth") and new.get("fold_scores") \
+            and base.get("fold_scores"):
+        # the stored OOF holds the model's raw outputs, the metric scores decoded labels: the fold scores the
+        # training script computed are the comparable ones
+        print(f"note: {M.get(metric).name} scores labels and the ledger keeps raw outputs: compared on the per-fold "
+              "scores")
+        opts.pop("truth")
+    if opts.get("truth") and "folds" not in opts and not holdout:
+        folds = _default_folds(led.root)
+        if folds:
+            opts["folds"] = folds
+    ns = _ledger_namespace(**opts, args=[new["id"], base["id"]])
+    if not (defaulted and opts.get("truth")):
+        return _ledger_compare(led, ns, hint=hint, backlog=backlog)
+    buf = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(buf):
+            res = _ledger_compare(led, ns, hint=hint, backlog=backlog)
+    except (SystemExit, ValueError, IndexError) as e:
+        if not new.get("fold_scores") or not base.get("fold_scores"):
+            print(buf.getvalue(), end="")
+            raise
+        print(f"note: not compared on {opts['truth']} ({e}): on the per-fold scores")
+        ns.truth = ns.folds = None
+        return _ledger_compare(led, ns, hint=hint, backlog=backlog)
+    print(buf.getvalue(), end="")
+    return res
+
+
+def compare_logged(rec: dict, parent: str | None = None, truth: str | None = None, folds: str | None = None,
+                   fallback: bool = True, root=None) -> dict | None:
+    """After a training script logs ``rec``: its paired comparison with ``parent`` (else its own parent, else the
+    accepted baseline), printed with the `exp finish` call that records it. None when there is nothing to compare
+    with (and then it says how to make a baseline). Raises SystemExit on a parent this ledger does not have."""
+    from .experiment import Ledger
+
+    led = Ledger(root)
+    rec = led.get(rec["id"])
+    if parent:
+        try:
+            base = led.get(parent)
+        except KeyError:
+            raise SystemExit(f"its parent {parent} is not in this ledger")
+    else:
+        base = _default_base(led, rec)
+    if base is None:
+        print(f"no accepted baseline yet: make this run the baseline with `kgkit exp finish {rec['id']} baseline "
+              "\"<why>\"`; later runs are compared with it when they log")
+        return None
+    if base["id"] == rec["id"]:
+        return None
+    print()
+    return exp_compare(led, rec["id"], base["id"], {"truth": truth, "folds": folds}, fallback=fallback)
+
+
+def _logged_comparison(led, new_id: str, base_id: str) -> dict | None:
+    """The last paired comparison of the pair in .kaggle-gm/comparisons.jsonl, if it has the fields of a verdict."""
+    from . import evalset as E
+
+    for c in reversed(E.comparisons(led.root)):
+        if c.get("new") == new_id and c.get("base") == base_id and c.get("question") == "paired" \
+                and c.get("decision") in ("KEEP", "DISCARD", "INCONCLUSIVE") and "gain" in c:
+            return c
+    return None
+
+
+def _verdict_summary(res: dict) -> str:
+    from .evalset import fmt_gain, fmt_se
+
+    out = f"gain {fmt_gain(res['gain'])}"
+    if res.get("se"):
+        out += f" +/- {fmt_se(res['se'])}"
+    if res.get("k"):
+        out += f", folds {res['folds_improved']}/{res['k']}"
+    return out
+
+
+def _finish_item(bl, led, exp_id: str, n: int | None) -> tuple[dict | None, list[dict]]:
+    """The backlog item an experiment closes: ``n``, else the one open item that lists the experiment. Also the open
+    items, to name when none is found."""
+    items = bl.items()
+    if n is not None:
+        for i in items:
+            if i["id"] == n:
+                return i, []
+        raise SystemExit(f"backlog item {n} not found (`kgkit backlog list --all`)")
+    open_ = [i for i in items if i.get("status") in ("todo", "running")]
+    naming = [i for i in open_ if any(led._resolve_id(e) == exp_id for e in i.get("exp_ids") or ())]
+    if len(naming) == 1:
+        return naming[0], []
+    return None, naming or [i for i in open_ if i.get("status") == "running"]
+
+
+def cmd_exp(a):
+    from .experiment import Ledger
+
+    led = Ledger()
+    if a.action == "finish":
+        _exp_finish(led, a)
+
+
+def _exp_finish(led, a) -> None:
+    """`exp finish <id> [decision [why...]] [--backlog n]`: compare (or reuse the comparison made when the run was
+    logged), then, given a decision, record it and close the backlog item. Without a decision it records nothing:
+    it prints the verdict and the call that records it."""
+    from .backlog import Backlog
+
+    decision = a.args[1].lower() if len(a.args) > 1 else None
+    why = " ".join(a.args[2:]).strip()
+    if decision is not None and decision not in DECISIONS:
+        raise SystemExit(f"the decision is keep|discard|inconclusive|baseline, not {a.args[1]!r} (the note goes "
+                         "after it)")
+    try:
+        rec = led.get(a.args[0])
+    except KeyError as e:
+        raise SystemExit(str(e.args[0]) if e.args else str(e))
+    bl = Backlog(led.root)
+    item, candidates = _finish_item(bl, led, rec["id"], a.backlog)
+    res = base = None
+    if decision != "baseline":
+        try:
+            base = led.get(a.parent) if a.parent else _default_base(led, rec)
+        except KeyError as e:
+            raise SystemExit(str(e.args[0]) if e.args else str(e))
+        if base is None or base["id"] == rec["id"]:
+            raise SystemExit(f"nothing to compare {rec['id']} with: no accepted baseline yet. Make it the baseline: "
+                             f"`kgkit exp finish {rec['id']} baseline \"<why>\"`, or name one with --parent <id>")
+        opts = {k: getattr(a, k) for k in _PAIRED_DESTS if getattr(a, k, None) is not None}
+        if a.method != "auto":
+            opts["method"] = a.method
+        logged = None if opts else _logged_comparison(led, rec["id"], base["id"])
+        if logged is not None:
+            res = {**logged, "reasons": [], "flags": logged.get("flags") or []}
+            print(f"{rec['id']} vs {base['id']}: {logged['decision']} ({_verdict_summary(res)}, "
+                  f"{logged.get('method', 'paired')}) - compared when it was logged")
+            for f in res["flags"]:
+                print(f"  WARNING: {f}")
+        else:
+            res = exp_compare(led, rec["id"], base["id"], opts, hint=False)
+    suggested = res["decision"].lower() if res is not None else None
+    if decision is None:
+        if suggested:
+            print(f"\nrecord it: {_finish_command(led, rec['id'], base['id'], suggested, item['id'] if item else None)}")
+        else:
+            print(f"\nno verdict from the comparison: decide by hand, `kgkit exp finish {rec['id']} "
+                  "keep|discard|inconclusive \"<why>\"`")
+        return
+    if suggested and decision != "baseline" and decision != suggested:
+        print(f"note: {decision} against the comparison's {res['decision']}: the note says why")
+    note = why
+    if not note and res is not None:  # the numbers the decision rests on (and the verdict, when it went against it)
+        note = _verdict_summary(res) + ("" if decision == suggested else f" (comparison: {res['decision']})")
+    before = led.baseline(fallback=False)
+    try:
+        r = led.decide(rec["id"], decision, note, parent=base["id"] if base is not None else None, member=a.member)
+    except ValueError as e:
+        raise SystemExit(str(e))
+    print(f"{r['id']}: {r['decision']}" + (" (member)" if r.get("member") else "")
+          + (f" (vs {r['parent']})" if r.get("parent") else ""))
+    _decide_baseline_note(led, [r], before)
+    if item is None:
+        if candidates:
+            print("backlog not updated: name the idea with --backlog <n> (open: "
+                  + "; ".join(f"#{i['id']} {i['idea'][:50]}" for i in candidates) + ")")
+        return
+    status = "running" if decision == "inconclusive" else "done"  # an inconclusive idea gets its second seed
+    i = bl.set(item["id"], exp=rec["id"], status=status, result=f"{decision}: {note}" if note else decision)
+    print(f"backlog #{i['id']} {i['idea'][:60]} -> {i['status']}: {i['result']}")
 
 
 def cmd_features(a):
@@ -2178,6 +2465,18 @@ _LEDGER_ACTIONS = {
                "--test --truth --folds --cv --notes --source"),
 }
 
+_EXP_OPTIONS = [*_LEDGER_OPTIONS,
+                ("--backlog", dict(type=int, metavar="N", help="the backlog idea this experiment tests (default: the "
+                                                               "open idea that lists it with --exp)"))]
+_EXP_ACTIONS = {
+    "finish": ("end an experiment in one call: the paired comparison with its parent (else the accepted baseline; the "
+               "one made when the run was logged is reused), then, given a decision, record it and close the backlog "
+               "idea (inconclusive keeps it running). Without a decision it prints the verdict and records nothing",
+               [_EXP, ("keep|discard|inconclusive|baseline", "?", "the decision (left out: show the verdict only)"),
+                ("why", "*", "the note (default: the verdict's numbers)")],
+               "--parent --backlog --member " + _PAIRED),
+}
+
 _BACKLOG_OPTIONS = [
     ("--gain", dict(type=float, help="expected gain 1-5 (1 = noise level, 5 = leak/new data scale)")),
     ("--prob", dict(type=float, help="probability it works, 0-1")),
@@ -2345,6 +2644,11 @@ def build_parser() -> argparse.ArgumentParser:
                        epilog="`kgkit ledger <action> --help` shows one action's arguments and options")
     _action_parsers(s, _LEDGER_ACTIONS, _LEDGER_OPTIONS)
     s.set_defaults(fn=cmd_ledger)
+
+    s = sub.add_parser("exp", help="one experiment's bookkeeping in one call: `exp finish <id> [decision [why]]`",
+                       epilog="`kgkit exp finish --help` shows its arguments and options")
+    _action_parsers(s, _EXP_ACTIONS, _EXP_OPTIONS)
+    s.set_defaults(fn=cmd_exp)
 
     s = sub.add_parser("backlog", help="ranked idea backlog",
                        epilog="`kgkit backlog <action> --help` shows one action's arguments and options")

@@ -23,9 +23,15 @@ command. Submitting, pushing or publishing still asks.
 
 Focus: `$ARGUMENTS`
 
-1. Read what was already tried: `kgkit ledger list -n 50` and `kgkit backlog list --all`
-   (done/dropped ideas with their results; don't re-propose a failed idea unless the evidence changed).
-   Check `kgkit status` for a **PLATEAU** or **CROWD** line. Either one means the stack is saturated:
+Workspace state and backlog when this command loaded:
+
+!`kgkit status --offline -n 10 || true`
+
+!`kgkit backlog list --all || true`
+
+1. Read what was already tried: the backlog above (done/dropped ideas with their results; don't re-propose a
+   failed idea unless the evidence changed) and, for a longer history than the status shows,
+   `kgkit ledger list -n 50`. Check the status for a **PLATEAU** or **CROWD** line. Either one means the stack is saturated:
    the last experiments added ~0, or many teams sit within noise of your score. Then rank first an idea that
    brings what the stack, the public notebooks and the public datasets lack: a new model family, a new data view
    (a representation, another granularity, the data-generation process), or a new signal. Give more members of a
