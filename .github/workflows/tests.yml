@@ -29,3 +29,17 @@ jobs:
           pip install -r requirements-dev.txt lightgbm
       - name: Test
         run: python -m pytest tests -q -n auto
+
+  # Claude Code's own validator parses skill and agent frontmatter as the runtime does: a file it cannot parse
+  # loads with empty metadata, silently (#120). It needs no login.
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Install Claude Code
+        run: npm install -g @anthropic-ai/claude-code
+      - name: Validate the plugin
+        run: claude plugin validate plugins/kaggle-grandmaster

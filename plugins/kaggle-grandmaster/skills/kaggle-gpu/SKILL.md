@@ -1,6 +1,6 @@
 ---
 name: kaggle-gpu
-description: Training on Kaggle's free GPUs and TPUs under their weekly quotas — choosing T4x2, P100, TPU v5e-8 or a CPU kernel, remote training runs with kgkit gpu (build/push/wait/collect), one-fold screens with pruning, resuming past the session limit, porting to torch_xla, and budgeting accelerator hours until the deadline, and telling whether GPU-hours or wall time is the limit (several accounts, runs that fill a session: one model on both T4s with DDP). Use when training on Kaggle notebooks/kernels, planning or rationing GPU/TPU quota (one account or several), choosing an accelerator, or when a remote run was slow, idle, queued, timed out or wasted hours.
+description: "Training on Kaggle's free GPUs and TPUs under their weekly quotas - choosing T4x2, P100, TPU v5e-8 or a CPU kernel, remote runs with kgkit gpu (build/push/wait/collect), one-fold screens with pruning, resuming past the session limit, torch_xla, budgeting accelerator hours to the deadline, and whether GPU-hours or wall time binds (DDP on both T4s). Use when training on Kaggle kernels, planning GPU/TPU quota, choosing an accelerator, or when a remote run was slow, idle, queued, timed out or wasted hours."
 ---
 
 # Training on Kaggle GPUs

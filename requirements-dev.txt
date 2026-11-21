@@ -7,5 +7,6 @@ scipy>=1.10
 pytest>=7
 pytest-xdist>=3  # parallel runs: python -m pytest tests -q -n auto
 requests  # the Kaggle CLI's HTTP client: kgkit/kaggle_cli.py's tests run against it
+pyyaml  # tests/test_skills.py parses skill and agent frontmatter as YAML, as Claude Code does
 # optional: exercised by template tests when present
 # lightgbm xgboost catboost torch timm transformers tokenizers pillow

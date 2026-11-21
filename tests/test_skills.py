@@ -3,9 +3,12 @@ makes, scoped to their subcommands, in the form a permission rule can match, and
 publishes."""
 
 import re
+import shutil
+import subprocess
 from pathlib import Path
 
 import pytest
+import yaml
 
 PLUGIN = Path(__file__).resolve().parents[1] / "plugins" / "kaggle-grandmaster"
 COMMANDS = sorted(p.parent.name for p in (PLUGIN / "skills").glob("kg-*/SKILL.md"))
@@ -19,18 +22,47 @@ OUTWARD = re.compile(r"\bsubmit\b|\bpush\b|datasets (create|version)|models? (cr
 SIDE_EFFECTS = {"kg-submit", "kg-grind", "kg-kernel", "kg-gpu", "kg-showcase", "kg-update"}
 
 
-def _skill(name: str) -> tuple[dict, list[str], str]:
-    text = (PLUGIN / "skills" / name / "SKILL.md").read_text(encoding="utf-8").replace("\r\n", "\n")
+def _front(path: Path) -> tuple[dict, str]:
+    """The YAML frontmatter of a skill or agent file, parsed as YAML (as Claude Code does), and the body."""
+    text = path.read_text(encoding="utf-8").replace("\r\n", "\n")
     m = FRONT.match(text)
-    assert m, f"{name}: no frontmatter"
-    fields, rules, key = {}, [], None
-    for line in m.group(1).splitlines():
-        if line.startswith("  - ") and key == "allowed-tools":
-            rules.append(line[4:].strip().strip("'"))
-            continue
-        key, _, value = line.partition(":")
-        fields[key.strip()] = value.strip()
-    return fields, rules, m.group(2)
+    assert m, f"{path}: no frontmatter"
+    try:
+        fields = yaml.safe_load(m.group(1))
+    except yaml.YAMLError as e:  # Claude Code then loads the file with empty metadata (#120)
+        pytest.fail(f"{path}: frontmatter is not valid YAML ({e}); quote a value that contains ': '")
+    assert isinstance(fields, dict), f"{path}: frontmatter is not a mapping"
+    return fields, m.group(2)
+
+
+def _skill(name: str) -> tuple[dict, list[str], str]:
+    fields, body = _front(PLUGIN / "skills" / name / "SKILL.md")
+    return fields, list(fields.get("allowed-tools") or []), body
+
+
+FILES = sorted([*(PLUGIN / "skills").glob("*/SKILL.md"), *(PLUGIN / "agents").glob("*.md")])
+DESC_CAP = 1536  # Claude Code truncates a description longer than this in the skill listing
+
+
+@pytest.mark.parametrize("path", FILES, ids=lambda p: f"{p.parent.name}/{p.name}")
+def test_frontmatter_parses_with_a_name_and_description(path):
+    """#120: an unquoted ': ' in a description made the YAML invalid, and Claude Code silently loaded the skill with
+    no name or description, so Claude never chose it on its own."""
+    fields, _ = _front(path)
+    expected = path.parent.name if path.name == "SKILL.md" else path.stem
+    assert fields.get("name") == expected, f"{path}: name {fields.get('name')!r}, expected {expected!r}"
+    desc = fields.get("description")
+    assert isinstance(desc, str) and desc.strip(), f"{path}: no description"
+    assert len(desc) <= DESC_CAP, f"{path}: description is {len(desc)} characters (listing cap {DESC_CAP})"
+
+
+@pytest.mark.skipif(shutil.which("claude") is None, reason="needs the claude CLI on PATH")
+def test_claude_plugin_validate_passes():
+    """The authoritative check: Claude Code's own validator (it parses frontmatter the way the runtime does)."""
+    r = subprocess.run([shutil.which("claude"), "plugin", "validate", str(PLUGIN)], capture_output=True, text=True,
+                       encoding="utf-8", errors="replace", timeout=300)
+    out = r.stdout + r.stderr
+    assert r.returncode == 0 and "Validation failed" not in out, out[-4000:]
 
 
 def test_there_are_kg_commands():
@@ -56,7 +88,7 @@ def test_allowed_tools_are_scoped_and_matchable(name):
         if m:
             assert f"PowerShell(kaggle {m.group(1)} *)" in rules, (name, r)
     assert RUN_FORM in body, f"{name}: say which form is pre-approved, or every kgkit call prompts"
-    assert (fields.get("disable-model-invocation") == "true") == (name in SIDE_EFFECTS), name
+    assert (fields.get("disable-model-invocation") is True) == (name in SIDE_EFFECTS), name
 
 
 def test_showcase_files_and_the_brief_point_to_it(tmp_path):
