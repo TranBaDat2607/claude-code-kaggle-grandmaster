@@ -33,17 +33,17 @@ only tell the journey the ledger recorded, so rule 9 below matters from day one.
 
 1. **The CV scheme is frozen** in `data/folds.csv` (or a documented time split). Every model uses those exact folds so OOFs are blendable. Change it only with a written reason in the ledger notes, and then re-run the models that matter.
 2. **Every run is logged** with `kgkit.experiment.Ledger().log(...)` — CV, fold scores, params, features, OOF and test predictions. No unlogged results, no "I think it was 0.812".
-3. **One change per experiment, compared and decided.** Compare against the *accepted baseline* (`python -m kgkit ledger baseline`), not the highest CV, with the same seed(s) and folds: `python -m kgkit ledger compare <new> --truth data/train.csv:<target> --folds data/folds.csv:fold`. Judge noise by the paired per-fold differences, not the fold std (fold difficulty cancels). Record the verdict with `python -m kgkit ledger decide <new> keep|discard|inconclusive "<why>" --parent <baseline>`: the accepted decision made last is the baseline (`decide <id> baseline` restores any record); a model kept only as an ensemble member is `keep --member` and leaves the baseline alone. Ideas live in `python -m kgkit backlog`.
-4. **Trust CV, verify with LB.** Record every public LB score with `python -m kgkit ledger lb <id> <score>` and watch the CV↔LB correlation. A rising LB with flat CV is overfitting the public split.
+3. **One change per experiment, compared and decided.** Compare against the *accepted baseline* (`kgkit ledger baseline`), not the highest CV, with the same seed(s) and folds: the training templates print the paired comparison with `--parent <baseline>` when they log the run (`kgkit ledger compare <new> --truth data/train.csv:<target> --folds data/folds.csv:fold` compares any two records). Judge noise by the paired per-fold differences, not the fold std (fold difficulty cancels). Record the verdict and close the backlog idea in one call: `kgkit exp finish <new> keep|discard|inconclusive "<why>" --backlog <n>`: the accepted decision made last is the baseline of its model line (`exp finish <id> baseline` restores any record). Each line (`--track gbdt|cnn|...`) has its own baseline, and a run is compared with its nearest kept ancestor; blends are the `ensemble` line, so a model kept for its diversity is tested by blending it (`kgkit blend`) against the best accepted blend. `kgkit ledger tracks` shows each line. Ideas live in `kgkit backlog`.
+4. **Trust CV, verify with LB.** Record every public LB score with `kgkit ledger lb <id> <score>` and watch the CV↔LB correlation. A rising LB with flat CV is overfitting the public split.
 5. **No target leakage**: target-derived statistics are computed out-of-fold; scalers/encoders/feature selection are fit inside the fold; no future information in time-series features.
-6. **Validate every submission** with `python -m kgkit validate subs/<file>.csv data/sample_submission.csv` before submitting. A wrapper script may do this and submit, but let `kaggle competitions submit` print Kaggle's reply (no `-q`, no redirect): the hook reads the script and logs the submit from that reply; any submit it misses, `python -m kgkit status` adds from Kaggle's list.
+6. **Validate every submission** with `kgkit validate subs/<file>.csv data/sample_submission.csv` before submitting. A wrapper script may do this and submit, but let `kaggle competitions submit` print Kaggle's reply (no `-q`, no redirect): the hook reads the script and logs the submit from that reply; any submit it misses, `kgkit status` adds from Kaggle's list.
 7. **Commit code at natural points.** Each record also keeps the exact code it ran from: when the tree has uncommitted
    changes, a snapshot commit under `refs/kg/<id>` (`git_snapshot` in the record; the working tree and the staging
    area are not touched). Never delete `refs/kg/*`: the journey's code links point at them.
 8. **Competition Data never goes into git.** Kaggle's rules forbid publishing it, and that covers copies and subsets
    too: rows of `train.csv`, its text, its labels keyed by ID, notebook outputs that print them. Keep such files in
    `data/` (ignored). Derived labels or predictions keyed by the competition's IDs are a judgment call: decide on
-   purpose. A file deleted in a later commit is still in history. `python -m kgkit audit-repo` checks every
+   purpose. A file deleted in a later commit is still in history. `kgkit audit-repo` checks every
    branch, the history and what `git add -A` would commit, and whether the GitHub remote is public. Run it before
    making the repo public.
 9. **Keep the repo readable: it goes public when the competition ends.**
@@ -53,8 +53,8 @@ only tell the journey the ledger recorded, so rule 9 below matters from day one.
    - Probes, one-off checks and every log go in `work/` (`> work/logs/<name>.log`). When a probe's result decides
      something, move it to `studies/<name>/` with a short README: the question, the result, the ledger ids it decided.
    - Name the phase when the work changes direction (a new model family, new data, ensembling, the final week):
-     `python -m kgkit ledger phase "<name>"`. Decide every record; a sweep at once:
-     `python -m kgkit ledger decide 12..20 discard "<why>"`. The journey is told phase by phase from these.
+     `kgkit ledger phase "<name>"`. Decide every record; a sweep at once:
+     `kgkit ledger decide 12..20 discard "<why>"`. The journey is told phase by phase from these.
 
 ## Commands
 
@@ -72,8 +72,8 @@ only tell the journey the ledger recorded, so rule 9 below matters from day one.
 
 Rewrite this section in place; never append to it. Keep it under ~20 lines: this file loads into every session and
 most subagents. Only what the tools can't tell you goes here: the baseline, CV, LB and decisions come from
-`python -m kgkit status` and the ledger. The dated narrative (what was tried, day by day) goes in `reports/journal.md`,
-which loads only when opened; results go in `python -m kgkit ledger decide` and `python -m kgkit backlog set --result`.
+`kgkit status` and the ledger. The dated narrative (what was tried, day by day) goes in `reports/journal.md`,
+which loads only when opened; results go in `kgkit exp finish` (the decision and the backlog result).
 
 - Plan: (the next experiments, in order)
 - Closed directions: (one line each, with the reason and the ledger id)

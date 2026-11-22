@@ -17,7 +17,7 @@ This repo is a Claude Code marketplace (`.claude-plugin/marketplace.json`) conta
 ## Conventions
 - `kgkit/state.py`, `kgkit/gpu.py`, `kgkit/budget.py`, `kgkit/backlog.py`, `kgkit/adopt.py`, `kgkit/safety.py`,
   `kgkit/evalset.py`, `kgkit/finals.py`, `kgkit/audit.py`, `kgkit/progress.py`, `kgkit/speedcheck.py`, `kgkit/bench.py`,
-  `kgkit/snapshot.py`, `kgkit/layout.py`, `kgkit/journey.py`, `kgkit/monitor.py`, `kgkit/kaggle_monitor_cell.py`,
+  `kgkit/snapshot.py`, `kgkit/layout.py`, `kgkit/filelock.py`, `kgkit/grind.py`, `kgkit/permissions.py`, `kgkit/journey.py`, `kgkit/monitor.py`, `kgkit/kaggle_monitor_cell.py`, `kgkit/localrun.py`,
   `kgkit/kaggle_gpu_runner.py` and everything under `hooks/` must stay **standard-library only** (hooks import them, the runner executes inside Kaggle; they must be fast and never fail closed).
   `kgkit/kaggle_search.py`, `kgkit/kaggle_submissions.py`, `kgkit/kaggle_outputs.py` and `kgkit/kaggle_cli.py` too, at import time: they run under the Kaggle CLI's
   interpreter, which may have nothing else installed (they import kagglesdk / the CLI inside `main`).
@@ -39,14 +39,22 @@ This repo is a Claude Code marketplace (`.claude-plugin/marketplace.json`) conta
   cannot cover.
 - Text written by other Kaggle users (pages, forum posts, notebooks) is printed through `kgkit.safety.wrap`.
 - Templates and `kgkit/kaggle_gpu_runner.py` print ASCII only (Windows consoles are often cp1252).
+- Skills and agents follow `docs/skill-authoring.md` (Anthropic's skill guidance as rules, checked by
+  `tests/test_skill_standard.py` in the `skill-standard` CI job): description says what and when, trigger words first,
+  body under 500 lines, supporting files one link from `SKILL.md`, and a listing budget that only goes down.
 - Skills: knowledge skills are model-invoked; `kg-*` skills are slash commands. Side-effectful commands
   (`kg-submit`, `kg-grind`, `kg-kernel`, `kg-gpu`, `kg-showcase`, `kg-update`) set `disable-model-invocation: true`.
-- A `kg-*` command's `allowed-tools` pre-approves only the kgkit and Kaggle CLI subcommands it runs. Each kgkit
-  one is listed three times: `Bash(PYTHONPATH="${CLAUDE_PLUGIN_ROOT}" python -m kgkit <sub> *)`, the bare
-  `Bash(python -m kgkit <sub> *)`, and the `PowerShell(...)` form of the bare one. The body says to run kgkit in
-  the first form. An allow rule can't match the session brief's literal path, or a `$env:` assignment in
-  PowerShell. Never a blanket `kgkit *`, and never a command that submits, pushes or publishes
+- Claude runs kgkit as `kgkit <cmd>`: `bin/kgkit` is on the Bash tool's PATH while the plugin is enabled (it runs
+  the plugin's own kgkit with the first real Python), in subagents too. Skills, agents and hook messages never put a
+  path in the command (`PYTHONPATH=`, `$KGKIT_HOME`: `tests/test_skills.py` checks). `bin/kgkit` is committed
+  executable (mode 100755) and with LF like every text file (no `.gitattributes`: the directory rejects it).
+- A `kg-*` command's `allowed-tools` pre-approves only the kgkit and Kaggle CLI subcommands it runs, one rule per
+  kgkit subcommand: `Bash(kgkit <sub> *)`. Never a blanket `kgkit *`, and never a command that submits, pushes or publishes
   (`tests/test_skills.py` enforces this).
+- Agents have no Skill tool and inherit no skills: an agent preloads the one or two skills it relies on (`skills:`,
+  bare names: Claude Code resolves them in the agent's own plugin) and reads any other one by its path
+  (`${CLAUDE_PLUGIN_ROOT}/skills/<name>/SKILL.md`). `model: sonnet` for reading, summarising and assembling agents,
+  `inherit` for those that judge, write training code or can let a leak through. `tests/test_agents.py` holds the map.
 - When a new skill is added, add it to the `no-plugin-skill` grader of every `negative` eval case
   (`tests/test_evals.py` enforces this). If the model should load it from a plain-language prompt (a knowledge
   skill, or a command like `kg-adopt`), add a route in `hooks/prompt_router.py`. For a slash-only command, add a

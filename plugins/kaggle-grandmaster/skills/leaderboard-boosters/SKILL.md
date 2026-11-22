@@ -1,6 +1,6 @@
 ---
 name: leaderboard-boosters
-description: Advanced techniques that move a solid solution into the medal zone — pseudo-labelling, knowledge distillation, test-time augmentation, external data and pretraining, data cleaning/relabelling, multi-stage pipelines, auxiliary targets, leak exploitation, and full-data retraining. Use when a strong baseline exists and the user wants extra leaderboard gains.
+description: "Lifts a solid Kaggle solution toward the medals: pseudo-labelling, distillation, TTA, external data, full-data retraining. Use when a strong baseline exists and the user wants more leaderboard gain."
 ---
 
 # Leaderboard Boosters

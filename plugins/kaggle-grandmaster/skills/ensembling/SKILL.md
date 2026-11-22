@@ -1,6 +1,6 @@
 ---
 name: ensembling
-description: How Kaggle Grandmasters build ensembles — OOF management, diversity, averaging/rank/geometric blending, Caruana hill climbing, constrained weight optimisation, stacking with nested CV, multi-level and residual stacking over large model libraries, library pruning, multi-seed and multi-fold averaging, and avoiding blend overfitting. Use when combining models or when asked to squeeze the final points out of a leaderboard.
+description: "Builds Kaggle ensembles from OOF predictions: blending, hill climbing, stacking with nested CV, without overfitting the blend. Use when combining models or squeezing the last leaderboard points."
 ---
 
 # Ensembling
@@ -40,7 +40,7 @@ at 0.85 correlation can add a lot.
 |---|---|
 | Simple mean of top-k diverse models | robust baseline; hard to overfit |
 | Rank average | AUC/ranking metrics; models with different calibration |
-| **Hill climbing (Caruana)** with replacement | default; `python -m kgkit blend --method hill` |
+| **Hill climbing (Caruana)** with replacement | default; `kgkit blend --method hill` |
 | Constrained weights (SLSQP, simplex) | smooth metrics (logloss/RMSE), few models |
 | Geometric mean / power average | probabilities for logloss; power>1 for AUC-ish sharpening |
 | Stacking (ridge/logistic/shallow GBDT meta on OOFs) | many models; potentially non-linear interactions; `--method stack` |

@@ -1,27 +1,21 @@
 ---
 name: kg-cv
-description: Design, build, verify and freeze the cross-validation scheme (data/folds.csv) so it mirrors how the test set was split.
+description: "Designs, verifies and freezes the cross-validation folds (data/folds.csv). Use when the workspace has no frozen folds or the split must change."
 argument-hint: "[strategy] [group-column]"
 allowed-tools:
   - Read
   - Glob
   - Grep
-  - 'Bash(PYTHONPATH="${CLAUDE_PLUGIN_ROOT}" python -m kgkit config *)'
-  - 'Bash(python -m kgkit config *)'
-  - 'PowerShell(python -m kgkit config *)'
-  - 'Bash(PYTHONPATH="${CLAUDE_PLUGIN_ROOT}" python -m kgkit folds *)'
-  - 'Bash(python -m kgkit folds *)'
-  - 'PowerShell(python -m kgkit folds *)'
-  - 'Bash(PYTHONPATH="${CLAUDE_PLUGIN_ROOT}" python -m kgkit ledger *)'
-  - 'Bash(python -m kgkit ledger *)'
-  - 'PowerShell(python -m kgkit ledger *)'
+  - 'Bash(kgkit config *)'
+  - 'Bash(kgkit folds *)'
+  - 'Bash(kgkit ledger *)'
 ---
 
 # /kg-cv
 
-Run kgkit with the Bash tool, as `PYTHONPATH="${CLAUDE_PLUGIN_ROOT}" python -m kgkit <command>`: this command
-pre-approves that form for the kgkit calls it makes. Submitting, pushing or publishing still asks (so does a
-PowerShell `$env:` assignment).
+Run kgkit with the Bash tool as `kgkit <command>`: the plugin puts it on PATH, also on Windows (Git Bash),
+and this command pre-approves the kgkit calls it makes. Older text that says `python -m kgkit` means the same
+command. Submitting, pushing or publishing still asks.
 
 Arguments: `$ARGUMENTS` (optional strategy override and group column).
 
@@ -30,7 +24,7 @@ Follow the `validation-strategy` skill.
 If decisions in this competition are made on a fixed labelled holdout plus the public LB (no K-fold OOF:
 e.g. a small expert-labelled set, or an accepted baseline forked from public inference notebooks), do not
 invent folds. Record the mode and the holdout labels instead:
-`python -m kgkit config validation=holdout+lb holdout_n=<rows> eval_truth=<FILE>:<label cols, comma-separated>`
+`kgkit config validation=holdout+lb holdout_n=<rows> eval_truth=<FILE>:<label cols, comma-separated>`
 (plus `eval_groups=<FILE>:<col>` when several rows share a patient/study), so the session brief stops
 asking for `data/folds.csv`. Log each candidate with its holdout predictions
 (`kgkit ledger add <name> auto --pred <FILE>:<cols>`): the score is recomputed from them and compared,
@@ -41,7 +35,7 @@ scored on the same rows differ far less by chance than one score varies.
    columns, entity ids). State the evidence.
 2. Pick the scheme from the decision table; if groups are suspected but not explicit, look for them
    (duplicate feature vectors, entity-like columns, image hashes, text near-duplicates).
-3. Build: `python -m kgkit folds data/train.csv --strategy <s> --target <y> [--group <g>] --id-col
+3. Build: `kgkit folds data/train.csv --strategy <s> --target <y> [--group <g>] --id-col
    <id> --n-splits <k> --out data/folds.csv` (time series: write a split script using
    `kgkit.cv.time_series_splits` with gap ≥ horizon, saved as `src/splits.py`).
 4. Verify with the fold report (balance, group confinement, temporal order).

@@ -13,7 +13,7 @@ loaded, and by default again without it, so the report shows what the plugin add
 | Compute efficiency (`compute`) | 3 cases: an image run that is input-bound, a 50M-row tabular job, LLM inference over a 9-hour limit | Hardware-aware speed advice: measure first, fix the actual bottleneck, know what runs on which Kaggle GPU (no RAPIDS on a P100, no bf16 on a T4) |
 | A repo that can go public | 3 cases: a variant written as a copy of the script, a probe saved in the workspace, a finished competition's repo made public for two kinds of reader | The layout and the record that let the repo go public: a flag not a copy, probes in `work/`, `solution/` and `journey/` built from the ledger with the code kept reachable |
 | Should not trigger (`negative`) | 3 cases: "competition" in a business sense, a game leaderboard, production ML at work | No plugin skill loads. Scored in both arms, so over-triggering shows as a negative `Δ` |
-| Workflow (`shell`) | 5 cases in a seeded competition workspace: status report, invalid submission, exhausted daily budget, a credential request, a keep/discard decision | What Claude does with the real files, hooks and ledger, not only what it says |
+| Workflow (`shell`) | 6 cases in a seeded competition workspace: status report, invalid submission, exhausted daily budget, a credential request, a keep/discard decision, finishing an experiment in few kgkit calls | What Claude does with the real files, hooks and ledger, not only what it says |
 
 How this follows Anthropic's guidance (the [plugin eval docs](https://code.claude.com/docs/en/plugin-evals) and
 [Demystifying evals for AI agents](https://www.anthropic.com/engineering/demystifying-evals-for-ai-agents)):
@@ -35,8 +35,8 @@ How this follows Anthropic's guidance (the [plugin eval docs](https://code.claud
 
 ## Tags
 
-Of the 49 cases, 35 are `regression` and 14 are `capability` (`multilabel-f1-thresholds`, `optim-santa-no-cv`,
-`showcase-after-deadline`, `gpu-time-bound-ddp`, the three `compute` cases, four workflow cases and the three repo cases). Many regression cases also score 1.0 without the plugin on
+Of the 50 cases, 35 are `regression` and 15 are `capability` (`multilabel-f1-thresholds`, `optim-santa-no-cv`,
+`showcase-after-deadline`, `gpu-time-bound-ddp`, the three `compute` cases, five workflow cases and the three repo cases). Many regression cases also score 1.0 without the plugin on
 Sonnet, the model already knows the point. There they guard against the plugin making answers worse rather than measure what it adds; the cases
 with a positive `Δ` are the ones that show the plugin's value.
 

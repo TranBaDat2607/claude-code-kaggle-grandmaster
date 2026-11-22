@@ -13,6 +13,9 @@ It also checks the machine (#113): Kaggle sometimes starts a 2x T4 push on a mac
 nvidia-smi lists fewer GPUs than KGMON_EXPECT_GPUS (filled in by kgkit from the pushed machine shape), it prints the
 reading and a KG_BAD_MACHINE line and stops the session, before it spends the quota; pushing again usually gets a
 healthy machine. KGMON_EXPECT_GPUS = 0, or the environment variable KG_EXPECT_GPUS=0, turns the check off.
+The check never stops a code competition's scoring run (#121): a slower machine there still gives a valid submission,
+while an exception fails it. kgkit writes KGMON_EXPECT_GPUS = 0 into a kernel that looks like a submission
+(competition sources, internet off), and the check also stands down while KAGGLE_IS_COMPETITION_RERUN is set.
 
 Say what the code is doing, and the pane shows it beside the readings:
 
@@ -165,8 +168,8 @@ def kgmon_check():
     reading and a KG_BAD_MACHINE line: `kgkit gpu wait` and the pane read both. An exception, not sys.exit, so a
     notebook stops at this cell too."""
     want = _kgmon_want()
-    if not want:
-        return
+    if not want or _kgmon_os.environ.get("KAGGLE_IS_COMPETITION_RERUN"):
+        return  # a scoring rerun on a slower machine still gives a valid submission; an exception fails it (#121)
     snap, _ = _kgmon_snapshot(None)
     found = len(snap.get("gpus") or [])
     if found >= want:

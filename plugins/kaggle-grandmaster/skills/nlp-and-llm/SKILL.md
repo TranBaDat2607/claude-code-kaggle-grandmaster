@@ -1,6 +1,6 @@
 ---
 name: nlp-and-llm
-description: Winning playbook for Kaggle NLP and LLM competitions — transformer fine-tuning (DeBERTa-v3 and friends), LLM fine-tuning with LoRA/QLoRA, LLM-as-solver (math/reasoning/agents), retrieval & RAG, synthetic data generation, distillation, efficient inference with vLLM under Kaggle time limits, and text-specific validation. Use for any text, chat, code, or LLM-related competition.
+description: "Playbook for Kaggle NLP and LLM competitions: transformer and LoRA fine-tuning, LLM solvers, RAG, vLLM inference. Use for any text, chat, code or LLM competition."
 ---
 
 # NLP & LLM Playbook
@@ -27,7 +27,9 @@ Always check the rules about which pretrained models/APIs are allowed and model 
   2–5 epochs, batch 8–32 (grad accumulation), weight decay 0.01, AMP, gradient clipping 1.0.
 - Pooling: mean pooling or attention pooling often > CLS; multi-sample dropout head;
   re-initialise the last 1–2 layers on small data.
-- Evaluate several times per epoch (best checkpoints often mid-epoch); AWP / FGM adversarial
+- Evaluate several times per epoch: the curve shows where the schedule should end (peaks are often mid-epoch),
+  and pruning reads it. Keep the final weights, or let `--es-holdout 0.05` pick the evaluation on rows held out of
+  training; never the evaluation that scores best on the fold it predicts (#109). AWP / FGM adversarial
   training and EMA for robustness; freeze embeddings for small data.
 - Seeds vary a lot on small data — average 2–3 seeds per fold for final models.
 - Template: `templates/train_transformer.py`.
@@ -89,3 +91,13 @@ Full checklist with winners' settings: `compute-efficiency` (`references/inferen
 - Average fold LoRA adapters into one model instead of K inference passes (LMSYS 1st); share tokenisation
   across models.
 - Measure the whole pipeline on a hidden-test-sized dummy input before the deadline.
+
+## 8. Cheap screens (sweeps)
+Many values of one lever are one sweep (`/kg-grind --sweep`): screened cheap against a control at the same fidelity, the best confirmed by a full run judged as the best of all of them.
+
+| Screen on | Cheap settings that usually keep the ranking | Not a screen question |
+|---|---|---|
+| rows stratified by the target; whole prompts, essay sets or topics as groups | one epoch, a `max_len` that still fits most texts, the small model of the family (deberta-v3-small for -large) for data, loss and format choices | `max_len`, model size, long-context effects |
+| LLM problem sets: problems as units (`--ids problems.csv:id`), whole sources as groups | fewer problems, one sample each, a short generation budget | sampling settings and the number of samples (self-consistency gains need many) |
+
+An LLM solver logs one row per problem (`mean` of correct, grouped by source): the comparison is paired per problem.

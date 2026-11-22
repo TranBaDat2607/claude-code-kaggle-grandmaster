@@ -1,6 +1,6 @@
 ---
 name: cv-lb-debugging
-description: Systematic diagnosis when cross-validation and leaderboard disagree, when a score is suspiciously good or bad, or when an improvement in CV does not transfer to LB — leakage hunting, distribution shift analysis, inference/training mismatch, metric bugs, and public LB noise estimation. Use when CV and LB diverge or a result looks wrong.
+description: "Diagnoses gaps between cross-validation and the Kaggle leaderboard: leaks, shift, metric or inference bugs, LB noise. Use when CV and LB disagree or a score looks too good or too bad."
 ---
 
 # CV ↔ LB Debugging
@@ -20,20 +20,20 @@ description: Systematic diagnosis when cross-validation and leaderboard disagree
 
 1. **Re-score the submitted file offline**: run the inference code on *training* data (or a
    validation fold) and check it reproduces OOF scores — catches inference/training mismatch.
-2. **Sanity-check the submission**: `python -m kgkit validate`; compare prediction distribution
+2. **Sanity-check the submission**: `kgkit validate`; compare prediction distribution
    (mean, quantiles) of test vs OOF; correlation of the new submission with the previous best.
 3. **Leakage audit** (dispatch `validation-auditor` agent): list every feature's construction and
    when it is fit; check fold assignment against groups/time; search for duplicates.
-4. **Shift analysis**: `python -m kgkit adv` — drifting features; compare per-feature importance
+4. **Shift analysis**: `kgkit adv` — drifting features; compare per-feature importance
    with drift ranking; try dropping top drifting features and see whether CV↔LB agreement improves.
 5. **Public LB noise estimate**: ask the right question. Two submissions are scored on the *same*
    public rows, so the noise of their LB *gap* is the paired SE, often several times smaller than the
-   SE of one score: `python -m kgkit ledger compare <a> <b> --public-n <rows>` (paired bootstrap of
+   SE of one score: `kgkit ledger compare <a> <b> --public-n <rows>` (paired bootstrap of
    their OOF/holdout predictions at the public-set size; for a record with no OOF it reads the two submission
    files and prints an *estimated* SD from simulated labels). The SE of one *absolute* score at that size,
-   `python -m kgkit ledger noise <id> --public-n <rows>`, is only the yardstick for a single
+   `kgkit ledger noise <id> --public-n <rows>`, is only the yardstick for a single
    submission's CV-LB gap. Both assume the public rows look like your evaluation rows.
-6. **CV-LB correlation across subs**: `python -m kgkit status`. Low correlation with several diverse
+6. **CV-LB correlation across subs**: `kgkit status`. Low correlation with several diverse
    submissions → the validation doesn't mirror the test; rebuild it (time split? grouping?
    test-like holdout via adversarial p(test)).
 7. Record the conclusion in the ledger notes, and one line in CLAUDE.md `## Current state` (rewritten, not

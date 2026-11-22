@@ -185,6 +185,9 @@ def _honest(st: S.CompetitionState, by_id: dict, score: dict) -> list[tuple[str,
     base = E.accepted_baseline(list(by_id.values()))
     if base is not None:
         found.setdefault(base["id"], []).append("accepted baseline")
+    ens = E.accepted_baseline(list(by_id.values()), E.ENSEMBLE)
+    if ens is not None:
+        found.setdefault(ens["id"], []).append("accepted baseline of the ensemble")
     own = [r for r in ok if E.own_score(r, st.holdout)]
     if own:
         found.setdefault(max(own, key=lambda r: sign * r["cv"])["id"], []).append("best CV")

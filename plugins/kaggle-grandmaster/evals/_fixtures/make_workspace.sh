@@ -7,6 +7,7 @@
 #                  submissions log: sub_0001 yesterday, sub_0002 today (1 of 5 used today)
 #   --candidate    also logs 0003_lgbm-f3: CV +0.0034 over 0002 (fold std 0.018) but better on 5/5 folds (paired
 #                  t ~20: a real gain), with no decision recorded
+#   --idea         with --candidate: backlog idea #4 "Add feature f3", running, is what 0003 tests
 #   --budget-used  four more logged submissions today: 5 of 5 used
 #   --creds        a fake ~/.kaggle/kaggle.json in the run's temporary HOME (never anywhere else)
 #
@@ -23,10 +24,11 @@ case "$PWD" in
   *) echo "make_workspace.sh: refusing to run outside a claude plugin eval workspace (cwd: $PWD)" >&2; exit 1 ;;
 esac
 
-CANDIDATE=0 BUDGET_USED=0 CREDS=0
+CANDIDATE=0 IDEA=0 BUDGET_USED=0 CREDS=0
 for arg in "$@"; do
   case "$arg" in
     --candidate) CANDIDATE=1 ;;
+    --idea) IDEA=1 ;;
     --budget-used) BUDGET_USED=1 ;;
     --creds) CREDS=1 ;;
     *) echo "make_workspace.sh: unknown option $arg" >&2; exit 2 ;;
@@ -55,6 +57,9 @@ fi
 kg backlog add "Target-encode f1 x f2 quantile bins (OOF, frozen folds)" --gain 3 --prob 0.4 --cost 1
 kg backlog add "CatBoost on the same features for blend diversity" --gain 2 --prob 0.6 --cost 1
 kg backlog add "Tune LightGBM num_leaves / min_child_samples" --gain 1 --prob 0.5 --cost 2
+if [ "$IDEA" = 1 ]; then
+  kg backlog add "Add feature f3" --gain 2 --prob 0.5 --cost 0.5 --status running --first-experiment "lgbm_f3"
+fi
 
 # Submission log in the format hooks/post_tool.py writes (the duplicate and daily-budget checks read it).
 "$PY" - "$BUDGET_USED" <<'EOF'

@@ -1,38 +1,54 @@
 ---
 name: kg-grind
-description: Autonomous improvement loop — repeatedly pick the highest-value idea from the backlog, run it as a disciplined experiment against the accepted baseline, decide with a paired comparison, update the backlog, and re-check the CV for overfitting, within a time or experiment budget.
-argument-hint: "[budget, e.g. 4h or 10 experiments] [focus area]"
+description: "Autonomous improvement loop: picks backlog ideas, runs each as an experiment, keeps or discards it, within a time or experiment budget. Use to improve the score hands-off."
+argument-hint: "[resume | budget, e.g. 4h or 10 experiments] [focus area] [--sweep]"
 allowed-tools:
   - Read
   - Glob
   - Grep
   - Agent
-  - 'Bash(PYTHONPATH="${CLAUDE_PLUGIN_ROOT}" python -m kgkit backlog *)'
-  - 'Bash(python -m kgkit backlog *)'
-  - 'PowerShell(python -m kgkit backlog *)'
-  - 'Bash(PYTHONPATH="${CLAUDE_PLUGIN_ROOT}" python -m kgkit kernels pull *)'
-  - 'Bash(python -m kgkit kernels pull *)'
-  - 'PowerShell(python -m kgkit kernels pull *)'
-  - 'Bash(PYTHONPATH="${CLAUDE_PLUGIN_ROOT}" python -m kgkit ledger *)'
-  - 'Bash(python -m kgkit ledger *)'
-  - 'PowerShell(python -m kgkit ledger *)'
-  - 'Bash(PYTHONPATH="${CLAUDE_PLUGIN_ROOT}" python -m kgkit status *)'
-  - 'Bash(python -m kgkit status *)'
-  - 'PowerShell(python -m kgkit status *)'
+  - 'Bash(kgkit backlog *)'
+  - 'Bash(kgkit blend *)'
+  - 'Bash(kgkit exp *)'
+  - 'Bash(kgkit grind *)'
+  - 'Bash(kgkit kernels pull *)'
+  - 'Bash(kgkit ledger *)'
+  - 'Bash(kgkit screen *)'
+  - 'Bash(kgkit status *)'
+  - 'Bash(kgkit sweep decide *)'
+  - 'Bash(kgkit sweep fidelity *)'
+  - 'Bash(kgkit sweep status *)'
 disable-model-invocation: true
 ---
 
 # /kg-grind — autonomous grandmaster loop
 
-Run kgkit with the Bash tool, as `PYTHONPATH="${CLAUDE_PLUGIN_ROOT}" python -m kgkit <command>`: this command
-pre-approves that form for the kgkit calls it makes. Submitting, pushing or publishing still asks (so does a
-PowerShell `$env:` assignment).
+Run kgkit with the Bash tool as `kgkit <command>`: the plugin puts it on PATH, also on Windows (Git Bash),
+and this command pre-approves the kgkit calls it makes. Older text that says `python -m kgkit` means the same
+command. Submitting, pushing or publishing still asks.
 
-Budget / focus: `$ARGUMENTS` (default: 6 experiments, no specific focus).
+Budget / focus: `$ARGUMENTS` (default: 6 experiments, no specific focus; `resume` continues the grind in progress).
 
 If the target is a public rank or score ("public top 10", "LB 0.965"), say once that a gain fitted to the public LB
 has zero expected private value. Grind toward the honest equivalent instead: a validation gain over the accepted
 baseline beyond the paired noise, which `kgkit status` reports. The loop never fits or probes the public LB.
+
+## Before the loop
+The grind's budget, progress and the runs it started live in `.kaggle-gm/grind.json` (`kgkit grind`), not in this
+conversation: a compaction or a new session continues it from there.
+- **`resume`**: `kgkit grind start --resume --session ${CLAUDE_SESSION_ID}`, then `kgkit grind status --session
+  ${CLAUDE_SESSION_ID} --kaggle`. Act on every run it lists before picking new ideas: wait for a running one, re-run
+  a stopped one with the folds it names (a fold with a checkpoint resumes mid-schedule), collect a finished Kaggle
+  run. It refuses while another session drove the grind in the last 30 min (`--takeover` only if the user says that
+  session is gone).
+- **A new grind**: `kgkit grind start --session ${CLAUDE_SESSION_ID} --budget <4h | 10 | 4h,10> [--focus "<area>"]`.
+  It refuses while a grind is in progress: offer to resume it, or to end it with `kgkit grind stop`.
+
+- **Seed noise**: when `kgkit status` says `seed noise: not measured`, run the re-run `kgkit ledger seed-noise`
+  prints before the first experiment (once per workspace): every verdict after it includes the training noise, so
+  a lucky seed stops passing as a gain.
+
+Ask everything the budget needs in one message, before the first experiment: whether remote GPU runs are authorised and for how many hours, and anything the focus leaves open. Then the loop runs without waiting on the user. If `kgkit status` prints a **Permissions** line, offer `kgkit permissions --write` first: otherwise every kgkit call after the user's reply, and in each `experiment-runner`, asks.
 
 ## Guardrails
 - **Never submit to Kaggle** unless the user explicitly authorised autonomous submissions in this
@@ -45,35 +61,61 @@ baseline beyond the paired noise, which `kgkit status` reports. The loop never f
   first), repeated crashes, disk/GPU memory issues, or the budget is spent.
 
 ## Loop
-1. **Orient**: `python -m kgkit status` (accepted baseline, decisions on these folds, backlog top),
+1. **Orient**: `kgkit grind status --session ${CLAUDE_SESSION_ID}` (budget left, runs in flight; on BUDGET SPENT go
+   to the final report), `kgkit status` (accepted baseline, decisions on these folds, backlog top),
+   `kgkit ledger tracks` (each model line's baseline and gain per hour, and whether the ensemble is behind),
    CLAUDE.md `## Current state`, `reports/` (recon, eda, error analyses, `journal.md`).
-2. **Backlog**: `python -m kgkit backlog list`. Refill it when fewer than ~5 open ideas by
+2. **Backlog**: `kgkit backlog list`. Refill it when fewer than ~5 open ideas by
    (a) dispatching `error-analyst` on the accepted baseline, (b) the domain skill's untried levers,
    (c) `solution-researcher` / `kgkit kernels pull` for prior art, (d) when runs are long or `gpu collect` reports
    an idle or input-bound GPU, a speed fix from `compute-efficiency`: a faster loop buys more experiments. Add each with
    `kgkit backlog add "<idea>" --gain --prob --cost --evidence --source`.
 3. **Pick** the top idea by (gain × probability) / cost, favouring cheap high-information tests early
-   and scaling runs late. When it starts a new direction (a model family, new data, ensembling), name the phase
-   first: `python -m kgkit ledger phase "<name>"`. Batch independent cheap experiments in parallel when hardware allows
+   and scaling runs late. With several model lines, give the most hours to the line whose gain per hour is
+   highest (`kgkit ledger tracks`) and fewer to a plateaued one; when it says the ensemble is behind, re-blend
+   first (the `kgkit blend` call it prints), a cheap experiment. When it starts a new direction (a model family, new data, ensembling), name the phase
+   first: `kgkit ledger phase "<name>"`. Batch independent cheap experiments in parallel when hardware allows
    (e.g. two GPUs → two `experiment-runner` agents). Without a local GPU, run GPU experiments
    through `/kg-gpu` (1-fold screens, two per Kaggle session, with pruning). Pushing spends the
    user's weekly quota, so it needs their authorisation for this loop.
-4. **Run** it via the `/kg-experiment` protocol (or delegate to `experiment-runner`): parent = accepted
-   baseline, `kgkit ledger compare`, `kgkit ledger decide`. For a promoted screen, record both gains on
-   the backlog item (`--screen-gain`, `--full-gain`).
-5. **Update**: `kgkit backlog set <n> --status done --exp <id> --result ...` (the learning goes there and in
-   the decision's "why"), commit. Rewrite CLAUDE.md `## Current state` only when it changed; never one line
+4. **Run** it via the `/kg-experiment` protocol (or delegate to `experiment-runner`). Before starting each training
+   run: `kgkit grind note --session ${CLAUDE_SESSION_ID} --started <run name> --cmd "<command>"`, so a later session
+   finds it. A local fold of more than ~30 min: add the template's `--checkpoint-every 1` (or every few epochs), so
+   a killed run resumes mid-fold. Parent = accepted
+   baseline (`--parent`): the template prints the paired verdict against it when it logs, so there is no
+   separate comparison call. For a promoted screen, record both gains on the backlog item (`--screen-gain`,
+   `--full-gain`).
+5. **Update**, in one call: `kgkit exp finish <id> keep|discard|inconclusive "<gain, folds k/K>" --backlog <n>`
+   records the decision and closes the idea with its result (the learning goes there and in the decision's
+   "why"; inconclusive keeps the idea running for a second seed), then commit. Rewrite CLAUDE.md `## Current state` only when it changed; never one line
    per experiment (it loads into every session). At the end of the loop: `kgkit backlog render`, and a dated
    entry in `reports/journal.md` for what the loop tried and learned.
 6. Every ~3 kept improvements: refresh the ensemble (`ensemble-architect`) and prepare a candidate
    submission file with its honest CV.
 7. When `status` warns about many decisions on the same folds, or every ~20 decisions: run
-   `python -m kgkit recheck --seed <new> --run "<old pipeline>" --run "<current pipeline>" --exp <root_id>
+   `kgkit recheck --seed <new> --run "<old pipeline>" --run "<current pipeline>" --exp <root_id>
    <baseline_id> --truth data/train.csv:<target>` (root from `kgkit ledger lineage`). If the gain
    shrank or did not survive, reverse-ablate the marginal KEEPs before adding new ideas
-   (`grandmaster-playbook`, "Guarding against overfitting the CV itself"). If `kgkit backlog fidelity` shows
-   screens disagree with full runs, raise screen fidelity before promoting more ideas.
-8. Repeat until the budget is exhausted.
+   (`grandmaster-playbook`, "Guarding against overfitting the CV itself"). If `kgkit backlog fidelity` or
+   `kgkit sweep fidelity` shows screens disagree with full runs, raise screen fidelity before promoting more ideas.
+8. Repeat until the budget is exhausted, then `kgkit grind stop --session ${CLAUDE_SESSION_ID} --reason "<budget spent | why it stopped>"`.
+
+## Sweeps (`--sweep`, or an idea that is many values of one lever)
+Several values of one lever (learning rates, augmentation sets, backbones, loss weights, prompts) are one
+experiment: run them as one sweep, not one experiment each, so the full run that wins is judged as the best of all.
+1. **Screen**: `kgkit screen list`; if none fits, `kgkit screen new s30 --frac 0.3 --folds 0` (whole groups as
+   `kgkit folds` used; `--time-col` takes the latest window; `--ids FILE:COL` draws units). The pipeline must
+   honour `KG_SCREEN`: the templates do; a custom one follows `/kg-experiment`'s training contract.
+2. **Define**: `kgkit sweep new <name> --cmd "<pipeline> --parent {base} --name {sweep}_{variant} {rung_args} {args}"
+   --grid --lr=1e-3,3e-4,1e-4 --rung screen=s30,epochs=3 [--rung screen=s60] [--check 2]` (`--variant NAME=ARGS`
+   for values that are not a grid; `--base-args` when the baseline's own run needs arguments). Show the user
+   `kgkit sweep run <name> --dry-run`: it is what will run.
+3. **Run**: `kgkit grind note --session ${CLAUDE_SESSION_ID} --started <name> --cmd "kgkit sweep run <name>"`, then
+   `kgkit sweep run <name> [--parallel N]` (it asks: it runs the command). A stopped sweep resumes with that call.
+4. **Decide**: `kgkit sweep decide <name>`, then the finalist's `exp finish` call it prints (several finalists:
+   keep only the best). A screen is never kept. The finalists are full runs with OOF and test predictions: run the
+   `kgkit blend` call it prints, since a finalist that lost alone can still add to the ensemble. On a fidelity
+   WARNING, raise the screen's fidelity before the next sweep relies on it.
 
 ## Final report
 Table of experiments (id, hypothesis, paired Δ, folds improved, decision), the new accepted baseline and

@@ -2,6 +2,10 @@
 
 Copy to src/, edit CONFIG, then:
 
+    # a screen (`kgkit screen new s30`, `kgkit sweep`): its rows and folds only, files in
+    # artifacts/<name>__s30-<hash>/, no submission
+    KG_SEED=44 KG_REPLICA_OF=0007 python src/train_image.py ...  # a seed re-run (kgkit ledger seed-noise)
+    KG_SCREEN=s30 KG_FIDELITY='{"epochs": 3}' python src/train_image.py --name cnx_v2 --parent 0007 --epochs 3
     python src/train_image.py --smoke                     # 1 fold, 2 batches/epoch — crash test
     python src/train_image.py --bench                     # data loader vs GPU step vs real loop: input- or compute-bound?
     python src/train_image.py --name effb3_384 --backbone tf_efficientnet_b3.ns_jft_in1k --img-size 384
@@ -36,9 +40,11 @@ own peak for two evaluations (it ties early, then declines); --select best judge
 from __future__ import annotations
 
 import argparse
+import json
 import copy
 import math
 import os
+import socket
 import platform
 import sys
 import time
@@ -60,7 +66,15 @@ from kgkit import bench as B
 from kgkit import metrics as M
 from kgkit import state as S
 from kgkit.budget import TrainBudget
-from kgkit.experiment import Ledger, seed_everything
+from kgkit.experiment import Ledger, run_seeds, seed_everything
+try:  # a kgkit vendored before #127 has no report_comparison: the run then ends without the verdict
+    from kgkit.experiment import report_comparison
+except ImportError:
+    report_comparison = None
+try:  # a kgkit vendored before #134 has no screens: every run is then a full run
+    from kgkit import screen as SC
+except ImportError:
+    SC = None
 
 CONFIG = dict(
     name="img_baseline",
@@ -94,6 +108,8 @@ CONFIG = dict(
                                 # | holdout: best epoch on a slice held out of the training part (--es-holdout)
     es_holdout=0.0,             # holdout: share of each fold's training part held out to choose the epoch (0.05)
     es_patience=2,              # holdout: stop after this many epochs with no gain on that slice (0: never early)
+    checkpoint_every=0,         # N > 0: a resume checkpoint every N epochs, so a killed fold resumes there
+                                # (0: only before a session deadline; #125)
     group_col=None,             # holdout: column whose groups (patients, studies) stay whole in the held-out slice
     seed=42,
     notes="",
@@ -332,6 +348,9 @@ def main():
     ap.add_argument("--notes")
     ap.add_argument("--smoke", action="store_true", help="1 fold, 2 batches per epoch, 1 epoch, nothing logged")
     ap.add_argument("--assemble", action="store_true", help="no training: assemble finished folds and log")
+    ap.add_argument("--track", help="model line this run belongs to (gbdt, cnn, vit-l...): compared with that line's accepted baseline, not the main one; with exp finish ... baseline it starts the line")
+    ap.add_argument("--parent", help="ledger id this experiment changes (the accepted baseline, usually); the "
+                    "run ends with the paired comparison against it")
     ap.add_argument("--bench", type=int, nargs="?", const=30, metavar="STEPS",
                     help="time the data loader alone, the training step alone and the real loop on the first "
                          "fold (default 30 steps each), print the verdict and the speed-up against the last bench; "
@@ -346,10 +365,13 @@ def main():
                          "stop early: select=holdout, an honest OOF")
     ap.add_argument("--es-patience", type=int, metavar="N",
                     help="select=holdout: stop after N epochs without a gain on the held-out slice (0: never early)")
+    ap.add_argument("--checkpoint-every", type=int, metavar="N",
+                    help="save a resume checkpoint every N epochs (default 0: off), so a fold killed with its "
+                         "session resumes mid-schedule when the same command runs again")
     a = ap.parse_args()
     cfg = dict(CONFIG)
     for k in ("name", "backbone", "img_size", "epochs", "batch_size", "lr", "notes", "select", "es_holdout",
-              "es_patience"):
+              "es_patience", "checkpoint_every"):
         if getattr(a, k) is not None:
             cfg[k] = getattr(a, k)
     if a.no_pretrained:
@@ -365,6 +387,7 @@ def main():
     task = cfg["task"]
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     amp = device.type == "cuda"
+    cfg["seed"] = run_seeds(cfg["seed"])  # KG_SEED: a seed re-run (`kgkit ledger seed-noise`)
     seed_everything(cfg["seed"])
     if device.type == "cuda":
         torch.backends.cudnn.benchmark = True  # fixed input size: cuDNN picks the fastest kernels once
@@ -397,9 +420,17 @@ def main():
     if test is not None:
         test_paths = [str(Path(cfg["test_image_dir"]) / f"{p}{cfg['path_suffix']}") for p in test[cfg["path_col"]]]
 
-    out_dir = Path("artifacts") / cfg["name"]
+    screen = SC.active() if SC is not None else None  # KG_SCREEN: train and score only the screen's rows and folds
+    out_dir = Path("artifacts") / (cfg["name"] + (SC.run_tag() if SC is not None else ""))  # apart from a full run's
     out_dir.mkdir(parents=True, exist_ok=True)
     all_folds = sorted(train["fold"].unique().tolist())
+    use = None
+    if screen is not None:
+        use = screen.mask(train[id_col] if id_col and id_col in train.columns else np.arange(len(train)))
+        all_folds = [f for f in all_folds if not screen.folds or f in screen.folds]
+        test_paths = None  # a screen is never submitted: no test predictions to pay for
+        print(f"screen {screen.name}: {int(use.sum())} of {len(train)} rows, folds {' '.join(map(str, all_folds))}; "
+              f"no submission (compared with its control, never submitted); files in {out_dir}", flush=True)
     run_folds = a.folds if a.folds is not None else all_folds
     if a.smoke:
         run_folds = run_folds[:1]
@@ -411,6 +442,21 @@ def main():
     crit = loss_fn(task, cfg["label_smoothing"])
     t0 = time.time()
     stopped = None  # "timeout" | "pruned": the session deadline or the baseline curve ended this run early
+    # who runs this, for a later session (#125, `kgkit grind status`): is the process alive, which folds are left
+    run_file = None if (a.smoke or a.bench or a.assemble) else out_dir / f"run_{os.getpid()}.json"
+    run_info = {"pid": os.getpid(), "host": socket.gethostname(), "cmd": " ".join(["python", *sys.argv]),
+                "started": time.time(), "heartbeat": time.time(), "folds": [int(f) for f in run_folds],
+                "all_folds": [int(f) for f in all_folds], "finished": False}
+
+    def beat(**info):
+        if run_file is not None:
+            run_info.update(heartbeat=time.time(), **info)
+            try:
+                run_file.write_text(json.dumps(run_info), encoding="utf-8")
+            except OSError:
+                pass
+
+    beat()
     if cfg["select"] == "best":
         print("note: --select best keeps the epoch that scores best on the fold it predicts: the OOF is optimistic",
               flush=True)
@@ -424,6 +470,8 @@ def main():
     for fold in ([] if a.assemble else run_folds):
         tr = np.flatnonzero(train["fold"].to_numpy() != fold)
         va = np.flatnonzero(train["fold"].to_numpy() == fold)
+        if use is not None:
+            tr, va = tr[use[tr]], va[use[va]]
         if a.smoke:
             tr, va = tr[: 2 * cfg["batch_size"]], va[: cfg["batch_size"]]
         es, dl_es = None, None
@@ -481,6 +529,12 @@ def main():
             kept, kept_pred = ck.get("kept", ck["best"]), ck.get("kept_pred", ck["best_pred"])
             es_best, es_bad = ck.get("es_best"), ck.get("es_bad", 0)
             print(f"fold {fold}: resumed at epoch {start_epoch} (best {best:.5f})", flush=True)
+        def save_resume(epoch):  # what a resumed fold needs: the session deadline and --checkpoint-every
+            torch.save({"model": model.state_dict(), "ema": ema.module.state_dict(), "opt": opt.state_dict(),
+                    "sched": sched.state_dict(), "scaler": scaler.state_dict(), "epoch": epoch + 1, "best": best,
+                    "best_pred": kept_pred, "kept": kept, "kept_pred": kept_pred, "es_best": es_best,
+                    "es_bad": es_bad}, resume)
+
         for epoch in range(start_epoch, cfg["epochs"]):
             budget.start_epoch()
             model.train()
@@ -504,10 +558,7 @@ def main():
                 torch.save(ema.module.state_dict(), out_dir / f"fold{fold}.pt")
             action = "continue" if a.smoke else budget.end_epoch(epoch, score)
             if action == "timeout":
-                torch.save({"model": model.state_dict(), "ema": ema.module.state_dict(), "opt": opt.state_dict(),
-                            "sched": sched.state_dict(), "scaler": scaler.state_dict(), "epoch": epoch + 1,
-                            "best": best, "best_pred": kept_pred, "kept": kept, "kept_pred": kept_pred,
-                            "es_best": es_best, "es_bad": es_bad}, resume)
+                save_resume(epoch)
                 budget.write_status("timeout", next_epoch=epoch + 1)
                 print(f"fold {fold}: session deadline near - checkpointed after epoch {epoch}; resume later", flush=True)
             elif action == "prune":
@@ -516,6 +567,10 @@ def main():
             if action != "continue":
                 stopped = "timeout" if action == "timeout" else "pruned"
                 break
+            beat(fold=int(fold), epoch=int(epoch))
+            if (cfg["checkpoint_every"] and not a.smoke and (epoch + 1) % cfg["checkpoint_every"] == 0
+                    and epoch + 1 < cfg["epochs"]):
+                save_resume(epoch)  # killed after this, the same command resumes here
             if holdout and cfg["es_patience"] and es_bad >= cfg["es_patience"] and epoch + 1 < cfg["epochs"]:
                 early = epoch
                 print(f"fold {fold}: early stop after epoch {epoch} - no gain on the held-out slice for {es_bad} "
@@ -539,6 +594,7 @@ def main():
             resume.unlink(missing_ok=True)
         print(f"fold {fold} {cfg['select']} {metric.name} {kept:.5f} (best epoch {best:.5f})", flush=True)
 
+    beat(finished=True, outcome=stopped or "done")
     if a.smoke:
         print("smoke run OK (not logged)")
         return
@@ -555,16 +611,21 @@ def main():
 
     # ------------------------------------------------------------ assemble + log
     oof = np.zeros((len(train), n_out), dtype=np.float32)
-    fold_scores = []
+    fold_scores, seen = [], np.zeros(len(train), dtype=bool)
     for f in all_folds:
         idx, p = np.load(out_dir / f"fold{f}_idx.npy"), np.load(out_dir / f"fold{f}_oof.npy")
         oof[idx] = p
+        seen[idx] = True
         fold_scores.append(metric(y_metric[idx], metric_input(task, metric, p)))
-    cv = metric(y_metric, metric_input(task, metric, oof))
+    if use is not None:  # NaN where no fold of the screen predicted: compared on the rows it scored
+        oof[~seen] = np.nan
+    rows = seen if use is not None else slice(None)
+    cv = metric(y_metric[rows], metric_input(task, metric, oof[rows]))
     test_pred = None
     if test_paths is not None:
         test_pred = np.mean([np.load(out_dir / f"fold{f}_test.npy") for f in all_folds], axis=0)
     rec = Ledger().log(cfg["name"], cv, fold_scores=fold_scores, model=cfg["backbone"], notes=cfg["notes"],
+                       parent=a.parent, track=a.track,
                        params={k: v for k, v in cfg.items() if k not in ("notes",)}, oof=oof, test_pred=test_pred,
                        runtime_s=round(time.time() - t0, 1),
                        oof_selection="scored-fold" if cfg["select"] == "best" else "independent")
@@ -589,6 +650,10 @@ def main():
         sub.to_csv(out, index=False)
         Ledger().update(rec["id"], submission=str(out).replace("\\", "/"))
         print(f"wrote {out}")
+    if screen is not None:
+        print(f"screen {screen.name}: no submission")
+    if report_comparison is not None:  # #127: the verdict against --parent (else the accepted baseline)
+        report_comparison(rec, parent=a.parent, truth=f"{cfg['train']}:{','.join(targets)}")
 
 
 if __name__ == "__main__":

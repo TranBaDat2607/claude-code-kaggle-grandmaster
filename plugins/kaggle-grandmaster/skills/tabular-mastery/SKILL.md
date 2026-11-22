@@ -1,6 +1,6 @@
 ---
 name: tabular-mastery
-description: Winning playbook for tabular Kaggle competitions (including Playground Series) — GBDT (LightGBM, XGBoost, CatBoost) recipes, feature engineering patterns, categorical handling, NN models for tabular (MLP, TabM, transformers), GPU acceleration, synthetic-data competitions, and tabular ensembling. Use for any rows-and-columns problem.
+description: "Playbook for tabular Kaggle competitions, Playground Series included: GBDTs, feature engineering, tabular NNs. Use for any rows-and-columns data."
 ---
 
 # Tabular Mastery
@@ -14,8 +14,10 @@ Playground data) a well-tuned MLP/TabM is competitive and strongly boosts the bl
 - LightGBM with sensible defaults on raw features (categoricals as `category` dtype),
   frozen folds, early stopping, logged to the ledger, one submission.
   Template: `templates/train_gbdt.py` (handles LGBM/XGB/CatBoost, OOF, test preds, ledger). It early-stops on a
-  10% slice of each fold's training part, never the scored fold (`--refit` then refits on all of it), and prints
-  the per-fold train score next to the CV: the train/validation gap.
+  10% slice of each fold's training part, never the scored fold, then refits on the whole training part with the
+  tree count scaled up (`--no-refit` for quick screens). The slice keeps whole the groups the folds are grouped by
+  (`group_col`, else the group `kgkit folds` recorded) and is the latest rows with `time_col`, so stopping is judged
+  like the folds are. It prints the per-fold train score next to the CV: the train/validation gap.
 - Then CatBoost and XGBoost on the same features — they diverge in categorical handling and
   tree growth, giving free ensemble diversity.
 - **Diverse baselines on day 1, not at the end**: the same template runs `--model linear`, `knn`,
@@ -28,7 +30,7 @@ Playground data) a well-tuned MLP/TabM is competitive and strongly boosts the bl
   features and reports beating tuned GBDTs at that scale; check its licence and the competition rules)
   and AutoGluon (its OOF predictions can be stacking inputs). Validate both on the frozen folds like
   everything else.
-- Read `references/gbdt-params.md` for starting parameters and tuning order.
+- Read [references/gbdt-params.md](references/gbdt-params.md) for starting parameters and tuning order.
 
 ## 2. Feature engineering — where tabular competitions are won
 
@@ -55,7 +57,7 @@ the best few hundred; pairwise categorical combinations (8 columns → 28 crosse
 source. `kgkit features search` does this on the frozen folds:
 
 ```bash
-python -m kgkit features search data/train.csv --target <y> --test data/test.csv \
+kgkit features search data/train.csv --target <y> --test data/test.csv \
     --folds data/folds.csv:fold --kinds cnt,te,grp,num2 --aggs mean,std,nunique,diff_mean,rank \
     --batch 40 --max-candidates 5000 --screen-folds 0,1 --recheck-seed 7 --minutes 60
 ```
@@ -138,12 +140,12 @@ of it is a member the libraries lack, and the generator is the usual place to fi
   from discriminative GBDTs and NNs, so it adds to a saturated stack. Fit it only on the training folds'
   labelled rows, exactly like any OOF member. A label-free density model of the rows usually adds ~0.
 - It is expensive, and the evidence so far is one competition: screen it on one fold first, and give it
-  `--gpu-hours` in the backlog. `references/synthetic-generators.md` has that competition's example.
+  `--gpu-hours` in the backlog. [references/synthetic-generators.md](references/synthetic-generators.md) has that competition's example.
 
 ## 8. Ensembling for tabular
 
 LightGBM + CatBoost + XGBoost + NN + (optional) linear/kNN/SVR on different feature views →
-`python -m kgkit blend --exp ... --method hill --folds data/folds.csv:fold`. Level-2 stacking
+`kgkit blend --exp ... --method hill --folds data/folds.csv:fold`. Level-2 stacking
 with ridge/logistic on OOFs (+ a few raw features) can add more; validate with nested CV.
 
 Playground-scale ensembles are much bigger: the March 2026 churn winner was a 4-level stack of 150
@@ -155,3 +157,11 @@ linear + shallow-GBDT meta-models, then hill climbing; compare the honest score 
 `--method residual --base <id>` (stage 2 learns one strong model's errors). See `ensembling`.
 Distillation also scales here: train a single model on the ensemble's OOF/test predictions as soft
 targets (`leaderboard-boosters`).
+
+## 9. Cheap screens (sweeps)
+Many values of one lever are one sweep (`/kg-grind --sweep`): screened cheap against a control at the same fidelity, the best confirmed by a full run judged as the best of all of them.
+
+`kgkit screen new s30 --frac 0.3 --folds 0 1` (a share of each class, or whole groups as the folds keep them). For
+GBDTs a higher learning rate (0.1) usually keeps the ranking of feature and parameter choices. Not a screen
+question: the learning rate and tree count themselves, high-cardinality encodings and other gains that need all the
+rows, effects smaller than the screen's noise (the control comparison's SE).

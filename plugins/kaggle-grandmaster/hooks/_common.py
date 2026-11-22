@@ -64,6 +64,15 @@ def once(payload: dict, key: str, kind: str = "notes") -> bool:
     return True
 
 
+def router_seen_file(session_id) -> Path | None:
+    """Where the prompt router remembers the skills it already suggested in a session (the temp dir, per session);
+    session_start clears it after a compaction (#125)."""
+    import tempfile
+
+    sid = re.sub(r"[^A-Za-z0-9_-]", "", str(session_id or ""))[:64]
+    return Path(tempfile.gettempdir()) / "kaggle-gm-router" / f"{sid}.json" if sid else None
+
+
 def emit(event: str, **fields) -> None:
     sys.stdout.write(json.dumps({"hookSpecificOutput": {"hookEventName": event, **fields}}))
     sys.stdout.flush()

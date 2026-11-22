@@ -17,8 +17,9 @@ was compared against) and carry a ``decision`` (baseline / keep / discard / inco
 *accepted baseline* is the latest kept experiment, not simply the highest CV, so a lucky seed
 or a leaky run never silently becomes the thing every new idea is measured against::
 
-    python -m kgkit ledger compare 0012 0009 --truth data/train.csv:target
-    python -m kgkit ledger decide 0012 keep "focal loss, +0.0021, 5/5 folds"
+    rec = Ledger().log(..., parent="0009")
+    report_comparison(rec, truth="data/train.csv:target")   # the paired verdict vs 0009, printed by the run
+    kgkit exp finish 0012 keep "focal loss, +0.0021, 5/5 folds" --backlog 4   # decision + backlog in one call
 
 Each record also says where its code is: ``git_commit`` and, when the workspace's code differed from that commit,
 ``git_snapshot`` (a commit of the code as it ran, kept under ``refs/kg/<id>``: :mod:`kgkit.snapshot`), the command
@@ -30,6 +31,7 @@ Only the ledger (not the artefacts) should be committed to git.
 
 from __future__ import annotations
 
+import functools
 import json
 import os
 import random
@@ -43,8 +45,25 @@ from typing import Any, Sequence
 import numpy as np
 
 from . import evalset as E
+from . import filelock as FL
 from . import snapshot as SN
 from . import state as S
+
+
+SEED_ENV = "KG_SEED"  # a seed re-run: the seed(s) it trains with (`kgkit ledger seed-noise`)
+REPLICA_ENV = "KG_REPLICA_OF"  # ...and the record it re-runs, which it is grouped with for the seed noise
+
+
+def run_seeds(seeds):
+    """The seed(s) a run trains with: ``seeds`` (an int or a list) as configured, or under KG_SEED, a seed re-run,
+    as many new ones from KG_SEED on (KG_SEED, KG_SEED + 1, ...), so the re-run averages as many seeds as the
+    record it re-runs."""
+    s = os.environ.get(SEED_ENV, "").strip()
+    if not s.lstrip("-").isdigit():
+        return seeds
+    if isinstance(seeds, (list, tuple)):
+        return [int(s) + i for i in range(max(1, len(seeds)))]
+    return int(s)
 
 
 def seed_everything(seed: int = 42, deterministic_torch: bool = False) -> None:
@@ -97,6 +116,10 @@ MIN_DISTINCT_CV = 4
 KEY_FIELDS = ("folds_hash", "eval_hash")  # fingerprints of the evaluation set a record was scored on
 
 
+class NoControl(LookupError):
+    """A screen whose baseline has no control at the screen's fidelity: there is nothing honest to compare it with."""
+
+
 def has_own_cv(r: dict, holdout: bool = False) -> bool:
     """A score of its own on the evaluation set (see ``kgkit.evalset.own_score``)."""
     return E.own_score(r, holdout)
@@ -138,6 +161,27 @@ def selection_note(new: dict, base: dict) -> str | None:
             f"template before deciding a small gain.")
 
 
+def report_comparison(rec: dict, parent: str | None = None, truth: str | None = None, folds: str | None = None,
+                      fallback: bool = True, root: str | Path | None = None) -> dict | None:
+    """Right after ``Ledger.log``: print the paired comparison of ``rec`` with ``parent`` (else its own parent, else
+    the accepted baseline) and the `kgkit exp finish` call that records the decision, so the training output ends
+    with the verdict (#127). ``truth`` (FILE:COL[,COL...], default eval_truth or the target in data/train.csv)
+    adds the OOF bootstrap; with ``fallback`` a truth that does not fit gives way to the per-fold scores. Returns
+    the verdict, or None. Never raises: a run that trained is not failed by its bookkeeping. A re-check on
+    re-drawn folds (``KG_RECHECK``) is not compared: its split is not the baseline's."""
+    if os.environ.get("KG_RECHECK"):
+        return None
+    try:
+        from . import cli
+
+        return cli.compare_logged(rec, parent=parent, truth=truth, folds=folds, fallback=fallback, root=root)
+    except SystemExit as e:
+        print(f"not compared: {e}")
+    except Exception as e:  # noqa: BLE001
+        print(f"not compared ({type(e).__name__}: {e})")
+    return None
+
+
 def _check_decision(d: str) -> str:
     d = d.lower()
     if d not in DECISIONS:
@@ -161,6 +205,16 @@ def _jsonable(v):
     if isinstance(v, (list, tuple)):
         return [_jsonable(x) for x in v]
     return v
+
+
+def _locked(method):
+    """Run a Ledger method that writes while holding the ledger's lock file (#126): ids are allocated and rewrites
+    made against the file as it is now, not as another process last saw it. Re-entrant: ``decide`` -> ``update``."""
+    @functools.wraps(method)
+    def run(self, *args, **kwargs):
+        with FL.locked(self.path):
+            return method(self, *args, **kwargs)
+    return run
 
 
 class Ledger:
@@ -206,13 +260,23 @@ class Ledger:
         self.dir.mkdir(parents=True, exist_ok=True)
         tmp = self.path.with_suffix(".tmp")
         tmp.write_text("".join(json.dumps(r) + "\n" for r in recs), encoding="utf-8")
-        tmp.replace(self.path)
+        FL.replace(tmp, self.path)
 
     def get(self, exp_id: str) -> dict:
-        for r in self.records():
-            num = r["id"].split("_")[0]
-            if r["id"] == exp_id or r.get("name") == exp_id or (exp_id.isdigit() and num.isdigit() and int(num) == int(exp_id)):
-                return r
+        """The record with id ``exp_id``, else the first named ``exp_id``, else the one numbered ``exp_id``. A number
+        two records share (two runs logged at once before #126) is refused, naming both: use the full id."""
+        recs = self.records()
+        exact = next((r for r in recs if r["id"] == exp_id), None) or next(
+            (r for r in recs if r.get("name") == exp_id), None)
+        if exact is not None:
+            return exact
+        if exp_id.isdigit():
+            same = [r for r in recs if r["id"].split("_")[0].isdigit() and int(r["id"].split("_")[0]) == int(exp_id)]
+            if len(same) > 1:
+                raise KeyError(f"experiment number {exp_id} is ambiguous: {', '.join(r['id'] for r in same)} share it; "
+                               "give the full id")
+            if same:
+                return same[0]
         raise KeyError(f"experiment {exp_id!r} not found in {self.path}")
 
     def ids(self, spec: str) -> list[str]:
@@ -243,6 +307,7 @@ class Ledger:
             p["last"] = r.get("time") or p["last"]
         return list(out.values())
 
+    @_locked
     def set_phase(self, exp_ids: Sequence[str], phase: str) -> int:
         """Put existing records in a phase (records logged before a phase was named, or in the wrong one)."""
         want = set(exp_ids)
@@ -257,6 +322,7 @@ class Ledger:
         return n
 
     # ------------------------------------------------------------------ write
+    @_locked
     def log(
         self,
         name: str,
@@ -274,6 +340,8 @@ class Ledger:
         parent: str | None = None,
         decision: str | None = None,
         holdout_pred: np.ndarray | None = None,
+        track: str | None = None,
+        units=None,
         **extra,
     ) -> dict:
         """Append an experiment. ``folds_hash`` fingerprints the CV split (``folds`` if given, else the fold
@@ -281,7 +349,19 @@ class Ledger:
         ``cv=None`` logs an LB-only record (tagged ``lb-only``): something that cannot be cross-validated,
         such as a blend with public submission files. ``holdout_pred`` stores per-row predictions on the
         workspace's labelled holdout (``eval_truth``), fingerprinted by ``eval_hash``, so two records can be
-        compared paired on it."""
+        compared paired on it. ``track``: the model line it starts (gbdt, cnn, ...); left out, it is its parent's
+        line (a blend's: ``ensemble``; no parent: ``main``). ``units``: a ``kgkit.units.Units`` table, stored
+        beside the arrays (see :meth:`log_units`)."""
+        if track:
+            E.check_track(track)
+        from . import screen as SC
+        from . import sweep as SW
+
+        fidelity = extra.pop("fidelity", None) or SC.current_fidelity(self.root)
+        control = extra.pop("control_of", None) or SC.control_of()
+        sweep = extra.pop("sweep", None) or SW.tag()
+        replica = extra.pop("replica_of", None) or os.environ.get(REPLICA_ENV, "").strip() or None
+        seed_env = os.environ.get(SEED_ENV, "").strip()
         recs = self.records()
         if cv is None and not set(tags) & set(LB_ONLY_TAGS):
             tags = [*tags, "lb-only"]
@@ -308,6 +388,11 @@ class Ledger:
             "folds_hash": self._folds_hash(folds),
             "recheck": os.environ.get("KG_RECHECK") or None,  # set by `kgkit recheck`: not on the frozen folds
             "parent": self._resolve_id(parent) if parent else None,
+            **({"track": track} if track else {}),
+            **({"fidelity": _jsonable(fidelity)} if fidelity else {}),  # a screen (KG_SCREEN / KG_FIDELITY)
+            **({"control_of": self._resolve_id(control)} if control else {}),  # the baseline it is the control of
+            **({"sweep": sweep} if sweep else {}),  # {name, variant, rung} of a `kgkit sweep` run
+            **(self._replica_fields(replica, cv, seed_env) if replica else {}),  # a seed re-run (KG_REPLICA_OF)
             "decision": _check_decision(decision) if decision else None,
             **({"decision_seq": self._next_decision_seq()} if decision else {}),
             "phase": (st.phase or None) if st else None,
@@ -325,10 +410,67 @@ class Ledger:
                     rec[f"{kind}_path"] = str((d / f"{kind}.npy").relative_to(self.root)).replace("\\", "/")
         if holdout_pred is not None:
             rec["eval_hash"] = E.spec_hash(self.root, st.eval_truth) if st is not None and st.eval_truth else None
+        if units is not None:
+            path = self.artifacts / exp_id / "units.npz"
+            rec["units"] = {**units.save(path),
+                            "path": str(path.relative_to(self.root)).replace("\\", "/")}
         self.dir.mkdir(parents=True, exist_ok=True)
         with self.path.open("a", encoding="utf-8") as f:
             f.write(json.dumps(rec) + "\n")
         return rec
+
+    def log_units(self, name: str, units, fold_scores: Sequence[float] | None = None, **kw) -> dict:
+        """Log a run scored on a unit table (``kgkit.units``): a custom pipeline (segmentation, detection, a
+        multi-stage or 3D model, an LLM problem set, matches) whose metric is not one array of row predictions. The
+        CV is the table's aggregate, the fold scores come from its ``fold`` column, and later runs on the same units
+        are compared with it paired (``ledger compare``, ``report_comparison``). A ``mean`` table that does not say
+        its direction takes the competition metric's."""
+        if units.agg == "mean" and units.greater_is_better is None:
+            units.greater_is_better = self._gib()
+        if fold_scores is None:
+            fold_scores = units.fold_scores()
+        return self.log(name, units.score(), fold_scores=fold_scores, units=units, **kw)
+
+    def load_units(self, exp_id: str):
+        """The unit table of a record (``kgkit.units.Units``); ValueError when it has none."""
+        from . import units as U
+
+        r = self.get(exp_id)
+        spec = r.get("units")
+        if not spec:
+            raise ValueError(f"{r['id']} has no unit table: log it with `Ledger.log_units` or "
+                             "`kgkit ledger add <name> auto --units FILE`")
+        return U.load(self.root / spec["path"], spec)
+
+    def _replica_fields(self, replica: str, cv, seed_env: str) -> dict:
+        """A re-run of record ``replica`` with another seed: grouped with it for the seed noise
+        (``compare.seed_variance``). The same score again means the pipeline ignored KG_SEED (or has no randomness):
+        flagged, it measures nothing."""
+        try:
+            base = self.get(replica)
+            base = self.get(base["replica_of"]) if base.get("replica_of") else base  # a re-run of a re-run
+        except KeyError:
+            base = None
+        out = {"replica_of": base["id"] if base else self._resolve_id(replica),
+               "replica_seed": int(seed_env) if seed_env.lstrip("-").isdigit() else None}
+        base_cv = base.get("cv") if base else None
+        if isinstance(cv, (int, float)) and isinstance(base_cv, (int, float)) and \
+                abs(float(cv) - base_cv) <= 1e-12 * max(1.0, abs(base_cv)):
+            out["replica_identical"] = True
+        return out
+
+    def replica_seed(self, exp_id: str) -> int:
+        """A seed for a re-run of ``exp_id`` that none of its runs used: past the largest seed it and its replicas
+        averaged, so a run of several seeds gets as many new ones (KG_SEED, KG_SEED + 1, ...)."""
+        rec = self.get(exp_id)
+        used = []
+        for r in [rec, *(x for x in self.records() if x.get("replica_of") == rec["id"])]:
+            used += [int(s) for s in r.get("seeds") or () if isinstance(s, (int, float))]
+            for k in ("replica_seed", "seed"):
+                v = r.get(k) if k == "replica_seed" else (r.get("params") or {}).get(k)
+                if isinstance(v, (int, float)):
+                    used.append(int(v))
+        return max(used or [41]) + 1
 
     def _resolve_id(self, ref: str) -> str:
         """Canonical id for a ref; unknown refs are kept verbatim (e.g. a local id named inside a remote
@@ -343,6 +485,7 @@ class Ledger:
             return E.split_digest([np.asarray(folds, dtype="<i8").tobytes()])
         return E.folds_file_hash(self.root)  # recheck runs use a re-drawn split (KG_FOLDS_FILE)
 
+    @_locked
     def update(self, exp_id: str, **fields) -> dict:
         recs = self.records()
         target = self.get(exp_id)["id"]
@@ -364,6 +507,7 @@ class Ledger:
             fields["submission"] = submission
         return self.update(exp_id, **fields)
 
+    @_locked
     def tag(self, exp_id: str, *tags: str, remove: bool = False) -> dict:
         """Add tags to a record (or remove them): the way to mark a record already logged, e.g. as
         ``public-lb-fitted``."""
@@ -371,13 +515,17 @@ class Ledger:
         new = [t for t in have if t not in tags] if remove else have + [t for t in dict.fromkeys(tags) if t not in have]
         return self.update(exp_id, tags=new)
 
+    @_locked
     def decide(self, exp_id: str, decision: str, note: str = "", parent: str | None = None,
-               member: bool = False) -> dict:
+               member: bool = False, track: str | None = None) -> dict:
         """Record the keep/discard decision (and optionally the baseline it was compared against). The accepted
         decision made last sets the baseline, whatever the ledger order. ``member``: kept as an ensemble member,
         without becoming the baseline. A ``public-lb-fitted`` record can be discarded but never accepted: it would
-        become the baseline new ideas are compared against."""
+        become the baseline new ideas are compared against. ``track``: put the record in that model line (with
+        ``baseline``: start the line)."""
         decision, rec = _check_decision(decision), self.get(exp_id)
+        if track:
+            E.check_track(track)
         if member and decision != "keep":
             raise ValueError(f"--member keeps a record as an ensemble member without making it the baseline: it goes "
                              f"with keep, not {decision}")
@@ -385,6 +533,12 @@ class Ledger:
             raise ValueError(f"{rec['id']} is tagged public-lb-fitted (tilted toward the public labels): it is display "
                              f"only and cannot be {decision}; decide discard, or remove the tag with "
                              f"`ledger tag {rec['id']} public-lb-fitted --remove` if it is not fitted")
+        if decision in ACCEPTED and E.partial(rec):
+            from . import screen as SC
+
+            raise ValueError(f"{rec['id']} is a screen ({SC.describe(rec['fidelity'])}): its score is no estimate of "
+                             f"the full pipeline's, so it is never {decision}. Promote it: run it at the next fidelity "
+                             "(the full run), and decide that run; a screen is recorded discard or inconclusive")
         fields: dict[str, Any] = {"decision": decision, "decided_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
                                   "decision_seq": self._next_decision_seq()}
         if member or rec.get("member"):
@@ -393,6 +547,8 @@ class Ledger:
             fields["decision_note"] = note
         if parent:
             fields["parent"] = self.get(parent)["id"]  # locally the baseline must exist
+        if track:
+            fields["track"] = track
         return self.update(exp_id, **fields)
 
     def _next_decision_seq(self) -> int:
@@ -400,6 +556,7 @@ class Ledger:
         machines."""
         return 1 + max([int(r.get("decision_seq") or 0) for r in self.records()] or [0])
 
+    @_locked
     def import_preds(self, name: str, oof: np.ndarray, test_pred: np.ndarray | None, y_true=None,
                      folds: Sequence[int] | None = None, metric: str | None = None, cv: float | None = None,
                      notes: str = "", source: str = "external", **extra) -> dict:
@@ -420,17 +577,58 @@ class Ledger:
                         tags=[source], metric=metric, model=source, **extra)
 
     # ------------------------------------------------------------------ read
-    def baseline(self, fallback: bool = True) -> dict | None:
-        """The accepted baseline: the experiment decided ``keep`` or ``baseline`` most recently (not the last one in
-        the ledger), leaving out members kept with ``--member`` (``evalset.accepted_baseline``). Falls back to the
-        highest CV only when nothing has been accepted yet."""
-        r = E.accepted_baseline(self.records())
+    def baseline(self, fallback: bool = True, track: str | None = None) -> dict | None:
+        """The accepted baseline of ``track`` (default: the primary one, the main line's): the experiment of that
+        line decided ``keep`` or ``baseline`` most recently (not the last one in the ledger), leaving out members
+        kept with ``--member`` (``evalset.accepted_baseline``). Falls back to the highest CV only when nothing has
+        been accepted yet."""
+        recs = self.records()
+        r = E.accepted_baseline(recs, track)
+        if track is not None:
+            return r
         if r is not None:
             return r
         if fallback:
             best = self.best(1)
             return best[0] if best else None
         return None
+
+    def heads(self) -> dict[str, dict]:
+        """The accepted baseline of each model line, ``{track: record}`` (``evalset.track_heads``)."""
+        return E.track_heads(self.records())
+
+    def track(self, rec: dict) -> str:
+        """The model line of a record (``evalset.track_of``)."""
+        return E.track_of(rec, {r["id"]: r for r in self.records()})
+
+    def base_for(self, rec: dict) -> dict | None:
+        """What ``rec`` is compared with when no baseline is named (``evalset.base_for``): its nearest kept
+        ancestor, else its parent; without a parent, its track's accepted baseline. A screen is compared with that
+        baseline's control at its own fidelity (``NoControl`` when there is none). KeyError on a parent this
+        ledger does not have."""
+        rec = self.get(rec["id"]) if rec.get("id") else rec
+        base = E.base_for(rec, self.records())
+        if base is None or E.fidelity_key(base) == E.fidelity_key(rec):
+            return base
+        ctl = self.control(base["id"], rec)
+        if ctl is None:
+            from . import screen as SC
+
+            name = (rec.get("fidelity") or {}).get("screen")
+            how = (f"`kgkit screen control {base['id']} {name}` prints the command" if name else
+                   f"run {base['id']}'s pipeline with the same KG_FIDELITY and KG_CONTROL_OF={base['id']}")
+            raise NoControl(f"{rec['id']} is a screen ({SC.describe(rec.get('fidelity'))}) and {base['id']} is "
+                            f"{SC.describe(base.get('fidelity'))}: it is compared with a control, {base['id']}'s "
+                            f"pipeline run at the same fidelity, and there is none yet: {how}"
+                            " (`kgkit sweep` runs it for you)")
+        return ctl
+
+    def control(self, base_id: str, like: dict) -> dict | None:
+        """The newest control of ``base_id`` at the fidelity of ``like``, None when there is none."""
+        key = E.fidelity_key(like)
+        hits = [r for r in self.records() if r.get("control_of") == base_id and E.fidelity_key(r) == key
+                and r["id"] != like.get("id") and not r.get("recheck")]
+        return hits[-1] if hits else None
 
     def lineage(self, exp_id: str) -> list[dict]:
         """Chain of parents back to the root, oldest first — the list of changes a reverse ablation
@@ -445,6 +643,30 @@ class Ledger:
             except KeyError:
                 rec = None
         return chain[::-1]
+
+    def tries(self, exp_id: str, base_id: str | None = None) -> int:
+        """How many candidates ``exp_id`` was picked from, for the best-of-N correction of its comparison (#134):
+        the children of its parent (without a parent: of ``base_id``, the baseline it is compared with), itself
+        included. A sweep's runs share their parent, and ideas tried one after another against one baseline count
+        as much: each was a chance for noise to pass. Only runs with their own score on the same evaluation set
+        count; re-checks on re-drawn folds do not, and re-runs of one pipeline with other seeds
+        (``compare.replica_key``) count once, as does one variant of a sweep at each of its rungs. A screen counts
+        (each was a chance for noise to promote a variant), the control of a rung does not."""
+        from .compare import replica_key
+
+        def one(r):
+            sw = r.get("sweep") or {}
+            return f"sweep:{sw['name']}:{sw['variant']}" if sw.get("name") and sw.get("variant") else (
+                replica_key(r) or r["id"])
+
+        rec = self.get(exp_id)
+        parent = rec.get("parent") or (self._resolve_id(base_id) if base_id else None)
+        family = [r for r in self.records() if parent and r.get("parent") == parent]
+        holdout, key = self._holdout(), self.eval_record_key(rec)
+        family = [r for r in family if not r.get("recheck") and not r.get("control_of") and not r.get("replica_of")
+                  and (E.own_score(r, holdout) or (E.partial(r) and isinstance(r.get("cv"), (int, float))))
+                  and self.eval_record_key(r) == key]
+        return max(1, len({one(r) for r in [*family, rec]}))
 
     def decisions_on_folds(self, folds_hash: str | None) -> int:
         """How many keep/discard decisions were taken on one fold split — every decision spends a
@@ -491,6 +713,7 @@ class Ledger:
     def best(self, n: int = 5, key: str = "cv") -> list[dict]:
         holdout = self._holdout()
         recs = [r for r in self.records() if r.get(key) is not None and not r.get("recheck")
+                and not r.get("replica_of")  # a seed re-run measures noise: its luckier score is no best CV
                 and (key != "cv" or has_own_cv(r, holdout))]
         return sorted(recs, key=lambda r: r[key], reverse=self._gib())[:n]
 
@@ -499,7 +722,7 @@ class Ledger:
         CV): left out of best CV and the CV-LB correlation."""
         holdout = self._holdout()
         return [r for r in self.records() if isinstance(r.get("cv"), (int, float)) and not r.get("recheck")
-                and not has_own_cv(r, holdout)]
+                and not E.partial(r) and not has_own_cv(r, holdout)]
 
     def cv_lb_pairs(self) -> list[tuple[float, float]]:
         """(CV, public LB) of submissions that have a cross-validated score of their own."""

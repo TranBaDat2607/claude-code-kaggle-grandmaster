@@ -29,7 +29,6 @@ from __future__ import annotations
 import json
 import re
 import sys
-import tempfile
 from pathlib import Path
 
 try:
@@ -144,7 +143,7 @@ HINTS: list[tuple[str, str, str]] = [
      "To update the kaggle-grandmaster plugin to its latest release without leaving the conversation, suggest the "
      "user run `/kg-update`, a slash command: it checks the latest release, shows what changed, runs "
      "`claude plugin update` (the user approves it), and then the user types /reload-plugins. "
-     "`python -m kgkit update-check` answers whether a newer release exists."),
+     "`kgkit update-check` answers whether a newer release exists."),
     ("kaggle-monitor",
      r"\b(gpu|tpu) (quota|hours)\b|how many (gpu|tpu) hours|quota (left|remaining)|"
      r"\b(is|are) (my|the|our) (kaggle )?(kernels?|notebooks?|runs?|training) (still )?(running|done|finished)|"
@@ -154,7 +153,7 @@ HINTS: list[tuple[str, str, str]] = [
      "To watch Kaggle from inside Claude Code (running kernels with their live CPU, GPU, RAM and disk, recent "
      "submissions, the GPU/TPU quota of every registered account, and switching the session's account), suggest the "
      "user run `/kaggle-monitor`: it opens a pane beside the chat. Answer the question itself as well: "
-     "`python -m kgkit gpu quota --all` reads the quota of every registered account."),
+     "`kgkit gpu quota --all` reads the quota of every registered account."),
 ]
 COMPILED_HINTS = [(name, re.compile(rx, re.IGNORECASE), text) for name, rx, text in HINTS]
 
@@ -204,8 +203,7 @@ def route(prompt: str, in_workspace: bool, task: str = "", ended: bool = False) 
 
 
 def _seen_file(payload: dict) -> Path | None:
-    sid = re.sub(r"[^A-Za-z0-9_-]", "", str(payload.get("session_id") or ""))[:64]
-    return Path(tempfile.gettempdir()) / "kaggle-gm-router" / f"{sid}.json" if sid else None
+    return C.router_seen_file(payload.get("session_id"))
 
 
 def _seen(path: Path | None) -> set[str]:

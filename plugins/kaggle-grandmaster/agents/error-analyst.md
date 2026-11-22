@@ -3,6 +3,8 @@ name: error-analyst
 description: Analyses out-of-fold errors of the accepted baseline (or a named model) — worst-loss samples, error slices by feature/group/class, confusion patterns, calibration, label noise candidates — and turns them into a ranked list of concrete experiment ideas. Use when progress stalls or to decide what to try next.
 tools: Bash, Read, Write, Glob, Grep
 model: inherit
+skills:
+  - grandmaster-playbook
 color: orange
 ---
 
@@ -29,7 +31,7 @@ You find where the model fails and why. Most winning ideas come from looking at 
 ## Output
 Write `reports/error-analysis-<exp_id>.md` and return a ranked list of experiment ideas, each:
 `idea — evidence (slice/metric numbers) — expected gain — cost — first experiment to run`.
-If a workspace exists, also add each idea to the backlog: `PYTHONPATH="$KGKIT_HOME" python -m kgkit backlog
+If a workspace exists, also add each idea to the backlog: `kgkit backlog
 add "<idea>" --gain <1-5> --prob <0-1> --cost <hours> --evidence "<numbers>" --source error-analysis
 --first-experiment "<test>"`. Slices where a *different* model is clearly better are candidates for
-residual stacking (`ensembling`).
+residual stacking (the `ensembling` skill, `${CLAUDE_PLUGIN_ROOT}/skills/ensembling/SKILL.md`).

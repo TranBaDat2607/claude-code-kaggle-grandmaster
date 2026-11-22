@@ -82,7 +82,7 @@ def vendored_note(root: Path) -> str:
     one = len(found) == 1
     return (f"Vendored kgkit not at the plugin's version {KGKIT_VERSION}: {copies}. Scripts that import a copy, and "
             f"`python -m kgkit` run from one, run its version. Refresh {'it' if one else 'each'} with the plugin's "
-            f"kgkit: `PYTHONPATH=\"{KGKIT_HOME}\" python -m kgkit vendor {found[0][0] if one else '<folder>'}` (later "
+            f"kgkit: `kgkit vendor {found[0][0] if one else '<folder>'}` (later "
             "experiments then run the new code).")
 
 
@@ -174,6 +174,13 @@ def brief(root: Path) -> str:
         if accepted is not None:
             cv = f"CV {accepted['cv']:.5f}" if isinstance(accepted.get("cv"), (int, float)) else "LB-only"
             lines.append(f"Accepted baseline (compare new ideas against this): {accepted['id']} {cv}.")
+            others = [(t, h) for t, h in C.EV.track_heads(recs).items() if h["id"] != accepted["id"]]
+            if others:  # #133: each model line is compared with its own baseline, a blend with the best blend
+                lines.append("Other model lines (a record is compared with its nearest kept ancestor, else its "
+                             "track's baseline): " + "; ".join(
+                                 f"track {t} {h['id']}" + (f" CV {h['cv']:.5f}" if isinstance(h.get("cv"), (int, float))
+                                                          else "") for t, h in others) + ".")
+            lines.extend(C.EV.ensemble_advice(recs))
         elif len(scored) >= 2:
             lines.append("No accepted baseline yet: decide one (`kgkit ledger decide <id> baseline`) so experiments "
                          "are compared against a deliberate choice, not the luckiest CV.")
@@ -190,14 +197,28 @@ def brief(root: Path) -> str:
     top = C.B.Backlog(root).ranked()[:3]
     if top:
         lines.append("Backlog top: " + "; ".join(f"#{i['id']} {i['idea'][:60]}" for i in top) + ".")
+    try:
+        from kgkit import grind as GR  # a loop in progress: continued, not restarted or forgotten (#125)
+
+        grind = GR.brief_line(root)
+    except Exception:
+        grind = ""
+    if grind:
+        lines.append(grind)
     lines.append(C.S.submissions_line(root, st) + ".")
     gq = C.G.quota_line(root)
     if gq:
         lines.append(gq)
+    try:
+        cpu_torch = C.G.cpu_torch_line()
+    except Exception:
+        cpu_torch = ""
+    if cpu_torch:
+        lines.append(cpu_torch)
     if not holdout and not (root / "data" / "folds.csv").exists():
         lines.append("No data/folds.csv yet — freeze the CV scheme before comparing experiments (/kg-cv). If "
                      "decisions are made on a fixed holdout + the public LB instead, record that: "
-                     "`python -m kgkit config validation=holdout+lb holdout_n=<rows>`.")
+                     "`kgkit config validation=holdout+lb holdout_n=<rows>`.")
     try:
         vendored = vendored_note(root)
     except OSError:
@@ -236,15 +257,26 @@ def no_workspace(cwd: str) -> str:
     return (f"This repo looks like existing Kaggle work ({seen}) but has no .kaggle-gm/ workspace, so submission "
             f"logging, the daily-budget checks, this status brief and `kgkit status`/`ledger` are off. Adopt it in "
             f"place with /kaggle-grandmaster:kg-adopt {slug} (writes only .kaggle-gm/, imports past submissions; "
-            f"or `python -m kgkit adopt {slug}{flags} --deadline <date>`). Use /kg-start only for a new competition: "
+            f"or `kgkit adopt {slug}{flags} --deadline <date>`). Use /kg-start only for a new competition: "
             f"it bootstraps data, folds and a baseline from scratch.")
 
 
 def main() -> None:
     payload = C.read_input()
     _export_env()
-    parts = [f"[kaggle-grandmaster] kgkit home: {KGKIT_HOME} — run `PYTHONPATH=\"{KGKIT_HOME}\" python -m kgkit <cmd>` "
-             f"(PowerShell: `$env:PYTHONPATH=\"{KGKIT_HOME}\"; python -m kgkit <cmd>`); templates in {KGKIT_HOME}/templates."]
+    parts = ["[kaggle-grandmaster] kgkit is a command on the Bash tool's PATH: run `kgkit <cmd>` with the Bash tool "
+             "(also on Windows; `kgkit --help` lists the commands). Text that says `python -m kgkit` means the same "
+             f"command. Templates in {KGKIT_HOME}/templates."]
+    if payload.get("source") == "compact":  # skills came back cut short: let the router suggest them again (#125)
+        seen = C.router_seen_file(payload.get("session_id"))
+        try:
+            if seen is not None:
+                seen.unlink(missing_ok=True)
+        except OSError:
+            pass
+        parts.append("[kaggle-grandmaster] The conversation was compacted: plugin skills came back with only their "
+                     "first ~5,000 tokens, and the oldest may be gone. Before going on, load again with the Skill tool "
+                     "the kaggle-grandmaster skills the current task needs.")
     root = C.workspace(payload)
     if root is not None:
         b = brief(root)

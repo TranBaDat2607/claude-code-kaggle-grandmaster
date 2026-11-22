@@ -1,6 +1,6 @@
 ---
 name: kaggle-cli
-description: Using the official Kaggle CLI/API from Claude Code — authentication, downloading competition data, submitting (and reading scores), listing submissions and leaderboards, pushing/pulling notebooks (kernels), creating and versioning datasets and models, and fetching episode replays. Use whenever interacting with kaggle.com programmatically.
+description: "The official Kaggle CLI and API: auth, data download, submissions and scores, kernels, datasets. Use whenever working with kaggle.com from code or when a kaggle command fails."
 ---
 
 # Kaggle CLI / API
@@ -16,7 +16,7 @@ description: Using the official Kaggle CLI/API from Claude Code — authenticati
   every request's headers, bearer token included. The plugin's hook blocks all of these, and `kgkit` drops
   both variables from its own Kaggle CLI calls. If auth fails, ask
   the user to create a token at kaggle.com → Settings → API and place it themselves.
-- Your username (for `"id": "<username>/<slug>"` in kernel/dataset metadata): `python -m kgkit whoami`.
+- Your username (for `"id": "<username>/<slug>"` in kernel/dataset metadata): `kgkit whoami`.
   It reads `KAGGLE_USERNAME`, the `username` field of kaggle.json, or the `username` line of
   `kaggle config view` (which resolves token and OAuth logins), never the key. The hook blocks
   other ways of reading those files.
@@ -35,8 +35,8 @@ kaggle competitions submit <slug> -f subs/x.csv -m "0007_lgbm_te | CV 0.81234"
 kaggle competitions submissions <slug> --format json  # history with public scores (poll after submitting)
 kaggle competitions submission-limits <slug> --json   # the team's count today and what is left (numAllowedNow)
 kaggle competitions leaderboard <slug> --show         # top 200 of the LB Kaggle shows (private after the end)
-python -m kgkit standing                              # our rank, team count, medal cut-offs, ties (whole LB)
-python -m kgkit pages [evaluation|rules|data-description]   # the competition's pages as text
+kgkit standing                              # our rank, team count, medal cut-offs, ties (whole LB)
+kgkit pages [evaluation|rules|data-description]   # the competition's pages as text
 ```
 `leaderboard --download` returns the *public* leaderboard even after the close. For the final standing use
 `kgkit standing` (or `kgkit final`, which also reports the finals): it reads the whole listing through the SDK
@@ -46,7 +46,7 @@ cannot see. The rules page and this count can disagree: plan on the smaller numb
 `kaggle competitions pages`, whose parser needs the slug twice (`pages <slug> list <slug> --content`).
 Competition pages on the website are rendered by JavaScript, so WebFetch often returns nothing there.
 Submission messages should always start with the ledger experiment id, and give the CV, so the LB score can be
-attached back: `python -m kgkit ledger sync-lb` attaches every score Kaggle lists (private ones too, after the
+attached back: `kgkit ledger sync-lb` attaches every score Kaggle lists (private ones too, after the
 deadline), `ledger lb <id> <score>` attaches one. Code competitions: submit via the
 notebook: `kaggle competitions submit <slug> -k <user>/<kernel> -v <version> -f submission.csv -m "..."`
 (verified against Kaggle CLI 2.2), or through the website. Success prints only `N submissions remaining
@@ -83,7 +83,7 @@ kaggle kernels status <user>/<kernel>
 kaggle kernels logs <user>/<kernel> -f                        # live log of a running GPU kernel (empty on TPU)
 kaggle quota --format json                                    # weekly GPU/TPU quota + refreshAt
 ```
-`python -m kgkit gpu push <dir> --hours H` pushes any kernel folder with a quota check, a `-t` cap, a check
+`kgkit gpu push <dir> --hours H` pushes any kernel folder with a quota check, a `-t` cap, a check
 that attached kernels have finished (inputs are bound at push time) and a busy-session preflight (2 batch
 GPU sessions and 1 batch TPU session per account).
 
@@ -98,7 +98,7 @@ kernel's last session into the file: `id_no` (that kernel), `docker_image` (that
 kernel, and keep `docker_image` only to pin that environment. `kgkit gpu push` refuses a shape Kaggle is not
 known to take before anything reaches Kaggle.
 
-To *study* a public notebook, prefer `python -m kgkit kernels pull <owner>/<slug>`. It pulls the
+To *study* a public notebook, prefer `kgkit kernels pull <owner>/<slug>`. It pulls the
 notebook with its metadata into `ref/<slug>/`, writes a `REVIEW.md` (CV scheme, model families, printed
 scores, external inputs, with `--check-access` testing that attached datasets are reachable) and a
 local script with Kaggle paths mapped to the workspace. `kgkit kernels top` lists the competition's top
@@ -109,7 +109,7 @@ notebooks with their public score on record: `kaggle kernels list` has no score 
 
 CLI 2.2.4+ reads competition forums: `kaggle competitions topics list <slug> --format json -s top -p <n>`
 (20 topics a page; `--page-size` is ignored) and `kaggle competitions topic-messages <slug> <id> --format json
--n -1` (the whole thread, replies flattened). `python -m kgkit discussions sync|top|search|solutions|read`
+-n -1` (the whole thread, replies flattened). `kgkit discussions sync|top|search|solutions|read`
 wraps both, for active and finished competitions (`discussions solutions --competition <slug>` for
 write-ups). `--source meta` reads Meta Kaggle instead (`kaggle/meta-kaggle`, Kaggle's daily export, ~245 MB,
 cached in `~/.kaggle-gm/meta-kaggle`): it leaves `ForumId` empty for every competition that has not ended,
@@ -118,7 +118,7 @@ emoji in a title, so set `PYTHONIOENCODING=utf-8` when parsing its output yourse
 to the id's slug. `kaggle kernels output` pages through all output files (`--page-size 200` means fewer
 requests), and `--file-pattern <regex>` filters them, e.g. to skip weights.
 
-For GPU **training** runs use `python -m kgkit gpu build/push/wait/collect` (skill `kaggle-gpu`). It
+For GPU **training** runs use `kgkit gpu build/push/wait/collect` (skill `kaggle-gpu`). It
 adds the quota check, a `-t` cap, deadline-aware checkpoints, both T4s busy and ledger import.
 
 ## Datasets & models
@@ -128,7 +128,7 @@ kaggle datasets init -p kernels/weights                 # dataset-metadata.json 
 kaggle datasets create -p kernels/weights --dir-mode zip
 kaggle datasets version -p kernels/weights -m "fold models v3" --dir-mode zip
 kaggle datasets download <owner>/<slug> -p data/ext/<slug> --unzip
-python -m kgkit datasets pull <owner>/<slug> data/ext/<slug>   # same, file by file when the archive 404s
+kgkit datasets pull <owner>/<slug> data/ext/<slug>   # same, file by file when the archive 404s
 kaggle kernels output <owner>/<kernel> -p data/ext/kout-<kernel>   # a notebook's outputs used as inputs (OOFs)
 kaggle models instances versions create ...              # Kaggle Models (for model hubs) — see `kaggle models -h`
 ```

@@ -1,6 +1,6 @@
 ---
 name: computer-vision
-description: Winning playbook for Kaggle computer vision competitions — image classification, object detection, segmentation, medical imaging (CT/MRI/X-ray/pathology), video, satellite — covering backbone choice (timm), resolution, augmentations, losses, training recipes, TTA, pseudo-labelling, multi-stage pipelines and inference under time limits. Use for any image/video data.
+description: "Playbook for Kaggle computer vision: classification, detection, segmentation, medical imaging, video. Use for any image or video data."
 ---
 
 # Computer Vision Playbook
@@ -18,7 +18,9 @@ description: Winning playbook for Kaggle computer vision competitions — image 
   brightness/contrast, hue/saturation, CoarseDropout; MixUp/CutMix for classification.
   Choose augmentations that preserve the label (no vertical flips for text, careful with
   colour in medical/satellite data).
-- 5 folds (grouped by patient/source!), 10–30 epochs, save best-by-metric per fold, OOF preds.
+- 5 folds (grouped by patient/source!), 10–30 epochs, keep each fold's last epoch (EMA weights) and save OOF preds.
+  Never keep the epoch that scores best on the fold it predicts: that OOF is optimistic (#109). Fix the epoch count
+  once from an earlier run's per-epoch val curves, or let `--es-holdout 0.05` choose it on rows held out of training.
 - Template: `templates/train_image.py`.
 
 ## 2. Levers in rough order of typical impact
@@ -83,3 +85,14 @@ smaller ones; TTA only where OOF shows gain (batched with the originals); FP16; 
 models; one process per GPU on both T4s. Exports with a measured gain: `torch.compile` (~2x in SenNet 1st),
 TensorRT engines built on a T4 (~2x over `torch.jit` in CryoET 1st). See `code-competitions` and
 `compute-efficiency` (`references/inference.md`).
+
+## 6. Cheap screens (sweeps)
+Many values of one lever are one sweep (`/kg-grind --sweep`): screened cheap against a control at the same fidelity, the best confirmed by a full run judged as the best of all of them.
+
+| Screen on | Cheap settings that usually keep the ranking | Not a screen question |
+|---|---|---|
+| whole patients / studies / series, as the folds keep them (`kgkit screen new s30 --frac 0.3 --folds 0`) | half the resolution, a third of the epochs (the schedule compressed), the small backbone of the family | resolution, backbone size, TTA, EMA and long-schedule gains: there the lever is the fidelity |
+| segmentation / detection / 3D units (`--ids images.csv:image_id`, whole sites or scanners as `--group`) | fewer slices or patches per volume, one crop scale | thresholds and post-processing: tune them once, on the full OOF |
+
+Segmentation, detection and 3D runs log a unit table per image, study or tomogram (Dice / IoU / F-beta counts:
+`/kg-experiment`'s training contract), so screens and their control compare paired, unit by unit.

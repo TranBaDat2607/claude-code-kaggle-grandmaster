@@ -1,6 +1,6 @@
 ---
 name: validation-strategy
-description: Designing a cross-validation scheme that tracks the private leaderboard — choosing KFold/Stratified/Group/StratifiedGroup/multilabel/time-series/purged splits, adversarial validation, CV-LB correlation, noise estimation, and leakage prevention. Use when setting up CV, when CV and LB disagree, or before trusting any score.
+description: "Designs a cross-validation scheme that tracks the Kaggle private leaderboard: the right split, adversarial validation, noise. Use when setting up CV, when CV and LB disagree, or before trusting a score."
 ---
 
 # Validation Strategy
@@ -27,7 +27,7 @@ patient-visit. Look for them (hash images, cluster texts, group by obvious IDs) 
 
 ## 2. Mechanics
 
-- `python -m kgkit folds data/train.csv --target y --group g --id-col id --out data/folds.csv`
+- `kgkit folds data/train.csv --target y --group g --id-col id --out data/folds.csv`
   then **commit folds.csv** (or the seed + script). Every model uses it.
 - 5 folds is the default; use 10 for small data (<5k rows) or very noisy metrics, 3 for
   huge data or slow DL in exploration (but keep the final folds consistent across models).
@@ -54,7 +54,7 @@ patient-visit. Look for them (hash images, cluster texts, group by obvious IDs) 
 
 ## 4. Adversarial validation
 
-`python -m kgkit adv data/train.csv data/test.csv --drop id,target`
+`kgkit adv data/train.csv data/test.csv --drop id,target`
 - AUC ≈ 0.5: iid; random folds are fine.
 - 0.6–0.8: find the drifting features; test whether dropping/transforming them hurts CV;
   consider normalising per group/time.

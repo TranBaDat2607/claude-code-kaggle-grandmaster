@@ -339,7 +339,7 @@ def test_state_ignores_complete_an_existing_file(tmp_path):
     d = tmp_path / ".kaggle-gm"
     d.mkdir()
     (d / ".gitignore").write_text("remote/\n*.tmp")
-    assert S.ensure_state_ignores(tmp_path) == ["build/"]
+    assert S.ensure_state_ignores(tmp_path) == ["build/", "local/", "*.lock"]  # *.lock: kgkit.filelock (#126); local/: --backend local
     assert (d / ".gitignore").read_text().splitlines()[:2] == ["remote/", "*.tmp"]
     assert S.ensure_state_ignores(tmp_path) == []
 

@@ -1,43 +1,37 @@
 ---
 name: kg-ideas
-description: Generate a ranked, evidence-backed backlog of next experiments from error analysis, the domain playbook's untried levers, public notebooks, discussion/prior-art research and the ledger history, stored with kgkit backlog.
+description: "Builds a ranked backlog of next experiments from errors, playbooks, public notebooks and the ledger. Use when deciding what to try next."
 argument-hint: "[focus area]"
 allowed-tools:
   - Read
   - Glob
   - Grep
   - Agent
-  - 'Bash(PYTHONPATH="${CLAUDE_PLUGIN_ROOT}" python -m kgkit backlog *)'
-  - 'Bash(python -m kgkit backlog *)'
-  - 'PowerShell(python -m kgkit backlog *)'
-  - 'Bash(PYTHONPATH="${CLAUDE_PLUGIN_ROOT}" python -m kgkit discussions *)'
-  - 'Bash(python -m kgkit discussions *)'
-  - 'PowerShell(python -m kgkit discussions *)'
-  - 'Bash(PYTHONPATH="${CLAUDE_PLUGIN_ROOT}" python -m kgkit kernels top *)'
-  - 'Bash(python -m kgkit kernels top *)'
-  - 'PowerShell(python -m kgkit kernels top *)'
-  - 'Bash(PYTHONPATH="${CLAUDE_PLUGIN_ROOT}" python -m kgkit kernels pull *)'
-  - 'Bash(python -m kgkit kernels pull *)'
-  - 'PowerShell(python -m kgkit kernels pull *)'
-  - 'Bash(PYTHONPATH="${CLAUDE_PLUGIN_ROOT}" python -m kgkit ledger *)'
-  - 'Bash(python -m kgkit ledger *)'
-  - 'PowerShell(python -m kgkit ledger *)'
-  - 'Bash(PYTHONPATH="${CLAUDE_PLUGIN_ROOT}" python -m kgkit status *)'
-  - 'Bash(python -m kgkit status *)'
-  - 'PowerShell(python -m kgkit status *)'
+  - 'Bash(kgkit backlog *)'
+  - 'Bash(kgkit discussions *)'
+  - 'Bash(kgkit kernels top *)'
+  - 'Bash(kgkit kernels pull *)'
+  - 'Bash(kgkit ledger *)'
+  - 'Bash(kgkit status *)'
 ---
 
 # /kg-ideas
 
-Run kgkit with the Bash tool, as `PYTHONPATH="${CLAUDE_PLUGIN_ROOT}" python -m kgkit <command>`: this command
-pre-approves that form for the kgkit calls it makes. Submitting, pushing or publishing still asks (so does a
-PowerShell `$env:` assignment).
+Run kgkit with the Bash tool as `kgkit <command>`: the plugin puts it on PATH, also on Windows (Git Bash),
+and this command pre-approves the kgkit calls it makes. Older text that says `python -m kgkit` means the same
+command. Submitting, pushing or publishing still asks.
 
 Focus: `$ARGUMENTS`
 
-1. Read what was already tried: `python -m kgkit ledger list -n 50` and `python -m kgkit backlog list --all`
-   (done/dropped ideas with their results; don't re-propose a failed idea unless the evidence changed).
-   Check `python -m kgkit status` for a **PLATEAU** or **CROWD** line. Either one means the stack is saturated:
+Workspace state and backlog when this command loaded:
+
+!`kgkit status --offline -n 10 || true`
+
+!`kgkit backlog list --all || true`
+
+1. Read what was already tried: the backlog above (done/dropped ideas with their results; don't re-propose a
+   failed idea unless the evidence changed) and, for a longer history than the status shows,
+   `kgkit ledger list -n 50`. Check the status for a **PLATEAU** or **CROWD** line. Either one means the stack is saturated:
    the last experiments added ~0, or many teams sit within noise of your score. Then rank first an idea that
    brings what the stack, the public notebooks and the public datasets lack: a new model family, a new data view
    (a representation, another granularity, the data-generation process), or a new signal. Give more members of a
@@ -49,15 +43,15 @@ Focus: `$ARGUMENTS`
    there are. If the baseline has neither (an LB-only fork of public notebooks), skip it and note why;
    do not spawn it to fail;
    `solution-researcher` agent for techniques from similar past competitions (skip if
-   `reports/prior-art.md` is recent); `python -m kgkit kernels top --sort-by hotness` for newly popular
+   `reports/prior-art.md` is recent); `kgkit kernels top --sort-by hotness` for newly popular
    notebooks, and `kgkit kernels pull` on any that look new (read their `REVIEW.md`); refresh the
-   discussion index (`python -m kgkit discussions sync`, then `discussions top --sort recent` and
+   discussion index (`kgkit discussions sync`, then `discussions top --sort recent` and
    `discussions search "leak|trick|magic|cv.*lb|shake|external"`) and read the threads that matter
    (`discussions read <id>` or WebFetch the printed URL). Tag ideas from there `--source forum`.
 3. Walk the relevant domain skill's lever list and mark which levers are untried. Then brainstorm
    beyond the lists (data-generation process, metric quirks, what the error slices suggest) and label
    those ideas `--source brainstorm`.
-4. Add each idea: `python -m kgkit backlog add "<idea>" --gain <1-5> --prob <0-1> --cost <hands-on hours>
+4. Add each idea: `kgkit backlog add "<idea>" --gain <1-5> --prob <0-1> --cost <hands-on hours>
    [--gpu-hours <unattended Kaggle GPU hours>] --evidence "<slice/metric numbers, thread, notebook>"
    --source <error-analysis|forum|notebook|prior-art|domain|brainstorm> --first-experiment "<smallest test>"`.
    Gain scale: 1 = within noise, 3 = solid step, 5 = leak or new data source. Mark cheap high-information
@@ -65,4 +59,4 @@ Focus: `$ARGUMENTS`
    fit in the quota left before the deadline rank as nearly free (unused quota expires), so a long unattended
    retrain is not buried behind small manual tweaks. Ideas already ruled out go in with
    `--status dropped --result "<why>"` so they are never re-proposed.
-5. `python -m kgkit backlog render` (writes `reports/backlog.md`) and present the top 10.
+5. `kgkit backlog render` (writes `reports/backlog.md`) and present the top 10.

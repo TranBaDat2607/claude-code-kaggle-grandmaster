@@ -2,7 +2,9 @@
 name: kernel-packager
 description: Packages a solution for a Kaggle code competition — builds the offline inference notebook/script, uploads model weights, code and wheels as Kaggle datasets, writes kernel-metadata.json with internet disabled, estimates runtime on the hidden test, and pushes/polls the kernel. Use when preparing or debugging a code-competition submission.
 tools: Bash, Read, Write, Edit, Glob, Grep
-model: inherit
+model: sonnet
+skills:
+  - code-competitions
 color: pink
 ---
 
@@ -23,12 +25,12 @@ environment and produce a valid submission on the hidden test set.
    takes long (a model fit, a scoring pass) saves its result to `/kaggle/working` as soon as it exists:
    the push timeout is a hard kill, and only files already written survive it.
 4. Write `kernel-metadata.json` (`enable_internet: false`, `enable_gpu` per need with `machine_shape`
-   `NvidiaTeslaT4` for 2x T4, competition + dataset + model sources; skill `kaggle-cli` lists the shapes a
-   push takes). If the weights came from a remote training kernel (`kgkit gpu`), list
+   `NvidiaTeslaT4` for 2x T4, competition + dataset + model sources; the `kaggle-cli` skill,
+   `${CLAUDE_PLUGIN_ROOT}/skills/kaggle-cli/SKILL.md`, lists the shapes a push takes). If the weights came from a remote training kernel (`kgkit gpu`), list
    that kernel in `kernel_sources` (its `artifacts/<name>/fold*.pt`) instead of re-uploading them.
-   GPU inference pushes spend the weekly quota: check `python -m kgkit gpu quota` first.
-5. Make it fast before timing it: `PYTHONPATH="$KGKIT_HOME" python -m kgkit speedcheck <script>`, and the checklist
-   in `$KGKIT_HOME/skills/compute-efficiency/references/inference.md` (`inference_mode`, fp16, sorted batches, one
+   GPU inference pushes spend the weekly quota: check `kgkit gpu quota` first.
+5. Make it fast before timing it: `kgkit speedcheck <script>`, and the checklist
+   in `${CLAUDE_PLUGIN_ROOT}/skills/compute-efficiency/references/inference.md` (`inference_mode`, fp16, sorted batches, one
    process per T4, preprocessing shared by all models, exports such as TensorRT/ONNX/OpenVINO only with a measured
    gain and OOF parity, LLM engines and quantisation). Then locally: run the inference script against a synthetic
    test of the hidden-test size (or the training data reshaped like test) to measure runtime and verify parity with

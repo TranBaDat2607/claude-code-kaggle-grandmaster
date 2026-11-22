@@ -105,11 +105,11 @@ Both cost the same GPU-hours per trained model. They differ in how soon one resu
 - **DDP** (`torchrun --nproc_per_node 2`, a command without `{fold}`): one model on both GPUs, so its result comes
   1.6-1.9x sooner than on one GPU (PCIe, no NVLink; LoRA syncs few gradients and gets closer to 1.9x than a full
   fine-tune). Use it for a single big model whose batch does not fit one T4, a single full-data fit, and **screens
-  when wall time binds** (`kaggle-gpu` section 1: quota to spare, or runs of ~6 h+ with few cycles left before the
+  when wall time binds** (`kaggle-gpu`, the time-bound regime: quota to spare, or runs of ~6 h+ with few cycles left before the
   deadline). The command then owns both GPUs, and the runner gives it the whole session.
 - To keep a DDP screen comparable with one-GPU runs, keep the effective batch (micro-batch x accumulation x GPUs):
   halve the accumulation steps, keep the learning rate and the schedule.
-- TPU v5e-8 when the GPU quota is gone: `kaggle-gpu` section 6 (bf16, XLA, the queue).
+- TPU v5e-8 when the GPU quota is gone: `kaggle-gpu` (`references/tpu-xla.md`: bf16, XLA, the queue).
 
 ### DDP checklist for your own loop
 
@@ -136,7 +136,8 @@ burns until its cap). So every decision that ends, skips or reshapes a step must
 - Progressive resizing: low resolution first, full resolution for the last 20-30 %.
 - Shorter cosine schedules with EMA often match longer ones. Screen the epoch count on one fold.
 - Validate every epoch only when it is cheap. Subsample a large validation set for the per-epoch curve (pruning) and
-  evaluate the best checkpoint in full at the end.
+  evaluate the kept checkpoint (the final one, or the one `--es-holdout` chose) in full at the end: a checkpoint
+  chosen on the scored fold, even a subsample of it, makes the OOF optimistic (#109).
 - Stop at the plateau: if fold 0's best epoch is consistently <= 70 % of the schedule, shorten the schedule for the
   other folds.
 - Exploration at lower resolution, shorter `max_len` or a data subset; scale up for the finals.

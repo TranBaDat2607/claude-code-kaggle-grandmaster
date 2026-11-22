@@ -1,6 +1,6 @@
 ---
 name: compute-efficiency
-description: Speed defaults for Kaggle training and inference by domain (images, text and LLMs, tabular with cuDF/cuML/GPU GBDTs, audio, recsys, time series) and hardware (T4x2, P100, TPU, CPU-only kernels, Windows): measuring idle, input-bound or compute-bound runs, mixed precision, data loading, torch.compile, ONNX/OpenVINO/TensorRT/vLLM and quantisation. Use whenever training or inference code is written or changed, and when a run is slow, a GPU idles or runs out of memory, or a kernel must fit a time limit.
+description: "Speed defaults for Kaggle training and inference on T4, P100, TPU and CPU; measure input-bound vs compute-bound first. Use whenever training or inference code is written, a run is slow or out of memory, or a kernel must fit a time limit."
 ---
 
 # Compute efficiency: more experiments per GPU-hour
@@ -40,13 +40,13 @@ The general PyTorch loop (precision, memory, input pipeline, fold-parallel vs DD
   loop. It prints samples/s for each, the verdict and the peak GPU memory, then the speed-up against the previous
   bench of the same run name and the settings that changed (kept in `reports/bench.jsonl`). It trains nothing and
   logs nothing to the ledger.
-- **Any command** (GBDT, cuDF features, an inference script): `python -m kgkit bench --run "<command>"` runs it,
+- **Any command** (GBDT, cuDF features, an inference script): `kgkit bench --run "<command>"` runs it,
   samples GPU utilisation and memory with `nvidia-smi` and prints the wall time and a verdict. With a second
   `--run` it prints the speed-up of each run against the first. Use reduced settings (one fold, fewer rounds, a
   slice of the test set) so a run takes minutes.
 - **In your own script:** `kgkit.bench.measure()` and `kgkit.bench.report()` do what `--bench` does
   ([training-loop.md](references/training-loop.md#measuring)).
-- **Remote Kaggle runs:** `kgkit gpu collect` reports utilisation per GPU (`kaggle-gpu` section 5). With no local GPU,
+- **Remote Kaggle runs:** `kgkit gpu collect` reports utilisation per GPU (`kaggle-gpu`, its diagnosis table). With no local GPU,
   a short bench session costs minutes of quota instead of a screen's hours:
   `gpu build --name bench --cmd "python src/train_image.py --bench" --hours 0.3`, then `gpu push` and
   `gpu wait <kernel> --collect`. Without `{fold}` the command runs once, with both GPUs visible. The session saves

@@ -90,7 +90,7 @@ def gbdt(tmp_path, plugin_root, monkeypatch):
 
 def test_gbdt_early_stops_on_an_inner_slice_never_the_scored_fold(gbdt, capsys):
     run, calls, folds, y = gbdt
-    rec = run("--model", "lgbm", "--name", "inner")
+    rec = run("--model", "lgbm", "--name", "inner", "--no-refit")
     assert len(calls["fit"]) == 5
     for f, (fit_rows, es_rows, y_es) in enumerate(calls["fit"]):
         va = set(np.flatnonzero(folds == f))
@@ -105,9 +105,9 @@ def test_gbdt_early_stops_on_an_inner_slice_never_the_scored_fold(gbdt, capsys):
 
     # the slice is drawn with the run seed: the same seed draws it again, another seed another one
     first = [c[1] for c in calls["fit"]]
-    run("--model", "lgbm", "--name", "again")
+    run("--model", "lgbm", "--name", "again", "--no-refit")
     assert [c[1] for c in calls["fit"]] == first
-    run("--model", "lgbm", "--name", "seed7", "--seeds", "7")
+    run("--model", "lgbm", "--name", "seed7", "--seeds", "7", "--no-refit")
     assert [c[1] for c in calls["fit"]] != first
 
 
@@ -121,7 +121,7 @@ def test_gbdt_es_on_valid_keeps_the_old_behaviour_and_says_so(gbdt):
 
 def test_gbdt_refit_trains_on_the_whole_training_part(gbdt):
     run, calls, folds, _ = gbdt
-    rec = run("--model", "lgbm", "--name", "refit", "--refit")
+    rec = run("--model", "lgbm", "--name", "refit")  # the default since #135: no fold model loses 10% of its data
     assert len(calls["fit"]) == 10  # early-stopping fit, then a refit, per fold
     for f in range(5):
         _, es_rows, _ = calls["fit"][2 * f]
@@ -129,6 +129,55 @@ def test_gbdt_refit_trains_on_the_whole_training_part(gbdt):
         assert es_rows and refit_es is None and refit_rows == set(np.flatnonzero(folds != f))
     assert calls["make"][1]["n_estimators"] == math.ceil(100 / 0.9)
     assert rec["oof_selection"] == "independent" and rec["params"]["refit"] is True
+
+
+def _set_train(ws, **cols):
+    df = pd.read_csv(ws / "data" / "train.csv")
+    for k, v in cols.items():
+        df[k] = v
+    df.to_csv(ws / "data" / "train.csv", index=False)
+
+
+def test_gbdt_stopping_slice_keeps_the_folds_groups_whole(gbdt, tmp_path):
+    """#135: with grouped folds, a stopping slice drawn by rows puts rows of one group on both sides, so early
+    stopping sees rows like the ones it fits and stops late."""
+    run, calls, folds, _ = gbdt
+    ws = Path.cwd()
+    groups = np.arange(400) // 4  # 100 patients, 4 rows each; the folds keep them whole
+    _set_train(ws, patient=groups)
+    pd.DataFrame({"row_id": np.arange(400), "fold": groups % 5}).to_csv(ws / "data" / "folds.csv", index=False)
+    (ws / ".kaggle-gm" / "folds_spec.json").write_text(json.dumps({"out": "data/folds.csv", "group": "patient"}))
+    folds = groups % 5
+    rec = run("--model", "lgbm", "--name", "grouped", "--no-refit")
+    for f, (fit_rows, es_rows, _) in enumerate(calls["fit"]):
+        fit_g, es_g = set(groups[sorted(fit_rows)]), set(groups[sorted(es_rows)])
+        assert es_g and not fit_g & es_g  # no patient on both sides
+        assert not es_rows & set(np.flatnonzero(folds == f))
+        assert len(es_rows) == pytest.approx(0.1 * len(fit_rows | es_rows), abs=4)
+    assert rec["params"]["es_slice"] == "group:patient"
+    # a group the folds named but the training table lacks: drawn by rows, with a note
+    (ws / ".kaggle-gm" / "folds_spec.json").write_text(json.dumps({"out": "data/folds.csv", "group": "site"}))
+    assert run("--model", "lgbm", "--name", "nosite", "--no-refit")["params"]["es_slice"] == "stratified"
+
+
+def test_gbdt_stopping_slice_is_the_latest_rows_with_a_time_column(gbdt, monkeypatch):
+    run, calls, folds, _ = gbdt
+    ws = Path.cwd()
+    day = pd.date_range("2024-01-01", periods=400, freq="D").strftime("%Y-%m-%d")
+    _set_train(ws, day=day[::-1])  # newest first: order by the column, not by the row
+    src = (ws / "src" / "train_gbdt.py").read_text(encoding="utf-8")
+    (ws / "src" / "train_gbdt.py").write_text(src.replace("time_col=None,", 'time_col="day",'), encoding="utf-8")
+    mod = _load_template(ws / "src" / "train_gbdt.py")
+    seen = []
+    monkeypatch.setattr(mod, "make_model", lambda *a, **k: _Fake({}))
+    monkeypatch.setattr(mod, "fit", lambda model, kind, X_fit, y_fit, X_es, y_es, cats, es: (
+        seen.append((set(X_fit.index), set(X_es.index))), (model, 100))[1])
+    monkeypatch.setattr(sys, "argv", ["train_gbdt.py", "--model", "lgbm", "--name", "timed", "--no-refit"])
+    mod.main()
+    when = pd.to_datetime(pd.Series(day[::-1]))
+    for fit_rows, es_rows in seen:
+        assert when[sorted(es_rows)].min() > when[sorted(fit_rows)].max()  # stopping is judged on the future
+    assert Ledger(ws).records()[-1]["params"]["es_slice"] == "time:day"
 
 
 def test_gbdt_parent_flag_and_models_without_early_stopping(gbdt):
@@ -191,6 +240,21 @@ def test_ledger_compare_says_when_the_two_oofs_were_selected_differently(tmp_pat
 
 
 # ----------------------------------------------------------------------------- skills
+SCORED_FOLD_SELECTION = re.compile(
+    r"best[- ]by[- ]metric|best checkpoints? (?:often|per fold)|(?:checkpoint|evaluate|keep) the best checkpoint"
+    r"|checkpoint the best|save best"
+    r"|eval_set=\[\(X(?:\.iloc|\.loc)?\[(?:va|val|valid)\w*\]", re.IGNORECASE)
+
+
+def test_no_skill_teaches_selecting_on_the_scored_fold():
+    """#128: skills that told Claude to keep the best checkpoint, or early-stop on the scored fold, contradicted the
+    templates and kg-experiment (#109)."""
+    for p in sorted(SKILLS.glob("**/*.md")):
+        for n, line in enumerate(p.read_text(encoding="utf-8").splitlines(), 1):
+            m = SCORED_FOLD_SELECTION.search(line)
+            assert not m, f"{p.relative_to(SKILLS)}:{n} selects on the scored fold: {line.strip()}"
+
+
 def test_no_skill_repeats_a_paragraph():
     """A paragraph or bullet pasted twice into a skill costs tokens on every load and reads as a mistake."""
     for p in sorted(SKILLS.glob("*/**/*.md")):

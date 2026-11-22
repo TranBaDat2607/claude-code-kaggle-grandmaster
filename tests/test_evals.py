@@ -132,7 +132,7 @@ def test_fixture_builds_the_workspace(tmp_path):
     ws, home = tmp_path / "claude-eval-ws", tmp_path / "claude-eval-home"
     ws.mkdir()
     home.mkdir()
-    r = _run_fixture(ws, home, "--candidate", "--budget-used", "--creds")
+    r = _run_fixture(ws, home, "--candidate", "--idea", "--budget-used", "--creds")
     assert r.returncode == 0, r.stderr
 
     sys.path.insert(0, str(PLUGIN))
@@ -144,6 +144,10 @@ def test_fixture_builds_the_workspace(tmp_path):
     assert "0002_lgbm-f2" in ledger and "0003_lgbm-f3" in ledger
     assert S.submissions_today(ws) == 5
     assert '"KEEP"' in (ws / ".kaggle-gm" / "comparisons.jsonl").read_text(encoding="utf-8")
+    from kgkit.backlog import Backlog
+
+    idea = Backlog(ws).items()[3]  # --idea: what ws-experiment-few-calls closes with `kgkit exp finish 0003`
+    assert idea["id"] == 4 and idea["status"] == "running" and "f3" in idea["idea"]
     assert (home / ".kaggle" / "kaggle.json").is_file()
     # the invalid file stays invalid: the case grading relies on it
     sub = (ws / "subs" / "sub_0003.csv").read_text(encoding="utf-8").splitlines()

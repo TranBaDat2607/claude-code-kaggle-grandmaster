@@ -1,6 +1,6 @@
 ---
 name: time-series
-description: Winning playbook for Kaggle time-series and forecasting competitions — leak-free time validation, lag/rolling/calendar features, global GBDT models, recursive vs direct multi-horizon forecasting, hierarchical reconciliation, deep forecasting models, financial/market prediction with purged CV, and sensor/event sequences. Use whenever the target depends on time or the test period is in the future.
+description: "Playbook for Kaggle time-series and forecasting competitions: time-aware CV, lag features, multi-horizon, purged CV for finance. Use whenever the target depends on time or the test period is in the future."
 ---
 
 # Time-Series Playbook
@@ -73,3 +73,11 @@ Event detection (e.g. sleep onset, seizures): sequence models (1D U-Net/GRU/tran
 windows with multi-scale features; predict per-step probabilities, then peak-detection
 post-processing tuned to the tolerance-based metric (AP over tolerances). Validate grouped by
 subject.
+
+## 8. Cheap screens (sweeps)
+Many values of one lever are one sweep (`/kg-grind --sweep`): screened cheap against a control at the same fidelity, the best confirmed by a full run judged as the best of all of them.
+
+A screen of the past says little about the future: screen on the **latest** window (`kgkit screen new late --frac 0.3
+--time-col date`, with `--group series_id` to keep whole series) or on the last folds of the time split
+(`--folds 3 4`), never on random rows. Cheap settings that usually keep the ranking: fewer series, a higher learning
+rate with fewer trees. Not a screen question: lags, windows and seasonality that need the long history.

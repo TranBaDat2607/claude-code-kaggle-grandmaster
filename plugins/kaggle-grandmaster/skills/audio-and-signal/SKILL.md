@@ -1,6 +1,6 @@
 ---
 name: audio-and-signal
-description: Playbook for Kaggle audio and biosignal competitions — bioacoustics (BirdCLEF-style), speech, EEG/ECG/EMG, seismic and other 1D signals — covering spectrogram vs raw-waveform models, augmentation, weak labels, soundscape inference under CPU limits, and subject-grouped validation. Use for any audio or sensor-waveform data.
+description: "Playbook for Kaggle audio and biosignal competitions (bioacoustics, speech, EEG/ECG, seismic). Use when the inputs are sound or sensor waveforms."
 ---
 
 # Audio & Signal Playbook
@@ -53,3 +53,11 @@ Measure throughput on the exact hardware early.
 - Distil a big ensemble into a small fast student for the CPU budget.
 - Temporal post-processing: smoothing predictions over adjacent windows; thresholding absent
   classes by recording-level evidence.
+
+## 6. Cheap screens (sweeps)
+Many values of one lever are one sweep (`/kg-grind --sweep`): screened cheap against a control at the same fidelity, the best confirmed by a full run judged as the best of all of them.
+
+Screen on whole recordings, subjects or sessions (`--group`), as the folds keep them; per-clip scores averaged per
+recording log a unit table (`mean`, grouped by recording). Cheap settings that usually keep the ranking: shorter
+crops, fewer mel bins or a lower sample rate, a third of the epochs. Not a screen question: crop length and
+resolution themselves, subject effects seen on a few subjects.

@@ -1,6 +1,6 @@
 ---
 name: deep-learning-training
-description: Competition-grade deep learning training practice in PyTorch — schedules, optimisers, mixed precision, EMA/SWA, gradient accumulation and checkpointing, multi-GPU on Kaggle (2xT4), data loading speed, reproducibility, debugging loss curves, and making the most of limited GPU hours. Use when writing or debugging any neural network training loop for a competition.
+description: "Competition-grade PyTorch training: schedules, mixed precision, EMA, multi-GPU, loss-curve debugging. Use when writing or debugging a neural network training loop."
 ---
 
 # Deep Learning Training for Competitions
@@ -27,7 +27,7 @@ Every training loop starts with these defaults. Load the `compute-efficiency` sk
 loop: it has the measurement, the per-domain how-to and what runs on which GPU.
 
 - **Measure first**: the templates' `--bench` times the data loader alone, the training step alone and the real
-  loop (`python -m kgkit bench --run "<cmd>"` for any script). Input-bound: fix the pipeline. Compute-bound: less
+  loop (`kgkit bench --run "<cmd>"` for any script). Input-bound: fix the pipeline. Compute-bound: less
   compute (AMP, compile, smaller inputs).
 - AMP (above), `channels_last` for CNNs, `cudnn.benchmark = True` for fixed input sizes, fused AdamW, SDPA attention.
 - Inputs cached once at training size (images as uint8 npy/PNG, text as token ids). `num_workers` = CPU cores ÷

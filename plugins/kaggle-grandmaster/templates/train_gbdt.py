@@ -12,7 +12,9 @@ Copy to src/, edit CONFIG and add_features(), then:
     python src/train_gbdt.py --model xgb --device cuda      # GPU XGBoost / CatBoost / LightGBM (or KG_DEVICE=cuda)
     python -m kgkit bench --run "python src/train_gbdt.py --smoke" --run "python src/train_gbdt.py --smoke --device cuda"
     python src/train_gbdt.py --name lr08 --params '{"learning_rate": 0.08}' --parent 0007   # lineage in the ledger
-    python src/train_gbdt.py --refit                 # after early stopping, refit on the whole training part
+    python src/train_gbdt.py --no-refit              # quick screens: keep the model fitted on 90% of each fold
+    KG_SCREEN=s30 python src/train_gbdt.py --name v2 --parent 0007   # a screen: its rows and folds, no submission
+    KG_SEED=44 KG_REPLICA_OF=0007 python src/train_gbdt.py ...       # a seed re-run (kgkit ledger seed-noise)
 
 The experiment name defaults to "<model>_baseline" (e.g. xgb_baseline) when neither --name nor
 CONFIG["name"] is set.
@@ -21,12 +23,21 @@ What it guarantees:
   * uses the frozen folds in data/folds.csv (joined on id, or by row order when no id column)
   * OOF predictions + fold-averaged test predictions, scored with the competition metric
   * label metrics handled properly (threshold / argmax / optimised rounding fitted on OOF)
-  * honest OOF: LightGBM / XGBoost / CatBoost early-stop on a stratified slice (es_fraction, drawn with the run
-    seed) of each fold's training part, never on the fold they predict: stopping on the scored fold picks the
-    tree count on those rows and makes the OOF optimistic (more so at higher learning rates).
+  * honest OOF: LightGBM / XGBoost / CatBoost early-stop on a slice (es_fraction, drawn with the run seed) of each
+    fold's training part, never on the fold they predict: stopping on the scored fold picks the tree count on those
+    rows and makes the OOF optimistic (more so at higher learning rates). The slice holds whole groups when the
+    folds are grouped (group_col, else the group `kgkit folds` recorded) and the latest rows with time_col (#135);
+    otherwise it is stratified by class. Then each fold refits on its whole training part with the tree count
+    scaled by 1 / (1 - es_fraction), so no fold model loses 10% of its data (--no-refit for quick screens).
     --es-on-valid restores the old behaviour, to reproduce records logged before it.
   * per-fold training scores next to the CV (the train/validation gap), and the record's --parent
+  * the run ends with the paired comparison against --parent (else the accepted baseline) and the
+    `kgkit exp finish` call that records the decision (#127)
   * every run logged to the experiment ledger with OOF/test artefacts and a submission file
+  * under KG_SCREEN (kgkit screen, kgkit sweep): trains and scores only the screen's rows and folds, logs the
+    OOF with NaN elsewhere and writes no submission; it is then compared with the baseline's control (#134)
+  * under KG_SEED + KG_REPLICA_OF: trains with new seeds and logs a seed replica of that record, which measures
+    the seed noise every paired comparison then adds (`kgkit ledger seed-noise` prints the command)
 """
 
 from __future__ import annotations
@@ -49,7 +60,15 @@ except ImportError:  # <workspace>/third_party/kgkit, else the plugin's (KGKIT_H
 from kgkit import metrics as M
 from kgkit import state as S
 from kgkit.cv import split_indices
-from kgkit.experiment import Ledger, seed_everything
+from kgkit.experiment import Ledger, run_seeds, seed_everything
+try:  # a kgkit vendored before #127 has no report_comparison: the run then ends without the verdict
+    from kgkit.experiment import report_comparison
+except ImportError:
+    report_comparison = None
+try:  # a kgkit vendored before #134 has no screens: every run is then a full run
+    from kgkit import screen as SC
+except ImportError:
+    SC = None
 from kgkit.thresholds import OptimizedRounder, best_threshold
 
 # ----------------------------------------------------------------------------- config
@@ -71,7 +90,9 @@ CONFIG = dict(
     early_stopping=200,
     es_fraction=0.1,      # share of each fold's training part held back to pick the number of trees
     es_on_valid=False,    # True: early-stop on the scored fold (optimistic OOF; the template's old behaviour)
-    refit=False,          # True: refit on the whole training part with best_iteration / (1 - es_fraction) trees
+    refit=True,           # refit on the whole training part with best_iteration / (1 - es_fraction) trees
+    group_col=None,       # groups (patients, users) the stopping slice keeps whole; default: the folds' group
+    time_col=None,        # time order: the stopping slice is the latest rows of each training part
     params={},            # overrides merged into the model defaults below
     notes="",
 )
@@ -180,16 +201,65 @@ def make_model(kind: str, task: str, params: dict, seed: int, n_classes: int):
     return cls(random_state=seed, categorical_features="from_dtype", **p)
 
 
-def es_split(tr: np.ndarray, y: np.ndarray, task: str, frac: float, seed: int, fold: int):
-    """(fit rows, early-stopping rows) of a fold's training rows ``tr``: ``frac`` of them held back, stratified by
-    class for classification, drawn with the run seed (the same seed and fold draw the same rows)."""
+def es_split(tr: np.ndarray, y: np.ndarray, task: str, frac: float, seed: int, fold: int,
+             groups: np.ndarray | None = None, times: np.ndarray | None = None):
+    """(fit rows, early-stopping rows) of a fold's training rows ``tr``: about ``frac`` of them held back, drawn with
+    the run seed (the same seed and fold draw the same rows). With ``times``: the latest rows, as a time split's
+    validation is later than its training. With ``groups``: whole groups, so stopping is judged on groups the fit
+    never saw, as the folds are (#135); rows of a group on both sides stop the trees late. Otherwise stratified by
+    class for classification."""
     rng = np.random.default_rng([seed, fold])
-    groups = [tr[y[tr] == c] for c in np.unique(y[tr])] if task != "regression" else [tr]
-    es = np.concatenate([rng.permutation(g)[: int(round(frac * len(g)))] for g in groups])
+    n_es = max(1, int(round(frac * len(tr))))
+    if times is not None:
+        order = tr[np.argsort(times[tr], kind="stable")]
+        es = order[-n_es:]
+        return np.sort(order[:-n_es]), np.sort(es)
+    if groups is not None:
+        uniq = rng.permutation(np.unique(groups[tr]))
+        sizes = pd.Series(groups[tr]).value_counts()
+        take, n = [], 0
+        for g in uniq[:-1]:  # never every group: something must be left to fit on
+            if n >= n_es:
+                break
+            take.append(g)
+            n += int(sizes[g])
+        held = np.isin(groups[tr], take)
+        return tr[~held], np.sort(tr[held])
+    strata = [tr[y[tr] == c] for c in np.unique(y[tr])] if task != "regression" else [tr]
+    es = np.concatenate([rng.permutation(g)[: int(round(frac * len(g)))] for g in strata])
     if len(es) == 0:  # tiny data: hold back one row rather than none
         es = rng.permutation(tr)[:1]
     held = np.isin(tr, es)
     return tr[~held], np.sort(es)
+
+
+def stop_slice(cfg: dict, train: pd.DataFrame):
+    """(how the early-stopping slice is drawn, group array, time array): ``time_col`` -> the latest rows; else
+    ``group_col``, or the column `kgkit folds` grouped by (.kaggle-gm/folds_spec.json) -> whole groups; else
+    stratified rows."""
+    if cfg["time_col"]:
+        if cfg["time_col"] not in train.columns:
+            raise SystemExit(f"time_col {cfg['time_col']!r} is not a column of {cfg['train']}")
+        t = train[cfg["time_col"]]
+        t = t if pd.api.types.is_numeric_dtype(t) else pd.to_datetime(t)
+        return f"time:{cfg['time_col']}", None, t.to_numpy()
+    col, given = cfg["group_col"], bool(cfg["group_col"])
+    if not col:
+        try:
+            spec = json.loads(Path(".kaggle-gm/folds_spec.json").read_text(encoding="utf-8"))
+            col = spec.get("group") if os.path.normpath(spec.get("out") or "data/folds.csv") == os.path.normpath(
+                cfg["folds"]) else None
+        except (OSError, ValueError, AttributeError):
+            col = None
+    if col and col not in train.columns:
+        if given:
+            raise SystemExit(f"group_col {col!r} is not a column of {cfg['train']}")
+        print(f"note: the folds are grouped by {col!r}, which {cfg['train']} lacks: the early-stopping slice is "
+              "drawn by rows; set CONFIG['group_col'] to keep groups whole")
+        col = None
+    if col:
+        return f"group:{col}", train[col].to_numpy(), None
+    return "stratified", None, None
 
 
 def fit(model, kind, X_fit, y_fit, X_es, y_es, cats, es):
@@ -255,10 +325,11 @@ def main():
     ap.add_argument("--params", type=json.loads, help='JSON overrides, e.g. \'{"num_leaves": 127}\'')
     ap.add_argument("--notes")
     ap.add_argument("--smoke", action="store_true", help="1 fold, 50 rounds, no ledger/submission")
+    ap.add_argument("--track", help="model line this run belongs to (gbdt, cnn, vit-l...): compared with that line's accepted baseline, not the main one; with exp finish ... baseline it starts the line")
     ap.add_argument("--parent", help="ledger id this experiment changes (the accepted baseline, usually)")
-    ap.add_argument("--refit", action="store_true", default=None,
+    ap.add_argument("--refit", action=argparse.BooleanOptionalAction, default=None,
                     help="after early stopping, refit on the whole training part with best_iteration / "
-                         "(1 - es_fraction) trees")
+                         "(1 - es_fraction) trees (default on; --no-refit for quick screens)")
     ap.add_argument("--es-on-valid", action="store_true", default=None,
                     help="early-stop on the scored fold, as before #109 (optimistic OOF): only to reproduce "
                          "old ledger records")
@@ -268,6 +339,7 @@ def main():
         if getattr(args, k) is not None:
             cfg[k] = getattr(args, k)
     cfg["name"] = cfg["name"] or f"{cfg['model']}_baseline"
+    cfg["seeds"] = run_seeds(cfg["seeds"])  # KG_SEED: a seed re-run (`kgkit ledger seed-noise`)
     cfg["params"] = {**DEVICE_PARAMS.get(cfg["device"], {}).get(cfg["model"], {}), **cfg["params"]}
     if args.params:
         cfg["params"] = {**cfg["params"], **args.params}
@@ -298,6 +370,7 @@ def main():
         train["fold"] = folds_df["fold"].to_numpy()
     if train["fold"].isna().any():
         raise SystemExit("some training rows have no fold — regenerate folds.csv")
+    es_how, es_groups, es_times = stop_slice(cfg, train)
     train, test = add_features(train, test)
 
     y_raw = train[target]
@@ -331,6 +404,17 @@ def main():
     test_pred = np.zeros((len(test), n_classes)) if task == "multiclass" else np.zeros(len(test))
     fold_scores, best_iters, in_sample = [], [], []  # in_sample: (fold, fitted rows, their predictions)
     fold_list = list(split_indices(folds))[: 1 if args.smoke else None]
+    screen = SC.active() if SC is not None else None  # KG_SCREEN: train and score only the screen's rows and folds
+    if screen is not None:
+        use = screen.mask(train[id_col] if id_col and id_col in train.columns else np.arange(len(train)))
+        fold_list = [(f, tr[use[tr]], va[use[va]]) for f, tr, va in fold_list
+                     if not screen.folds or f in screen.folds]
+        if not fold_list or not all(len(va) for _, _, va in fold_list):
+            raise SystemExit(f"screen {screen.name}: none of its rows are in the folds it names "
+                             f"({screen.folds}): was it made on another folds.csv?")
+        print(f"screen {screen.name}: {int(use.sum())} of {len(train)} rows, folds "
+              f"{' '.join(str(f) for f, _, _ in fold_list)}; no submission (compared with its control, never "
+              "submitted)")
     kind = cfg["model"]
     stops = kind in ES_KINDS
     es_on = ("scored-fold" if cfg["es_on_valid"] else "inner") if stops else None
@@ -345,7 +429,7 @@ def main():
             elif es_on == "scored-fold":
                 fit_rows, es_rows = tr, va
             else:
-                fit_rows, es_rows = es_split(tr, y, task, cfg["es_fraction"], seed, f)
+                fit_rows, es_rows = es_split(tr, y, task, cfg["es_fraction"], seed, f, es_groups, es_times)
             model = make_model(kind, task, params, seed, n_classes)
             model, it = fit(model, kind, X.iloc[fit_rows], y[fit_rows],
                             None if es_rows is None else X.iloc[es_rows], None if es_rows is None else y[es_rows],
@@ -357,9 +441,12 @@ def main():
                 model, _ = fit(model, kind, X.iloc[tr], y[tr], None, None, cats, cfg["early_stopping"])
                 fit_rows = tr
             oof[va] += predict(model, task, X.iloc[va]) / len(cfg["seeds"])
-            test_pred += predict(model, task, X_test) / (len(cfg["seeds"]) * len(fold_list))
+            if screen is None:  # a screen is never submitted: no test predictions to pay for
+                test_pred += predict(model, task, X_test) / (len(cfg["seeds"]) * len(fold_list))
             in_sample.append((f, fit_rows, predict(model, task, X.iloc[fit_rows])))
-    va_mask = np.isin(folds, [f for f, _, _ in fold_list])
+    va_mask = np.zeros(len(train), dtype=bool)  # the rows a fold scored
+    for _, _, va in fold_list:
+        va_mask[va] = True
 
     # ------------------------------------------------------------ metric-space conversion
     # raw model outputs -> what the metric (and submission) expects; the ledger keeps the raw outputs
@@ -394,13 +481,25 @@ def main():
     run_params = {**DEFAULTS[kind], **params, **post}
     if stops:
         run_params.update(early_stopping_on=es_on, es_fraction=cfg["es_fraction"] if es_on == "inner" else None,
-                          refit=bool(cfg["refit"] and es_on == "inner"))
+                          refit=bool(cfg["refit"] and es_on == "inner"),
+                          es_slice=es_how if es_on == "inner" else None)
+    if screen is not None:  # NaN where no fold of the screen predicted: compared on the rows it scored
+        oof = np.where(va_mask if oof.ndim == 1 else va_mask[:, None], oof, np.nan)
     rec = Ledger().log(
-        cfg["name"], cv, fold_scores=fold_scores, params=run_params, parent=args.parent,
-        features=feats, model=kind, notes=cfg["notes"], oof=oof, test_pred=test_pred,
+        cfg["name"], cv, fold_scores=fold_scores, params=run_params, parent=args.parent, track=args.track,
+        features=feats, model=kind, notes=cfg["notes"], oof=oof, test_pred=None if screen is not None else test_pred,
         task=task, seeds=cfg["seeds"], best_iterations=best_iters, runtime_s=round(time.time() - t0, 1),
         train_scores=train_scores, oof_selection="scored-fold" if es_on == "scored-fold" else "independent",
     )
+    if screen is None:
+        write_submission(cfg, rec, test, task, classes, n_classes, metric, test_pred, test_m)
+    else:
+        print(f"logged {rec['id']} (screen {screen.name}: no submission)")
+    if report_comparison is not None:
+        report_comparison(rec, parent=args.parent, truth=f"{cfg['train']}:{target}")
+
+
+def write_submission(cfg, rec, test, task, classes, n_classes, metric, test_pred, test_m):
     sample = pd.read_csv(cfg["sample"])
     key = sample.columns[0]
     value_cols = list(sample.columns[1:])

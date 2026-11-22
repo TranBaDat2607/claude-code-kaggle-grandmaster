@@ -44,10 +44,16 @@ from pathlib import Path, PurePosixPath
 
 from . import bench as B
 from . import evalset as E
+from . import filelock as FL
 from . import kaggle_cli as KC
 from . import safety
 from . import snapshot as SN
 from . import state as S
+
+try:
+    from . import localrun as LR
+except ImportError:  # a remote run's bundle leaves it out (BUNDLE_KGKIT_LOCAL_ONLY): no local runs there
+    LR = None
 
 # The runner is part of the package, not of the plugin around it: `kgkit vendor` copies only the package, and a copy
 # must fill in the runner its own config format was written for (the plugin's may be another version's).
@@ -103,7 +109,7 @@ BUNDLE_EXCLUDE_DIRS = {"__pycache__", ".git", ".ipynb_checkpoints", "wandb", ".v
 # leaderboard after the deadline. Left out of the bundle, which counts toward Kaggle's source limit
 # (SOURCE_MAX_BYTES); `kgkit vendor` copies still have them.
 BUNDLE_KGKIT_LOCAL_ONLY = {"audit.py", "predictiveness.py", "journey.py", "layout.py", "monitor.py",
-                           "kaggle_monitor_cell.py"}
+                           "kaggle_monitor_cell.py", "localrun.py"}
 BUNDLE_EXCLUDE_SUFFIXES = {".pyc", ".pt", ".pth", ".bin", ".ckpt", ".safetensors", ".npy", ".npz", ".pkl",
                            ".parquet", ".feather", ".zip", ".png", ".jpg", ".jpeg", ".dcm"}
 # Kaggle refuses a kernel source of 1 MB or more with a bare 400 Bad Request from SaveKernel (its editor says it "must
@@ -634,6 +640,85 @@ def accounts_line(root: str | Path) -> str:
         if 0 < h <= 36 and total >= 1:
             s += " - USE IT OR LOSE IT across the accounts"
     return s + ". Runs go to the active account; the person switches it in the Kaggle pane."
+
+
+TORCH_VERSION_RE = re.compile(r"""^__version__\s*=\s*["']([^"']+)["']""", re.M)
+TORCH_CUDA_RE = re.compile(r"""^cuda\s*(?::[^=\n]*)?=\s*(?:None|["']([^"']*)["'])""", re.M)
+
+
+def installed_torch(paths: list[str] | None = None) -> dict | None:
+    """The torch this interpreter would import (``paths``: where to look, default sys.path), read from its
+    version.py without importing it (an import takes seconds): {"version", "cuda" (None for a CPU-only build),
+    "dir"}. None when torch is not installed or its version.py is unreadable."""
+    from importlib.machinery import PathFinder
+    try:
+        spec = PathFinder.find_spec("torch", paths)
+    except (ImportError, ValueError, OSError):
+        return None
+    if spec is None or not spec.origin:
+        return None
+    try:
+        text = (Path(spec.origin).parent / "version.py").read_text(encoding="utf-8")
+    except OSError:
+        return None
+    v, c = TORCH_VERSION_RE.search(text), TORCH_CUDA_RE.search(text)
+    if c is None:
+        return None
+    return {"version": v.group(1) if v else "?", "cuda": c.group(1) or None, "dir": str(Path(spec.origin).parent)}
+
+
+def cpu_torch_line(paths: list[str] | None = None) -> str:
+    """A warning when the machine has an NVIDIA driver (nvidia-smi on PATH) but the installed torch is a CPU-only
+    build: local training then runs on the CPU, many times slower, and nothing fails to say so. '' otherwise.
+    No subprocess and no torch import, so the session brief can afford it."""
+    if not shutil.which("nvidia-smi"):
+        return ""
+    t = installed_torch(paths)
+    if t is None or t["cuda"] is not None:
+        return ""
+    return (f"LOCAL GPU UNUSED: this machine has an NVIDIA GPU (nvidia-smi is on PATH) but torch {t['version']} in "
+            f"{sys.executable} is a CPU-only build, so local training runs on the CPU. Tell the user and offer to "
+            "install the CUDA build of the same torch version (and the matching torchvision) from "
+            "https://download.pytorch.org/whl/cu<XYZ> (pick a CUDA version the driver supports, see `nvidia-smi`; "
+            "an RTX 50-series GPU needs CUDA 12.8 or newer); installing changes their environment, so ask first.")
+
+
+def local_gpus(timeout: float = 15) -> list[tuple[str, int]]:
+    """(name, memory MiB) of each NVIDIA GPU on this machine, from nvidia-smi; [] without one."""
+    exe = shutil.which("nvidia-smi")
+    if exe is None:
+        return []
+    try:
+        r = subprocess.run([exe, "--query-gpu=name,memory.total", "--format=csv,noheader,nounits"],
+                           capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout)
+    except (OSError, subprocess.SubprocessError):
+        return []
+    out = []
+    for line in (r.stdout or "").splitlines():
+        name, _, mem = line.rpartition(",")
+        try:
+            out.append((name.strip(), int(float(mem))))
+        except ValueError:
+            continue
+    return out
+
+
+def local_gpu_lines(root: str | Path) -> list[str]:
+    """`gpu plan`: the GPU(s) on this machine as a second place to train (`gpu push --backend local`), the local
+    runs still going, and a CPU-only torch that would leave them unused. Nothing on a machine without one."""
+    gpus = local_gpus()
+    if not gpus:
+        return []
+    names = ", ".join(f"{n} ({m / 1024:.0f} GB)" for n, m in gpus)
+    going = [r for r in active_runs(root, "LOCAL")]
+    lines = [f"Local GPU: {names}. Free hours, no queue, no session limit: a run that fits its memory goes there "
+             "first (`gpu push <build dir> --backend local`), Kaggle takes runs that need more memory (a T4 has "
+             "16 GB) or run in parallel" + (f". Running now: {', '.join(run_label(r) for r in going)} (one local "
+                                             "run at a time)" if going else "") + "."]
+    warn = cpu_torch_line()
+    if warn:
+        lines.append(warn)
+    return lines
 
 
 def resets_before(q: dict, deadline: str | None) -> int:
@@ -1764,6 +1849,21 @@ def push(root: str | Path | None, kdir: str | Path, force: bool = False, hours: 
     return rec
 
 
+def push_local(root: str | Path | None, kdir: str | Path, hours: float | None = None, force: bool = False) -> dict:
+    """`gpu push --backend local`: run a `gpu build` output on this machine's GPU(s) as a background process
+    (`kgkit.localrun`). No Kaggle quota is spent or reserved; `gpu wait` / `gpu collect` / `gpu cancel` take its
+    kernel id, local/<slug>."""
+    root = _root(root)
+    st = S.load(root)
+    if st is None:
+        raise SystemExit("not inside a competition workspace (no .kaggle-gm/competition.json)")
+    S.ensure_state_ignores(root)
+    rec = LR.push(root, Path(kdir), runs(root), S.STATE_DIR, kernel_output_dir, st.slug, hours=hours, force=force,
+                  gpu_note=cpu_torch_line())
+    record_push(root, rec)
+    return rec
+
+
 def _add_monitor(kdir: Path, accelerator: str) -> None:
     """The hardware monitor in a hand-written kernel's code (`kgkit.monitor`): its readings for /kaggle-monitor,
     and a stop on a machine with fewer GPUs than ``accelerator`` promises. Never stops the push."""
@@ -1828,7 +1928,15 @@ def _one_line(text: str) -> str:
     return " ".join(text.split())
 
 
+def is_local(kernel: str | None) -> bool:
+    """A run on this machine (`gpu push --backend local`, `kgkit.localrun`), not a Kaggle kernel."""
+    return str(kernel or "").startswith("local/")
+
+
 def kernel_status(kernel: str) -> tuple[str, str]:
+    if is_local(kernel):  # a run on this machine (`gpu push --backend local`): its process and its report
+        s = LR.status(latest_run(_root(None), kernel))
+        return s, f"{kernel}: {s} (local run)"
     r = run_kaggle(["kernels", "status", kernel], timeout=120)
     text = (r.stdout or "") + (r.stderr or "")
     return (normalize_status(text) if r.returncode == 0 else "unknown"), text.strip()
@@ -1997,6 +2105,13 @@ def report_stop(root: str | Path, kernel: str, status: str, text: str = "", watc
     ``watched_s``: how long ``wait`` saw it run, which bounds a log that stops well before the end."""
     if text:
         print(text)
+    if is_local(kernel):
+        run = latest_run(root, kernel)
+        if tail:
+            print("\n".join(LR.log_tail(run)))
+        print(f"{kernel}: {status} - the run ended without its report (kg_run.json); the log is "
+              f"{Path(run.get('dir') or '.') / 'session.log'}. Folds it finished are in {run.get('out')}/artifacts.")
+        return
     files, more, log, why = session_output(kernel)
     if not log:
         try:
@@ -2128,7 +2243,13 @@ def _merge_tree(src: Path, dst: Path) -> int:
 
 
 def import_ledger(root: Path, out: Path, report: dict, kernel: str, version: int | None) -> list[dict]:
-    """Append the remote run's ledger records to the local ledger with fresh ids (idempotent)."""
+    """Append the remote run's ledger records to the local ledger with fresh ids (idempotent), holding the ledger's
+    lock so a run logging locally meanwhile cannot take the same ids (#126)."""
+    with FL.locked(root / S.STATE_DIR / "ledger.jsonl"):
+        return _import_ledger(root, out, report, kernel, version)
+
+
+def _import_ledger(root: Path, out: Path, report: dict, kernel: str, version: int | None) -> list[dict]:
     lp = root / S.STATE_DIR / "ledger.jsonl"
     existing = []
     if lp.is_file():
@@ -2399,6 +2520,14 @@ def collect(root: str | Path | None, kernel: str, from_dir: str | Path | None = 
     confirm_pending(root, [kernel])  # a push from a background command that Kaggle ran is the run collected here
     kslug = kernel.split("/")[-1]
     kstatus = None  # what Kaggle reports for the kernel; `status` below is the runner's account of its jobs
+    if from_dir is None and is_local(kernel):  # its output is on this machine already
+        lrun = latest_run(root, kernel)
+        kstatus = LR.status(lrun)
+        if kstatus in ("running", "unknown"):
+            raise SystemExit(f"{kernel} is {kstatus}" + (f": `python -m kgkit gpu wait {kernel} --collect` collects "
+                                                         "when it ends." if kstatus == "running" else
+                                                         " (no local run of it in the run log)"))
+        from_dir = lrun["out"]
     if from_dir is None:
         kstatus = _status_of(kernel)
         if kstatus in ("queued", "running"):
@@ -2775,12 +2904,17 @@ def plan(root: str | Path | None = None, refresh: bool = True, deadline: str | N
             if gpu_left is not None and gpu_left < 1.0:
                 lines.append("GPU quota is used up: queue validated multi-hour training on the TPU now, about half a "
                              "day before it is needed, and keep a GPU fallback for after the reset.")
+    lines += local_gpu_lines(root)
     rs = [r for r in runs(root) if r.get("gpu_hours") and isinstance(r.get("folds_done"), dict)]
     rs = [r for r in rs if sum(len(v) for v in r["folds_done"].values())]
-    if rs:
-        lines.append("Measured costs (quota-hours per completed fold, sessions packed as run):")
+    for local in (False, True):  # a local GPU's speed is not a T4's: its costs never budget Kaggle hours
+        mine = [r for r in rs if (run_resource(r) == "LOCAL") == local]
+        if not mine:
+            continue
+        lines.append("Measured costs on the local GPU (wall hours per completed fold; not a T4's):" if local else
+                     "Measured costs (quota-hours per completed fold, sessions packed as run):")
         by = {}
-        for r in rs:
+        for r in mine:
             n = sum(len(v) for v in r["folds_done"].values())
             by.setdefault(", ".join(r["folds_done"]), []).append(r["gpu_hours"] / n)
         for k, v in list(by.items())[-8:]:

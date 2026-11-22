@@ -1947,7 +1947,8 @@ def test_a_split_too_big_to_pack_is_linked_from_a_dataset_and_checked(tmp_path, 
 
     kdir = _build_split(root, split_from="me/s47-folds", datasets=["thisray/s6e10-stack"])
     meta, tm = (json.loads((kdir / f).read_text()) for f in ("kernel-metadata.json", "kg-train.json"))
-    assert meta["dataset_sources"] == ["thisray/s6e10-stack", "me/s47-folds"] and tm["script_kb"] < 400
+    # linked, the split is not in the script: what is left is mostly the bundled kgkit/ (~400 KB), far under 1 MB
+    assert meta["dataset_sources"] == ["thisray/s6e10-stack", "me/s47-folds"] and tm["script_kb"] < 450
     assert tm["split"] == "linked from the dataset me/s47-folds" and "WARNING" not in capsys.readouterr().out
     local = (root / "data" / "folds.csv").read_bytes()
     r, seen = _session(kdir, tmp_path / "linked", {"datasets/me/s47-folds/folds_v2.csv": local,  # found by content

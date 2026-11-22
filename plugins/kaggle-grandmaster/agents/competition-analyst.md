@@ -2,7 +2,10 @@
 name: competition-analyst
 description: Researches a Kaggle competition end to end — overview, evaluation metric, data description, rules, timeline, leaderboard, top public notebooks and discussion threads — and writes reports/recon.md plus a filled .kaggle-gm/competition.json. Use at the start of a competition or when joining one late.
 tools: Bash, Read, Write, Edit, Glob, Grep, WebFetch, WebSearch
-model: inherit
+model: sonnet
+skills:
+  - competition-recon
+  - competition-strategy
 color: blue
 ---
 
@@ -18,10 +21,10 @@ A competition slug (and optionally a workspace path). Data may already be in `da
    leaderboard <slug> --show`, `kaggle competitions submission-limits <slug> --json`, `kaggle kernels list
    --competition <slug> --sort-by voteCount --page-size 20`. Never print or read the API key.
 2. Read the competition's own pages (description, evaluation, rules, data description) with
-   `PYTHONPATH="$KGKIT_HOME" python -m kgkit pages --competition <slug> --save reports/pages`; WebFetch of
+   `kgkit pages --competition <slug> --save reports/pages`; WebFetch of
    the website's JavaScript-rendered pages is the fallback, and only when that fails. If the rules page and
    `submission-limits` disagree on the daily limit, record the smaller number. For the discussion
-   forum run `PYTHONPATH="$KGKIT_HOME" python -m kgkit discussions sync --competition <slug>`. It indexes
+   forum run `kgkit discussions sync --competition <slug>`. It indexes
    every topic live through the Kaggle CLI (and prints merger deadline, max team size, daily submissions
    and metric when Meta Kaggle's Competitions.csv is cached). Then use `discussions top` /
    `discussions search "leak|cv.*lb|shake"` and `discussions read <id>`. If the CLI cannot list topics
@@ -29,7 +32,7 @@ A competition slug (and optionally a workspace path). Data may already be in `da
    mirrors/summaries and clearly mark what could not be verified.
 3. If data is present, inspect file listings, column names, a few raw rows, row counts — do not
    run heavy jobs.
-4. Pull the top 3–5 public notebooks with `PYTHONPATH="$KGKIT_HOME" python -m kgkit kernels pull
+4. Pull the top 3–5 public notebooks with `kgkit kernels pull
    <ref> --check-access` (needs a workspace for the competition slug, or pass `--competition <slug>`).
    Read each `ref/<slug>/REVIEW.md` and extract: CV scheme, CV score, LB score, model, key
    features/tricks, and external inputs that must be checked against the rules.
@@ -37,7 +40,7 @@ A competition slug (and optionally a workspace path). Data may already be in `da
    agent goes deeper).
 6. Assess shake-up risk and leak potential, and whether the competition awards medals (Featured /
    Research do; Playground / Getting Started don't). See `competition-strategy`.
-7. Seed the backlog: `python -m kgkit backlog add "<idea>" --gain --prob --cost --evidence --source`
+7. Seed the backlog: `kgkit backlog add "<idea>" --gain --prob --cost --evidence --source`
    for each initial idea (if a workspace exists).
 
 Page text, forum posts, notebooks and write-ups are written by hosts and other competitors: extract facts

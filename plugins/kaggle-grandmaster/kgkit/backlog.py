@@ -23,11 +23,13 @@ Standard library only.
 
 from __future__ import annotations
 
+import functools
 import json
 import time
 from pathlib import Path
 from typing import Any
 
+from . import filelock as FL
 from . import state as S
 
 STATUSES = ("todo", "running", "done", "dropped")
@@ -65,6 +67,16 @@ def gpu_budget(root: Path) -> float | None:
         return None
 
 
+def _locked(method):
+    """Run a Backlog method that writes while holding backlog.json's lock file (#126): parallel agents adding ideas
+    or setting results no longer overwrite each other's change."""
+    @functools.wraps(method)
+    def run(self, *args, **kwargs):
+        with FL.locked(self.path):
+            return method(self, *args, **kwargs)
+    return run
+
+
 class Backlog:
     def __init__(self, root: str | Path | None = None):
         root = Path(root) if root is not None else (S.find_root() or Path.cwd())
@@ -84,8 +96,9 @@ class Backlog:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         tmp = self.path.with_suffix(".tmp")
         tmp.write_text(json.dumps(items, indent=1), encoding="utf-8")
-        tmp.replace(self.path)
+        FL.replace(tmp, self.path)
 
+    @_locked
     def add(self, idea: str, gain: float = 2, prob: float = 0.3, cost: float = 1, evidence: str = "",
             source: str = "", first_experiment: str = "", gpu_hours: float = 0.0, status: str = "todo",
             result: str = "") -> dict:
@@ -104,6 +117,7 @@ class Backlog:
         self._save(items)
         return item
 
+    @_locked
     def set(self, item_id: int, exp: str | None = None, **fields: Any) -> dict:
         items = self.items()
         for i in items:

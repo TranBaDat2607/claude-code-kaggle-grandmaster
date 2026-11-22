@@ -1,6 +1,6 @@
 ---
 name: recsys-and-ranking
-description: Playbook for Kaggle recommendation and ranking competitions (OTTO, H&M, session-based recommendation, search relevance, learning-to-rank) — candidate generation (co-visitation, recency, popularity, embeddings), feature engineering for user-item pairs, LambdaRank/GBDT rankers, MAP@K/NDCG/recall validation, and memory-efficient pipelines. Use when predictions are ranked lists of items per user/query/session.
+description: "Playbook for Kaggle recommendation and ranking competitions: candidate generation, GBDT rankers, MAP@K/NDCG. Use when predictions are ranked lists of items per user, query or session."
 ---
 
 # RecSys & Ranking Playbook
@@ -53,3 +53,11 @@ pairs. How-to and the hardware limits (cuDF needs a T4, not a P100; Linux or WSL
 
 Cross-encoders or LLM re-rankers over (query, document) pairs; GBDT stack over BM25,
 embedding similarities, and cross-encoder scores; group CV by query.
+
+## 7. Cheap screens (sweeps)
+Many values of one lever are one sweep (`/kg-grind --sweep`): screened cheap against a control at the same fidelity, the best confirmed by a full run judged as the best of all of them.
+
+Screen on whole users or queries (`--group user_id`), on the latest week when the split is by time (`--time-col`).
+Per-query metrics (MAP@k, NDCG) log a unit table, one row per query (`mean`): the comparison is paired per query.
+Cheap settings that usually keep the ranking: fewer users, sampled negatives in training, fewer ranker rounds. Not
+a screen question: candidate generation (its recall changes with the candidates a screen keeps).

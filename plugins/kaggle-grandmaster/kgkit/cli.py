@@ -15,6 +15,7 @@ Commands
               journey
   final       which submissions Kaggle has selected as finals, and whether auto-selection would pick a fitted file
   standing    rank, team count, medal cut-offs and ties on the leaderboard Kaggle shows (private after the end)
+  exp         finish  - compare a logged run with its baseline, record the decision, close its backlog idea
   backlog     add | list | set | render | fidelity  — the ranked idea backlog (human vs GPU hours)
   features    search  — generate and screen thousands of candidate features on the frozen folds
   kernels     top | pull | review  — study and reproduce public notebooks
@@ -26,6 +27,10 @@ Commands
   vendor      copy kgkit into a project or a Kaggle dataset folder (for offline kernels)
   whoami      your Kaggle username (KAGGLE_USERNAME, kaggle.json or `kaggle config view`; never the key)
   update-check  is a newer kaggle-grandmaster released, and the command that installs it (/kg-update)
+  permissions   the allow rules for kgkit's bookkeeping calls; --write adds them to .claude/settings.local.json
+  grind         a /kg-grind loop's state: start (--resume), status, note --started, stop
+  screen        new | list | show | control  — frozen subsets cheap runs share (KG_SCREEN), compared with a control
+  sweep         new | run | status | decide  — many variants by successive halving over screens, best of N at the end
   datasets    pull  — download a dataset, file by file when the whole-dataset download returns 404
   gpu         quota | plan | build | push | status | wait | collect | repush | release | cancel | log  — Kaggle GPUs/TPUs
 """
@@ -482,6 +487,250 @@ def cmd_final(a):
     print("\n".join(FN.steps(st)))
 
 
+def cmd_screen(a):
+    """`kgkit screen new|list|show|control`: the frozen subsets screened runs share (``kgkit.screen``)."""
+    from . import screen as SC
+    from . import state as S
+
+    root = S.find_root()
+    if root is None:
+        raise SystemExit("not inside a kaggle-grandmaster workspace (no .kaggle-gm/)")
+    if a.action == "list":
+        screens = SC.listed(root)
+        for s in screens:
+            print(f"  {s.describe()}")
+        if not screens:
+            print("(no screens yet: `kgkit screen new <name> --frac 0.3 [--folds 0]`)")
+        return
+    if not a.args:
+        raise SystemExit(f"`kgkit screen {a.action}` needs the screen's name"
+                         + (": `kgkit screen control <baseline id> <screen>`" if a.action == "control" else ""))
+    if a.action == "show":
+        try:
+            s = SC.load(root, a.args[0])
+        except ValueError as e:
+            raise SystemExit(str(e))
+        print(s.describe())
+        print(f"  ids: {s.ids_file}; fingerprint {s.hash}; seed {s.seed}")
+        return
+    if a.action == "control":
+        _screen_control(root, a)
+        return
+    _screen_new(root, a)
+
+
+def _screen_new(root, a) -> None:
+    import pandas as pd
+
+    from . import screen as SC
+    from . import state as S
+
+    st = S.load(root)
+    if a.ids:
+        path, _, col = a.ids.rpartition(":")
+        df, id_col = _read(path), col
+    else:
+        train = Path(root) / "data" / "train.csv"
+        if not train.is_file():
+            raise SystemExit("no data/train.csv: name the units to draw from with --ids FILE:COL")
+        df = _read(str(train))
+        id_col = st.id_col if st and st.id_col in df.columns else None
+        if id_col is None:
+            raise SystemExit(f"data/train.csv has no id column {st.id_col if st else ''!r}: set it "
+                             "(`kgkit config id_col=<col>`) or pass --ids FILE:COL")
+    group = a.group
+    if group is None and not a.ids:
+        spec = Path(root) / S.STATE_DIR / "folds_spec.json"
+        if spec.is_file():
+            group = json.loads(spec.read_text(encoding="utf-8")).get("group") or None
+    for c in (id_col, group, a.time_col, a.stratify):
+        if c and c not in df.columns:
+            raise SystemExit(f"{a.ids or 'data/train.csv'} has no column {c!r}")
+    strata, strategy = None, "random"
+    if a.time_col:
+        strategy = f"time:{a.time_col}" + (f", groups {group}" if group else "")
+    elif a.stratify:  # a share of each value: e.g. fewer games of every opponent
+        strata, strategy = df[a.stratify].astype(str).to_numpy(), f"stratified:{a.stratify}"
+    elif group:
+        strategy = f"group:{group}"
+    elif not a.no_stratify and not a.ids and st is not None and st.target in df.columns \
+            and df[st.target].nunique() <= 50:
+        strata, strategy = df[st.target].to_numpy(), f"stratified:{st.target}"
+    time = None
+    if a.time_col:
+        t = df[a.time_col]
+        time = t.to_numpy() if pd.api.types.is_numeric_dtype(t) else pd.to_datetime(t).to_numpy()
+    try:
+        s = SC.create(root, a.args[0], df[id_col].to_numpy(), a.frac, folds=a.folds, seed=a.seed,
+                      group=df[group].to_numpy() if group else None, time=time, strata=strata, strategy=strategy)
+    except ValueError as e:
+        raise SystemExit(str(e))
+    print(f"{s.describe()}; frozen in .kaggle-gm/screens/{s.name}.json")
+    print(f"a pipeline run with KG_SCREEN={s.name} trains and scores only these rows"
+          + (" and folds" if s.folds else "") + "; compare its runs with a control: `kgkit screen control <baseline> "
+          f"{s.name}`")
+
+
+def _screen_control(root, a) -> None:
+    from . import screen as SC
+    from .experiment import Ledger
+
+    if len(a.args) < 2:
+        raise SystemExit("`kgkit screen control <baseline id> <screen>`")
+    led = Ledger(root)
+    try:
+        base, s = led.get(a.args[0]), SC.load(root, a.args[1])
+    except (KeyError, ValueError) as e:
+        raise SystemExit(str(e.args[0]) if e.args else str(e))
+    env = f"KG_SCREEN={s.name} KG_CONTROL_OF={base['id']}"
+    have = led.control(base["id"], {"fidelity": s.fidelity()})
+    if have is not None:
+        print(f"{base['id']} already has a control on {s.name}: {have['id']} (another run replaces it)")
+    if base.get("cmd"):
+        print(f"{env} {base['cmd']}")
+        print("add the same KG_FIDELITY='{...}' as the screens when they run at cheaper settings")
+    else:
+        print(f"{base['id']} has no command on record (logged by hand): run its pipeline with {env}")
+
+
+def cmd_sweep(a):
+    """`kgkit sweep new|run|status|decide` (``kgkit.sweep``)."""
+    from . import state as S
+    from . import sweep as SW
+
+    root = S.find_root()
+    if root is None:
+        raise SystemExit("not inside a kaggle-grandmaster workspace (no .kaggle-gm/)")
+    if a.action in ("status", "fidelity") and not a.name:
+        sweeps = SW.listed(root)
+        for st in sweeps:
+            if a.action == "status":
+                print(f"  {st['name']}: {len(st['variants'])} variant(s) of {st['base']}, {st['state']}")
+            else:
+                print(f"sweep {st['name']}:\n" + "\n".join(f"  {line}" for line in SW.fidelity_lines(st)))
+        if not sweeps:
+            print("(no sweeps yet: `kgkit sweep new <name> --cmd '...' --variant NAME=ARGS --rung screen=<s>`)")
+        return
+    if not a.name:
+        raise SystemExit(f"`kgkit sweep {a.action}` needs the sweep's name")
+    try:
+        if a.action == "new":
+            _sweep_new(root, a)
+        elif a.action == "run":
+            SW.run(root, a.name, parallel=a.parallel, one=a.one, dry_run=a.dry_run, new_control=a.new_control)
+        elif a.action == "status":
+            print("\n".join(SW.status_lines(root, a.name)))
+        elif a.action == "fidelity":
+            print("\n".join(SW.fidelity_lines(SW.load(root, a.name))))
+        else:
+            SW.decide(root, a.name)
+    except ValueError as e:
+        raise SystemExit(str(e))
+
+
+def _sweep_new(root, a) -> None:
+    import math
+
+    from . import evalset as E
+    from . import screen as SC
+    from . import sweep as SW
+    from .experiment import Ledger
+
+    if not a.cmd:
+        raise SystemExit("`kgkit sweep new` needs --cmd: the command of one run, with {args} where each variant's "
+                         "arguments go")
+    led = Ledger(root)
+    try:
+        base = led.get(a.base) if a.base else led.baseline()
+    except KeyError as e:
+        raise SystemExit(str(e.args[0]) if e.args else str(e))
+    if base is None:
+        raise SystemExit("no accepted baseline yet: name the run the variants branch from with --base <id>")
+    if E.partial(base) or not isinstance(base.get("cv"), (int, float)):
+        raise SystemExit(f"{base['id']} is not a full run with a score of its own: a sweep branches from one")
+    rung_list = SW.rungs(a.rung)
+    for r in rung_list:
+        if r["screen"]:
+            SC.load(root, r["screen"])  # ValueError on an unknown screen
+    variant_list = SW.variants(a.variant, a.grid)
+    st = SW.new(root, a.name, base["id"], a.cmd, variant_list, rung_list, eta=a.eta, base_args=a.base_args,
+                check=a.check)
+    n, total = len(variant_list), 0
+    for r in range(len(rung_list)):
+        total += n
+        n = max(1, math.ceil(n / max(1, a.eta)))
+    print(f"sweep {a.name}: {len(variant_list)} variant(s) of {base['id']}, rungs "
+          + " -> ".join(SW.describe_rung(st, r) for r in range(len(rung_list)))
+          + f", eta {a.eta}: at most {total} runs, plus {len(rung_list) - 1} control(s) (reused when on file)")
+    print(f"`kgkit sweep run {a.name} --dry-run` prints the first commands; `kgkit sweep run {a.name} [--parallel N]` "
+          "runs them")
+
+
+def cmd_grind(a):
+    from . import grind as GR
+    from . import state as S
+
+    root = S.find_root()
+    if root is None:
+        raise SystemExit("not inside a kaggle-grandmaster workspace (no .kaggle-gm/)")
+    try:
+        if a.action == "start":
+            b = GR.parse_budget(a.budget) if a.budget else {}
+            GR.start(root, a.session, hours=b.get("hours"), experiments=b.get("experiments"), focus=a.focus,
+                     resume=a.resume, takeover=a.takeover)
+        elif a.action == "note":
+            if not a.started:
+                raise SystemExit("grind note needs --started <name> --cmd \"<command>\"")
+            GR.note_started(root, a.session, a.started, a.cmd)
+            print(f"in flight: {a.started}")
+            return
+        elif a.action == "stop":
+            g = GR.stop(root, a.session, a.reason)
+            print("no grind in progress" if g is None else
+                  f"grind {g['id']} stopped: {g['experiments_done']} experiments, {g['active_hours']:.2f} h active "
+                  "(kept in .kaggle-gm/grinds.jsonl)")
+            return
+    except GR.GrindError as e:
+        raise SystemExit(str(e))
+    if a.kaggle:
+        from . import gpu as G
+
+        G.refresh_runs(root)
+    s = GR.status(root, a.session)
+    if s is None:
+        print("no grind in progress (`kgkit grind start --budget 4h|10 --session ${CLAUDE_SESSION_ID}`)")
+        return
+    s["runs"] = GR.reconcile(root, s)
+    print(GR.format_status(s))
+
+
+def cmd_permissions(a):
+    """List the allow rules, which are already set, and with --write merge the missing ones into the workspace's
+    .claude/settings.local.json."""
+    from pathlib import Path
+
+    from . import permissions as PM
+    from . import state as S
+
+    root = S.find_root() or Path.cwd()
+    if a.write:
+        try:
+            path, added = PM.write(root)
+        except ValueError as e:
+            raise SystemExit(str(e))
+        print(f"{path}: added {len(added)} rule(s)" if added else f"{path}: every rule was already there")
+        print("kgkit calls outside these still ask, and so do submits, pushes and uploads.")
+        return
+    have = PM.present(root)
+    print(f"Allow rules for kgkit's local bookkeeping and read-only calls ({len(have)} of {len(PM.rules())} set):")
+    for r in PM.rules():
+        print(f"  {'set    ' if r in have else 'missing'}  {r}")
+    print("Never included: " + ", ".join(f"kgkit {n}" for n in PM.NEVER) + " (they spend quota, publish, run a "
+          "command they are given, or redraw the folds), nor any Kaggle submit, push or upload.")
+    if len(have) < len(PM.rules()):
+        print("`kgkit permissions --write` adds the missing ones to .claude/settings.local.json (personal, git-ignored).")
+
+
 def cmd_standing(a):
     """Where the team stands on the leaderboard Kaggle shows (the private one once revealed), read whole through the
     SDK: ``kaggle competitions leaderboard --download`` returns the public one even after the end, and ``--show``
@@ -544,6 +793,12 @@ def cmd_status(a):
             print(f"added {added} submission(s) from Kaggle's list that the local log was missing")
     print(S.submissions_line(root, st))
     print(G.quota_line(root) or "Kaggle GPU quota: not fetched yet (`python -m kgkit gpu quota` caches it)")
+    if G.cpu_torch_line():
+        print(G.cpu_torch_line())
+    from . import permissions as PM
+
+    if PM.status_line(root):
+        print(PM.status_line(root))
     print(f"experiments logged: {len(recs)}")
     if recs:
         best = led.best(1)
@@ -562,6 +817,13 @@ def cmd_status(a):
                   f"compared against this, not against the best CV")
         else:
             print("no accepted baseline yet: mark one with `kgkit ledger decide <id> baseline`")
+        for t, h in led.heads().items():  # the other model lines (#133): each compared with its own baseline
+            if base is None or h["id"] != base["id"]:
+                print(f"  track {t}: {fmt_cv(h)} ({h['id']})")
+        if _seed_noise_line(led):
+            print(_seed_noise_line(led))
+        for line in E.ensemble_advice(recs, _blend_args(led, st)):
+            print(line)
         n_dec = led.decisions_on_evalset()
         if st.holdout and n_dec >= 10:
             print(f"{n_dec} keep/discard decisions taken on this fixed holdout: each one spends a little of it, and "
@@ -705,6 +967,7 @@ def cmd_ledger(a):
     from .experiment import Ledger, fmt_cv
 
     led = Ledger()
+    _check_track_arg(a)
     if a.action == "list":
         print(led.table(a.n))
     elif a.action == "best":
@@ -729,6 +992,12 @@ def cmd_ledger(a):
         extra = {"variant": a.variant} if a.variant else {}
         if a.sub:
             extra["submission"] = a.sub
+        if a.track:
+            extra["track"] = a.track
+        if a.units:
+            r = _ledger_add_units(led, a, extra)
+            _auto_compare(led, a, r)
+            return
         if a.pred:
             r = _ledger_add_preds(led, a, extra)
             _auto_compare(led, a, r)
@@ -749,14 +1018,17 @@ def cmd_ledger(a):
         _ledger_compare(led, a)
     elif a.action == "noise":
         _ledger_noise(led, a)
+    elif a.action == "seed-noise":
+        _ledger_seed_noise(led, a)
     elif a.action == "tag":
         r = led.tag(a.args[0], *a.args[1:], remove=a.remove)
         print(f"{r['id']}: tags {', '.join(r['tags']) or '(none)'}" + _fitted_note(r))
     elif a.action == "decide":
         try:
             ids = led.ids(a.args[0])
-            before = led.baseline(fallback=False)
-            done = [led.decide(i, a.args[1], " ".join(a.args[2:]), parent=a.parent, member=a.member) for i in ids]
+            before = led.heads()
+            done = [led.decide(i, a.args[1], " ".join(a.args[2:]), parent=a.parent, member=a.member, track=a.track)
+                    for i in ids]
         except KeyError as e:
             raise SystemExit(str(e.args[0]) if e.args else str(e))
         except ValueError as e:
@@ -765,6 +1037,7 @@ def cmd_ledger(a):
             print(f"{r['id']}: {r['decision']}" + (" (member)" if r.get("member") else "")
                   + (f" (vs {r['parent']})" if r.get("parent") else ""))
         _decide_baseline_note(led, done, before)
+        _member_note(led, [r for r in done if r.get("member")])
     elif a.action == "phase":
         _ledger_phase(led, a)
     elif a.action == "journey":
@@ -772,12 +1045,26 @@ def cmd_ledger(a):
 
         J.main(led, a)
     elif a.action == "baseline":
+        if a.track:
+            r = led.baseline(track=a.track)
+            if r is None:
+                raise SystemExit(f"no accepted baseline in track {a.track} yet (lines with one: "
+                                 f"{', '.join(led.heads()) or 'none'})")
+            print(f"{r['id']}  CV {fmt_cv(r)}  [{r.get('decision')}, track {a.track}]")
+            return
         r = led.baseline()
         if r is None:
             print("(ledger is empty)")
         else:
             src = r.get("decision") if E.accepted(r) else "highest CV - nothing accepted yet"
             print(f"{r['id']}  CV {fmt_cv(r)}  [{src}]")
+            others = [(t, h) for t, h in led.heads().items() if h["id"] != r["id"]]
+            if others:
+                print("other model lines (a record is compared with its nearest kept ancestor, else its own track's):")
+                for t, h in others:
+                    print(f"  {t}: {h['id']}  CV {fmt_cv(h)}")
+    elif a.action == "tracks":
+        _ledger_tracks(led)
     elif a.action == "lineage":
         chain = led.lineage(a.args[0] if a.args else led.baseline()["id"])
         prev = None
@@ -798,7 +1085,7 @@ def cmd_ledger(a):
         y = _truth(a.truth) if a.truth else None
         folds = _col(a.folds).to_numpy() if a.folds else None
         r = led.import_preds(a.args[0], arr(a.args[1]), arr(a.test) if a.test else None, y_true=y, folds=folds,
-                             cv=a.cv, notes=a.notes or "", source=a.source)
+                             cv=a.cv, notes=a.notes or "", source=a.source, **({"track": a.track} if a.track else {}))
         print(f"logged {r['id']}: CV {r['cv']:.5f}" + (f" +/- {E.fmt_se(r['cv_std'])}" if r.get("cv_std") else "")
               + f" [{a.source}]")
 
@@ -979,19 +1266,59 @@ def _ledger_add_preds(led, a, extra: dict) -> dict:
     return r
 
 
+def _units_params(pairs) -> dict:
+    """--units-param KEY=VALUE pairs: a VALUE that parses as JSON (4, 0.5, {"a": 1}) is taken as such, else as text."""
+    out = {}
+    for p in pairs or ():
+        key, sep, value = p.partition("=")
+        if not sep or not key.strip():
+            raise SystemExit(f"--units-param takes KEY=VALUE, not {p!r}")
+        try:
+            out[key.strip()] = json.loads(value)
+        except json.JSONDecodeError:
+            out[key.strip()] = value
+    return out
+
+
+def _ledger_add_units(led, a, extra: dict) -> dict:
+    """`ledger add <name> <cv|auto> --units FILE`: a run scored on a unit table (``kgkit.units``); the score and the
+    fold scores are recomputed from it and the table is stored, so later runs on the same units compare paired."""
+    from . import units as U
+
+    try:
+        u = U.read(a.units, agg=a.units_agg, params=_units_params(a.units_param))
+    except (OSError, ValueError) as e:
+        raise SystemExit(f"--units {a.units}: {e}")
+    auto = a.args[1].lower() == "auto"
+    passed = None if auto else _cv_arg(a.args[1])
+    if not auto and passed is None:
+        raise SystemExit("an LB-only record has no score to recompute: drop --units, or pass 'auto'")
+    r = led.log_units(a.args[0], u, notes=_add_notes(a), parent=a.parent, tags=a.tag or (),
+                      **({"metric": a.metric} if a.metric else {}), **extra)
+    if passed is not None and abs(passed - r["cv"]) > 1e-6 * max(1.0, abs(r["cv"])):
+        print(f"note: the score recomputed from the units is {r['cv']:.6f}, not {passed}; logging the recomputed score")
+    spec = r["units"]
+    parts = [f"{spec['n']} units"] + ([f"{spec['n_groups']} groups"] if spec.get("n_groups") else []) \
+        + ([f"{spec['n_folds']} folds"] if spec.get("n_folds") else [])
+    params = "".join(f" {k}={v}" for k, v in spec["params"].items())
+    print(f"logged {r['id']}: {spec['agg']}{params} {r['cv']:.5f} recomputed from {', '.join(parts)}, table stored"
+          + _fitted_note(r))
+    return r
+
+
 def _auto_compare(led, a, r: dict) -> None:
-    """After `ledger add --pred`: compare the new record, paired, with the accepted baseline when that baseline
-    has predictions on the same evaluation set."""
+    """After `ledger add --pred` / `--units`: compare the new record, paired, with the accepted baseline when that
+    baseline has predictions on the same evaluation set (a unit table, for a record logged with one)."""
     import argparse
 
-    base = led.baseline(fallback=False)
-    path = "holdout_path" if led._holdout() else "oof_path"
+    base = _default_base(led, r)
+    path = "units" if r.get("units") else "holdout_path" if led._holdout() else "oof_path"
     if base is None or base["id"] == r["id"] or not base.get(path):
         if base is None:
-            print("no accepted baseline yet: `kgkit ledger decide <id> baseline`, then later records are compared "
+            print(f"{_no_baseline_yet(led, r)}: `kgkit ledger decide <id> baseline`, then later records are compared "
                   "with it automatically")
         return
-    if led.eval_record_key(base) != led.eval_record_key(r):
+    if path != "units" and led.eval_record_key(base) != led.eval_record_key(r):
         print(f"not compared with the baseline {base['id']}: its predictions are on a different evaluation set")
         return
     print()
@@ -999,7 +1326,10 @@ def _auto_compare(led, a, r: dict) -> None:
     _ledger_compare(led, argparse.Namespace(**{**vars(a), "args": [r["id"], base["id"]], **folds}))
 
 
-def _ledger_compare(led, a):
+def _ledger_compare(led, a, hint: bool = True, backlog: int | None = None) -> dict | None:
+    """`ledger compare`: print the paired comparison and return the verdict (``compare.verdict`` plus ``new``,
+    ``base``, ``se``, ``k`` and ``folds_improved``), or None when the two were compared on their test files.
+    ``hint``: end with the `exp finish` command that records it."""
     import numpy as np
 
     from . import metrics as M
@@ -1013,7 +1343,13 @@ def _ledger_compare(led, a):
     if len(a.args) > 1:
         base_ref = a.args[1]
     else:
-        base = led.baseline()
+        base = None
+        if not Path(a.args[0]).is_dir() and not _is_file_ref(led, a.args[0]):
+            try:
+                base = _default_base(led, led.get(a.args[0]))
+            except KeyError:
+                pass  # a typo: reported below
+        base = base or led.baseline()
         if base is None:
             raise SystemExit("the ledger is empty: nothing to compare against")
         base_ref = base["id"]
@@ -1021,6 +1357,10 @@ def _ledger_compare(led, a):
     for ref in refs:
         if not Path(ref).is_dir() and not _is_file_ref(led, ref):
             led.get(ref)  # fail early on a typo
+    _check_fidelity(led, refs)
+    pair = _unit_records(led, refs)
+    if pair is not None:  # both scored on unit tables: compared on them, whatever else they stored
+        return _ledger_compare_units(led, a, *pair, hint=hint, backlog=backlog)
     if not any(Path(r).is_dir() for r in refs):
         why = _test_route(led, refs, holdout, bool(a.truth))
         if why:  # no predictions on the evaluation set for one of them: compare the files the LB scored
@@ -1087,7 +1427,8 @@ def _ledger_compare(led, a):
         rope = a.rope if a.rope is not None else (st.rope if st else None)
         boot = estimate(y, pa, pb, m.name, method=_method(a), n_boot=a.boot, groups=groups, mask=ok, rope=rope)
         boot = _add_seed_noise(led, boot, a.args[0], base_ref)
-    v = verdict(folds_res, boot)
+    tries = getattr(a, "tries", None) or _tries(led, refs)
+    v = verdict(folds_res, boot, tries=tries)
     print(format_comparison(new_id, base_id, v))
     lb = None
     if boot is None and (a.public_n or (st.public_lb_n if st else None)):
@@ -1104,8 +1445,155 @@ def _ledger_compare(led, a):
             lb = estimate(y, pa, pb, m.name, method=_method(a), n_boot=a.boot, groups=groups, mask=ok, size=public_n)
             print(f"  public LB (n={public_n}): {describe(lb)}: LB gaps between these two under "
                   f"~{fmt_se(2 * lb['se'])} are noise (assumes the public rows look like the evaluation rows)")
-    _log_comparison(led, new_id, base_id, folds_res, boot, lb, v["decision"])
-    print(f"\nrecord it: python -m kgkit ledger decide {new_id} keep|discard|inconclusive \"<why>\" --parent {base_id}")
+    _log_comparison(led, new_id, base_id, folds_res, boot, lb, v["decision"], v["flags"], v["tries"], v["strength"])
+    src = boot if boot is not None else folds_res
+    res = {**v, "new": new_id, "base": base_id, "se": src["se"],
+           "k": folds_res["k"] if folds_res is not None else None,
+           "folds_improved": folds_res["folds_improved"] if folds_res is not None else None}
+    if hint:
+        print(f"\n{_record_hint(led, new_id, base_id, res['decision'].lower(), backlog)}")
+    return res
+
+
+def _check_fidelity(led, refs) -> None:
+    """Refuse to compare runs made at different fidelity (a screen with a full run, two screens of other settings):
+    the gap would measure the fidelity, not the change."""
+    from . import evalset as E
+    from . import screen as SC
+
+    if any(Path(r).is_dir() or _is_file_ref(led, r) for r in refs):
+        return
+    ra, rb = (led.get(r) for r in refs)
+    if E.fidelity_key(ra) != E.fidelity_key(rb):
+        name = (ra.get("fidelity") or rb.get("fidelity") or {}).get("screen")
+        base = rb if E.partial(ra) else ra
+        how = (f"`kgkit screen control {base['id']} {name}` prints the command for the control" if name else
+               "run the baseline's pipeline with the same KG_FIDELITY and KG_CONTROL_OF=<baseline>")
+        raise SystemExit(f"{ra['id']} ({SC.describe(ra.get('fidelity'))}) and {rb['id']} "
+                         f"({SC.describe(rb.get('fidelity'))}) were run at different fidelity: the gap would measure "
+                         f"that, not the change. A screen is compared with its control, the baseline's pipeline at the "
+                         f"same fidelity ({how}); a full run with a full run")
+
+
+def _record_hint(led, new_id: str, base_id: str, decision: str, backlog: int | None = None) -> str:
+    """The line after a verdict: the `exp finish` call that records it, or for a screen, what to do with it."""
+    from . import evalset as E
+
+    try:
+        screen = E.partial(led.get(new_id))
+    except KeyError:
+        screen = False
+    if screen:
+        return (f"screen {decision.upper()} against its control: a screen is never kept. Promote one that passed (run "
+                "it at the next fidelity, up to the full run that is decided as usual: `kgkit sweep` does it); "
+                f"record one that failed with `kgkit exp finish {new_id} discard \"<why>\"`")
+    return f"record it: {_finish_command(led, new_id, base_id, decision, backlog)}"
+
+
+def _unit_records(led, refs) -> tuple[dict, dict] | None:
+    """The two ledger records of a comparison when both carry a unit table, else None."""
+    if any(Path(r).is_dir() or _is_file_ref(led, r) for r in refs):
+        return None
+    ra, rb = (led.get(r) for r in refs)
+    return (ra, rb) if ra.get("units") and rb.get("units") else None
+
+
+def _ledger_compare_units(led, a, ra: dict, rb: dict, hint: bool = True, backlog: int | None = None) -> dict:
+    """`ledger compare` of two records scored on unit tables (``kgkit.units``): the paired unit bootstrap (whole
+    groups when the table has them), plus the per-fold pairing when both assign units to the same folds."""
+    from . import state as S
+    from . import units as U
+    from .compare import compare_folds, describe, format_comparison, verdict
+    from .experiment import selection_note
+
+    if ra["id"] == rb["id"]:
+        raise SystemExit(f"{rb['id']} is both the new experiment and the baseline (no accepted baseline yet? pass the "
+                         "baseline explicitly, or `ledger decide <id> baseline`)")
+    sel = selection_note(ra, rb)
+    if sel:
+        print(("WARNING: " if "scored fold" in sel else "note: ") + sel)
+    st = S.load(led.root)
+    ua, ub = led.load_units(ra["id"]), led.load_units(rb["id"])
+    rope = a.rope if a.rope is not None else (st.rope if st else None)
+    try:
+        boot = U.compare(ua, ub, n_boot=a.boot, rope=rope)
+        folds = U.paired_folds(ua, ub)
+    except ValueError as e:
+        raise SystemExit(f"{ra['id']} vs {rb['id']}: {e}")
+    boot = _add_seed_noise(led, boot, ra["id"], rb["id"])
+    folds_res = compare_folds(*folds, ua.gib) if folds else None
+    tries = getattr(a, "tries", None) or _tries(led, (ra["id"], rb["id"]))
+    v = verdict(folds_res, boot, tries=tries)
+    print(format_comparison(ra["id"], rb["id"], v))
+    print(f"  {describe(boot)}; aggregate {ua.agg}" + "".join(f" {k}={x}" for k, x in ua.params.items()))
+    for c in boot["caveats"]:
+        print(f"  note: {c}")
+    if a.public_n:
+        print("  public LB noise not projected: a unit table holds no rows to project to the public LB's size")
+    _log_comparison(led, ra["id"], rb["id"], folds_res, boot, None, v["decision"], v["flags"], v["tries"],
+                    v["strength"])
+    res = {**v, "new": ra["id"], "base": rb["id"], "se": boot["se"],
+           "k": folds_res["k"] if folds_res is not None else None,
+           "folds_improved": folds_res["folds_improved"] if folds_res is not None else None}
+    if hint:
+        print(f"\n{_record_hint(led, ra['id'], rb['id'], res['decision'].lower(), backlog)}")
+    return res
+
+
+def _tries(led, refs) -> int:
+    """`Ledger.tries` of the new ref against the base ref; 1 when either is an artefact folder or a file."""
+    if any(Path(r).is_dir() or _is_file_ref(led, r) for r in refs):
+        return 1
+    try:
+        return led.tries(refs[0], led.get(refs[1])["id"])
+    except KeyError:
+        return 1
+
+
+def _default_base(led, rec: dict) -> dict | None:
+    """What a record is compared with when no baseline is named (``Ledger.base_for``): its nearest kept ancestor,
+    else its parent; without a parent, its track's accepted baseline."""
+    from .experiment import NoControl
+
+    try:
+        return led.base_for(rec)
+    except NoControl as e:
+        raise SystemExit(str(e))
+    except KeyError:
+        raise SystemExit(f"{rec['id']}'s parent {rec['parent']} is not in this ledger: name the baseline with "
+                         "--parent <id>")
+
+
+def _no_baseline_yet(led, rec: dict) -> str:
+    """'no accepted baseline yet', naming the record's model line when it is not the main one."""
+    from . import evalset as E
+
+    track = led.track(rec)
+    if track == E.ENSEMBLE:
+        return "no accepted blend yet"
+    return "no accepted baseline yet" if track == E.MAIN else f"no accepted baseline in track {track} yet"
+
+
+def _check_track_arg(a) -> None:
+    from . import evalset as E
+
+    if getattr(a, "track", None):
+        try:
+            E.check_track(a.track)
+        except ValueError as e:
+            raise SystemExit(str(e))
+
+
+def _finish_command(led, new_id: str, base_id: str, decision: str, backlog: int | None = None) -> str:
+    """The `exp finish` call that records a decision on ``new_id`` compared with ``base_id`` (--parent only when
+    `exp finish` would not pick that baseline itself)."""
+    try:
+        default = _default_base(led, led.get(new_id))
+    except (KeyError, SystemExit):  # an artefact folder, or a parent this ledger does not have
+        default = None
+    parent = "" if default is not None and default["id"] == base_id else f" --parent {base_id}"
+    return (f"kgkit exp finish {new_id} {decision} \"<why>\"{parent}"
+            + (f" --backlog {backlog}" if backlog is not None else " [--backlog <n>]"))
 
 
 def _is_file_ref(led, ref: str) -> bool:
@@ -1309,15 +1797,86 @@ def _add_seed_noise(led, res: dict, new_ref: str, base_ref: str) -> dict:
     if seed is not None:
         return with_seed_noise(res, seed, n_seeds(recs[0]), n_seeds(recs[1]))
     if not abs(res.get("z", 0)) >= 4:
-        res["caveats"].append("seed noise not included: re-run one pipeline with another seed and log it with the "
-                              "same --variant (or the same params on a clean commit) to measure it")
+        res["caveats"].append("seed noise not included: `kgkit ledger seed-noise` prints the one re-run (the "
+                              "baseline with another seed) that measures it for every comparison")
     return res
 
 
+def _replica_note(led, rec: dict) -> str:
+    """What a seed re-run (KG_REPLICA_OF) measured: it is compared with nothing."""
+    from .compare import seed_variance
+    from .evalset import fmt_se
+
+    seed = f" (seed {rec['replica_seed']})" if rec.get("replica_seed") is not None else ""
+    head = f"{rec['id']}: seed replica of {rec['replica_of']}{seed}"
+    if rec.get("replica_identical"):
+        return (f"{head}, with an identical score: the pipeline ignored KG_SEED (or has no randomness), so this "
+                "measures no seed noise. Make it train with KG_SEED (`kgkit.experiment.run_seeds`; the templates do) "
+                "and re-run")
+    sv = seed_variance(led.records(), led.eval_record_key)
+    if sv is None:
+        return (f"{head}, but it does not pair with it (another evaluation set, or another number of seeds "
+                "averaged): no seed noise measured")
+    return (f"{head}: seed noise SD {fmt_se(sv['sd'])} (df {sv['df']}), now added to every paired comparison. A "
+            "replica is a measurement: no try, no decision, never the best CV")
+
+
+def _seed_noise_line(led) -> str | None:
+    """`kgkit status`: the seed noise every comparison adds, or that it is not measured yet."""
+    from .compare import seed_variance
+    from .evalset import fmt_se, own_score
+
+    recs = led.records()
+    if not any(own_score(r) for r in recs):
+        return None
+    sv = seed_variance(recs, led.eval_record_key)
+    if sv is None:
+        return ("seed noise: not measured, so close calls ignore training noise: `kgkit ledger seed-noise` prints the "
+                "one re-run that measures it")
+    return f"seed noise: SD {fmt_se(sv['sd'])} (df {sv['df']}), added to every paired comparison"
+
+
+def _ledger_seed_noise(led, a) -> None:
+    """Measure the training (seed) noise once per workspace: the SD so far, and the re-run that adds to it."""
+    from .compare import seed_variance
+    from .evalset import fmt_se
+
+    recs = led.records()
+    for r in recs:
+        if r.get("replica_identical"):
+            print(f"{r['id']} re-ran {r['replica_of']} with an identical score: the pipeline ignored KG_SEED (or has "
+                  "no randomness), so it measured nothing")
+    sv = seed_variance(recs, led.eval_record_key)
+    if sv is not None:
+        print(f"seed noise: SD {fmt_se(sv['sd'])} of one seed's score (df {sv['df']}, {sv['n_variants']} pipeline(s) "
+              "run more than once); every paired comparison adds it to the resampling SE")
+        if sv["df"] >= 3 and not a.args:
+            return
+    try:
+        rec = led.get(a.args[0]) if a.args else led.baseline()
+    except KeyError as e:
+        raise SystemExit(str(e.args[0]) if e.args else str(e))
+    if rec is None:
+        print("seed noise: not measured, and nothing is logged yet: log a baseline, then run this again")
+        return
+    if rec.get("replica_of"):
+        rec = led.get(rec["replica_of"])
+    lead = ("a rough estimate: one more re-run firms it up" if sv is not None else
+            "seed noise: not measured. Re-run one pipeline with another seed, once")
+    cmd = rec.get("cmd") or "<the command that trained it>"
+    print(f"{lead} ({rec['id']}, logged as its seed replica):\n"
+          f"  KG_SEED={led.replica_seed(rec['id'])} KG_REPLICA_OF={rec['id']} {cmd}\n"
+          "The templates train with KG_SEED (a pipeline of your own: `kgkit.experiment.run_seeds`). The replica is "
+          "no try, needs no decision and is never the best CV.")
+
+
 def _log_comparison(led, new_id: str, base_id: str, folds_res: dict | None, boot: dict | None, lb: dict | None,
-                    decision: str) -> None:
+                    decision: str, flags: list[str] | None = None, tries: int = 1,
+                    strength: float | None = None) -> None:
     """Append the measured paired noise to .kaggle-gm/comparisons.jsonl: `status` and the session hook read it
-    there instead of re-running a bootstrap (or guessing from the size of the evaluation set)."""
+    there instead of re-running a bootstrap (or guessing from the size of the evaluation set), and `exp finish`
+    reads the verdict back (``k``, ``folds_improved``, ``flags``) instead of comparing the pair again."""
+    import hashlib
     import math
 
     from . import evalset as EV
@@ -1326,14 +1885,25 @@ def _log_comparison(led, new_id: str, base_id: str, folds_res: dict | None, boot
     if src is None or not (isinstance(src.get("se"), float) and math.isfinite(src["se"]) and src["se"] > 0):
         return
     try:
-        key = led.eval_record_key(led.get(new_id))
+        new_rec = led.get(new_id)
+        key = led.eval_record_key(new_rec)
     except KeyError:  # an artefact folder
-        key = None
-    entry = {"new": new_id, "base": base_id, "eval": key or led.eval_key(), "question": "paired",
+        new_rec, key = {}, None
+    key = key or led.eval_key()
+    if EV.partial(new_rec):  # a screen's noise is a subset's: kept apart from the noise `status` reports
+        key = f"{key}|fidelity:{hashlib.sha1(EV.fidelity_key(new_rec).encode()).hexdigest()[:12]}"
+    entry = {"new": new_id, "base": base_id, "eval": key, "question": "paired",
              "gain": src["gain"], "se": src["se"], "decision": decision,
              "method": boot["method"] if boot is not None else "fold-paired t",
              "unit": boot["unit"] if boot is not None else "folds",
              "n_units": boot["n_units"] if boot is not None else folds_res["k"]}
+    if folds_res is not None:
+        entry.update(k=folds_res["k"], folds_improved=folds_res["folds_improved"])
+    if flags:
+        entry["flags"] = list(flags)
+    entry["tries"] = int(tries or 1)
+    if isinstance(strength, float) and math.isfinite(strength):
+        entry["strength"] = strength
     if lb is not None:
         entry.update(public_n=lb["size"], se_public=lb["se"])
     EV.log_comparison(led.root, entry)
@@ -1350,6 +1920,16 @@ def _ledger_noise(led, a):
     from .evalset import fmt_se
 
     st = S.load()
+    if not Path(a.args[0]).is_dir() and led.get(a.args[0]).get("units") and not a.truth:
+        from . import units as U
+
+        rec = led.get(a.args[0])
+        u = led.load_units(rec["id"])
+        res = U.compare(u, None, n_boot=a.boot)
+        print(f"{rec['id']}: {u.agg} {res['value']:.5f}; {describe(res)}")
+        for c in res["caveats"]:
+            print(f"  note: {c}")
+        return
     truth_spec = a.truth or (st.eval_truth if st else "")
     metric_name = a.metric or (st.metric if st else None)
     if not truth_spec or not metric_name:
@@ -1407,6 +1987,9 @@ def cmd_blend(a):
                 "stacked scores are optimistic. Re-run members on the shared folds, or keep the blend simple.\n")
     if len(oofs) <= 25:
         print("OOF correlation:\n" + E.oof_correlation(oofs).round(4).to_string() + "\n")
+    ids = [led.get(e)["id"] for e in oofs]  # the members as ledger ids, whatever ref was typed
+    ens = led.baseline(track="ensemble")  # the best accepted blend: this one is tested against it (#133)
+    parent = ens["id"] if ens is not None else None
     if a.method in ("stack", "residual"):
         if not a.folds:
             raise SystemExit(f"--method {a.method} needs --folds FILE:COLUMN (meta-models are fit out-of-fold)")
@@ -1417,20 +2000,22 @@ def cmd_blend(a):
             for i, ls in enumerate(res["layer_scores"], start=2):
                 print(f"level {i}: " + ", ".join(f"{k}={v:.6f}" for k, v in ls.items()))
             print(f"final blend of the last level: " + ", ".join(f"{k}={v:.3f}" for k, v in res["weights"].items()))
-            params = {"method": "stack", "levels": a.levels + 1, "members": list(oofs), "final_weights": res["weights"]}
+            params = {"method": "stack", "levels": a.levels + 1, "members": ids, "final_weights": res["weights"],
+                      "oof": "out-of-fold"}
         else:
             base = a.base or max(oofs, key=lambda e: M.score(metric, y, oofs[e]) * (1 if M.get(metric).greater_is_better else -1))
             res = E.residual_stack(oofs, tests, y, folds, base=base)
             print(f"residual stack on base {base}: base OOF {M.score(metric, y, oofs[base]):.6f}")
-            params = {"method": "residual", "base": base, "members": list(oofs)}
+            params = {"method": "residual", "base": base, "members": ids, "oof": "out-of-fold"}
         score = M.score(metric, y, res["oof"])
         print(f"meta OOF {metric}: {score:.6f} (out-of-fold; stacking on the same folds is still slightly optimistic)")
         if res.get("final_honest") is not None:
             print(f"honest (nested) final-blend {metric}: {res['final_honest']:.6f}")
         rec = led.log(a.name, score, model="blend", params=params, oof=res["oof"], test_pred=res["test"],
-                      notes=f"{a.method} of {', '.join(oofs)}", metric=metric)
+                      notes=f"{a.method} of {', '.join(oofs)}", metric=metric, parent=parent)
         print(f"logged {rec['id']}")
         _write_blend_sub(led, rec, res["test"], a)
+        _blend_compare(led, rec, a, in_sample=False)
         return
     if a.method == "hill":
         res = E.hill_climb(oofs, y, metric, allow_negative=a.allow_negative)
@@ -1441,6 +2026,7 @@ def cmd_blend(a):
         res["score"] = M.score(metric, y, E.blend(oofs, res["weights"], "rank"))
     print("weights: " + ", ".join(f"{k}={v:.3f}" for k, v in res["weights"].items()))
     print(f"blended OOF {metric}: {res['score']:.6f}")
+    honest = None
     if a.folds:
         honest = E.cv_blend_score(oofs, y, _col(a.folds).to_numpy(), metric,
                                   method="hill_climb" if a.method == "hill" else "weights")
@@ -1449,10 +2035,29 @@ def cmd_blend(a):
     blended_oof = E.blend(oofs, res["weights"], method)
     tests = {e: led.load_test(e) for e in res["weights"]}
     blended_test = E.blend(tests, res["weights"], method)
-    rec = led.log(a.name, res["score"], model="blend", params={"weights": res["weights"], "method": a.method},
-                  oof=blended_oof, test_pred=blended_test, notes=f"blend of {', '.join(a.exp)}", metric=metric)
-    print(f"logged {rec['id']}")
+    fitted = a.method in ("hill", "weights")  # rank: equal weights, nothing fit on the OOFs
+    nested = fitted and honest is not None  # the logged OOF and CV are the nested ones: not fit to the rows they score
+    params = {"weights": res["weights"], "method": a.method, "members": ids, "in_sample_cv": float(res["score"]),
+              "oof": "nested" if nested else ("in-sample" if fitted else "equal weights")}
+    rec = led.log(a.name, honest["oof_score"] if nested else res["score"], model="blend", params=params,
+                  oof=honest["oof"] if nested else blended_oof, test_pred=blended_test,
+                  notes=f"blend of {', '.join(a.exp)}", metric=metric, parent=parent)
+    print(f"logged {rec['id']}" + (" (its CV and OOF are the nested blend's; the test prediction uses the weights "
+                                   "fit on every fold)" if nested else ""))
     _write_blend_sub(led, rec, blended_test, a)
+    _blend_compare(led, rec, a, in_sample=fitted and not nested)
+
+
+def _blend_compare(led, rec: dict, a, in_sample: bool) -> None:
+    """The blend-gain test: a new blend, paired with the best accepted blend (its parent), on the same rows."""
+    try:
+        res = compare_logged(rec, truth=a.truth, folds=a.folds, root=led.root)
+    except SystemExit as e:
+        print(f"not compared with the best accepted blend: {e}")
+        return
+    if res is not None and in_sample:
+        print("note: these weights were fit on the OOFs they are scored on, so the gain is optimistic (a blend with "
+              "more members has more to fit): pass --folds for nested weights and an honest comparison")
 
 
 def _write_blend_sub(led, rec, blended_test, a):
@@ -1506,6 +2111,279 @@ def cmd_backlog(a):
             if f["sign_agreement"] < 0.7 or f["spearman"] < 0.5:
                 print("screens are a poor proxy here: screen on 2 folds, at closer-to-final resolution/epochs, "
                       "or with 2 seeds before promoting")
+
+
+# ---------------------------------------------------------------------------- exp: one call per experiment (#127)
+DECISIONS = ("keep", "discard", "inconclusive", "baseline")
+# the options of the paired test: given any of them, `exp finish` compares afresh instead of reusing the log
+_PAIRED_DESTS = ("truth", "folds", "fold", "groups", "boot", "rope", "public_n", "metric")
+
+
+def _ledger_namespace(**kw) -> argparse.Namespace:
+    """The options `ledger compare` reads, at their defaults, with ``kw`` set."""
+    common = argparse.ArgumentParser(add_help=False)
+    for flag, opt in _LEDGER_OPTIONS:
+        common.add_argument(flag, **opt)
+    return argparse.Namespace(**{**vars(common.parse_args([])), "args": [], **kw})
+
+
+def _spec_path(root: Path, path: Path) -> str:
+    """A file in a FILE:COL spec: relative to the working directory when it is inside it."""
+    try:
+        return path.resolve().relative_to(Path.cwd().resolve()).as_posix()
+    except ValueError:
+        return path.resolve().as_posix()
+
+
+def _csv_header(path: Path) -> list[str]:
+    import csv
+
+    try:
+        with path.open(encoding="utf-8", newline="") as f:
+            return next(csv.reader(f), [])
+    except (OSError, UnicodeDecodeError):
+        return []
+
+
+def _default_truth(root: Path, st) -> str | None:
+    """The labels to bootstrap on when none are given: eval_truth, else the competition's target in data/train.csv."""
+    if st is None:
+        return None
+    if st.eval_truth:
+        return st.eval_truth
+    train = Path(root) / "data" / "train.csv"
+    if st.target and st.target in _csv_header(train):
+        return f"{_spec_path(root, train)}:{st.target}"
+    return None
+
+
+def _default_folds(root: Path) -> str | None:
+    from . import evalset as E
+
+    f = E.folds_path(root)
+    return f"{_spec_path(root, f)}:fold" if "fold" in _csv_header(f) else None
+
+
+def exp_compare(led, new_id: str, base_id: str, opts: dict | None = None, fallback: bool = False,
+                hint: bool = True, backlog: int | None = None) -> dict | None:
+    """The paired comparison of ``new_id`` with ``base_id``, printed, its verdict returned (`_ledger_compare`).
+    Without ``truth``, the OOF bootstrap runs on the workspace's labels (eval_truth, else the target column of
+    data/train.csv) and the per-fold pairing on the frozen folds. ``fallback``: a truth that was not given by the
+    user and does not fit (another row count, a label metric over raw outputs) gives way to the stored per-fold
+    scores instead of failing the comparison."""
+    import contextlib
+    import io
+
+    from . import metrics as M
+    from . import state as S
+
+    opts = {k: v for k, v in (opts or {}).items() if v is not None}
+    st = S.load(led.root)
+    holdout = st is not None and st.holdout
+    new, base = led.get(new_id), led.get(base_id)
+    pred_key = "holdout_path" if holdout else "oof_path"
+    defaulted = fallback or "truth" not in opts
+    if "truth" not in opts and new.get(pred_key) and base.get(pred_key):
+        truth = _default_truth(led.root, st)
+        if truth:
+            opts["truth"] = truth
+    metric = opts.get("metric") or (st.metric if st else None)
+    try:
+        label = bool(metric) and M.get(metric).kind == "label"
+    except KeyError:
+        label = False
+    if label and defaulted and not holdout and opts.get("truth") and new.get("fold_scores") \
+            and base.get("fold_scores"):
+        # the stored OOF holds the model's raw outputs, the metric scores decoded labels: the fold scores the
+        # training script computed are the comparable ones
+        print(f"note: {M.get(metric).name} scores labels and the ledger keeps raw outputs: compared on the per-fold "
+              "scores")
+        opts.pop("truth")
+    if opts.get("truth") and "folds" not in opts and not holdout:
+        folds = _default_folds(led.root)
+        if folds:
+            opts["folds"] = folds
+    ns = _ledger_namespace(**opts, args=[new["id"], base["id"]])
+    if not (defaulted and opts.get("truth")):
+        return _ledger_compare(led, ns, hint=hint, backlog=backlog)
+    buf = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(buf):
+            res = _ledger_compare(led, ns, hint=hint, backlog=backlog)
+    except (SystemExit, ValueError, IndexError) as e:
+        if not new.get("fold_scores") or not base.get("fold_scores"):
+            print(buf.getvalue(), end="")
+            raise
+        print(f"note: not compared on {opts['truth']} ({e}): on the per-fold scores")
+        ns.truth = ns.folds = None
+        return _ledger_compare(led, ns, hint=hint, backlog=backlog)
+    print(buf.getvalue(), end="")
+    return res
+
+
+def compare_logged(rec: dict, parent: str | None = None, truth: str | None = None, folds: str | None = None,
+                   fallback: bool = True, root=None) -> dict | None:
+    """After a training script logs ``rec``: its paired comparison with ``parent`` (else its own parent, else the
+    accepted baseline), printed with the `exp finish` call that records it. None when there is nothing to compare
+    with (and then it says how to make a baseline). Raises SystemExit on a parent this ledger does not have."""
+    from .experiment import Ledger
+
+    led = Ledger(root)
+    rec = led.get(rec["id"])
+    if rec.get("control_of"):
+        from . import screen as SC
+
+        print(f"\n{rec['id']}: control of {rec['control_of']} at {SC.describe(rec.get('fidelity'))}; the screens run "
+              "at this fidelity are compared with it")
+        return None
+    if rec.get("replica_of"):
+        print("\n" + _replica_note(led, rec))
+        return None
+    if parent:
+        from . import evalset as E
+
+        try:
+            base = led.get(parent)
+        except KeyError:
+            raise SystemExit(f"its parent {parent} is not in this ledger")
+        if E.fidelity_key(base) != E.fidelity_key(rec):  # a screen of that baseline: compared with its control
+            base = _default_base(led, rec) if rec.get("parent") == base["id"] else led.control(base["id"], rec) or base
+    else:
+        base = _default_base(led, rec)
+    if base is None:
+        print(f"{_no_baseline_yet(led, rec)}: make this run the baseline with `kgkit exp finish {rec['id']} "
+              "baseline \"<why>\"`; later runs are compared with it when they log")
+        return None
+    if base["id"] == rec["id"]:
+        return None
+    print()
+    return exp_compare(led, rec["id"], base["id"], {"truth": truth, "folds": folds}, fallback=fallback)
+
+
+def _logged_comparison(led, new_id: str, base_id: str) -> dict | None:
+    """The last paired comparison of the pair in .kaggle-gm/comparisons.jsonl, if it has the fields of a verdict."""
+    from . import evalset as E
+
+    for c in reversed(E.comparisons(led.root)):
+        if c.get("new") == new_id and c.get("base") == base_id and c.get("question") == "paired" \
+                and c.get("decision") in ("KEEP", "DISCARD", "INCONCLUSIVE") and "gain" in c:
+            return c
+    return None
+
+
+def _verdict_summary(res: dict) -> str:
+    from .evalset import fmt_gain, fmt_se
+
+    out = f"gain {fmt_gain(res['gain'])}"
+    if res.get("se"):
+        out += f" +/- {fmt_se(res['se'])}"
+    if res.get("k"):
+        out += f", folds {res['folds_improved']}/{res['k']}"
+    return out
+
+
+def _finish_item(bl, led, exp_id: str, n: int | None) -> tuple[dict | None, list[dict]]:
+    """The backlog item an experiment closes: ``n``, else the one open item that lists the experiment. Also the open
+    items, to name when none is found."""
+    items = bl.items()
+    if n is not None:
+        for i in items:
+            if i["id"] == n:
+                return i, []
+        raise SystemExit(f"backlog item {n} not found (`kgkit backlog list --all`)")
+    open_ = [i for i in items if i.get("status") in ("todo", "running")]
+    naming = [i for i in open_ if any(led._resolve_id(e) == exp_id for e in i.get("exp_ids") or ())]
+    if len(naming) == 1:
+        return naming[0], []
+    return None, naming or [i for i in open_ if i.get("status") == "running"]
+
+
+def cmd_exp(a):
+    from .experiment import Ledger
+
+    led = Ledger()
+    _check_track_arg(a)
+    if a.action == "finish":
+        _exp_finish(led, a)
+
+
+def _exp_finish(led, a) -> None:
+    """`exp finish <id> [decision [why...]] [--backlog n]`: compare (or reuse the comparison made when the run was
+    logged), then, given a decision, record it and close the backlog item. Without a decision it records nothing:
+    it prints the verdict and the call that records it."""
+    from .backlog import Backlog
+
+    decision = a.args[1].lower() if len(a.args) > 1 else None
+    why = " ".join(a.args[2:]).strip()
+    if decision is not None and decision not in DECISIONS:
+        raise SystemExit(f"the decision is keep|discard|inconclusive|baseline, not {a.args[1]!r} (the note goes "
+                         "after it)")
+    try:
+        rec = led.get(a.args[0])
+    except KeyError as e:
+        raise SystemExit(str(e.args[0]) if e.args else str(e))
+    if a.track and a.track != rec.get("track"):
+        rec = led.update(rec["id"], track=a.track)  # before the baseline is chosen: the line's own
+    bl = Backlog(led.root)
+    item, candidates = _finish_item(bl, led, rec["id"], a.backlog)
+    res = base = None
+    if decision != "baseline":
+        try:
+            base = led.get(a.parent) if a.parent else _default_base(led, rec)
+        except KeyError as e:
+            raise SystemExit(str(e.args[0]) if e.args else str(e))
+        if base is None or base["id"] == rec["id"]:
+            raise SystemExit(f"nothing to compare {rec['id']} with: {_no_baseline_yet(led, rec)}. Make it the "
+                             f"baseline: `kgkit exp finish {rec['id']} baseline \"<why>\"`, or name one with "
+                             "--parent <id>")
+        opts = {k: getattr(a, k) for k in _PAIRED_DESTS if getattr(a, k, None) is not None}
+        if a.method != "auto":
+            opts["method"] = a.method
+        logged = None if opts else _logged_comparison(led, rec["id"], base["id"])
+        if logged is not None:
+            from .compare import rejudge
+
+            # the run was compared when it logged, often before the rest of its sweep ran: count the tries as now
+            res = rejudge({**logged, "reasons": [], "flags": logged.get("flags") or []},
+                          a.tries or led.tries(rec["id"], base["id"]))
+            print(f"{rec['id']} vs {base['id']}: {res['decision']} ({_verdict_summary(res)}, "
+                  f"{logged.get('method', 'paired')}) - compared when it was logged")
+            for r in res["reasons"]:
+                print(f"  {r}")
+            for f in res["flags"]:
+                print(f"  WARNING: {f}")
+        else:
+            res = exp_compare(led, rec["id"], base["id"], {**opts, "tries": a.tries}, hint=False)
+    suggested = res["decision"].lower() if res is not None else None
+    if decision is None:
+        if suggested:
+            print(f"\n{_record_hint(led, rec['id'], base['id'], suggested, item['id'] if item else None)}")
+        else:
+            print(f"\nno verdict from the comparison: decide by hand, `kgkit exp finish {rec['id']} "
+                  "keep|discard|inconclusive \"<why>\"`")
+        return
+    if suggested and decision != "baseline" and decision != suggested:
+        print(f"note: {decision} against the comparison's {res['decision']}: the note says why")
+    note = why
+    if not note and res is not None:  # the numbers the decision rests on (and the verdict, when it went against it)
+        note = _verdict_summary(res) + ("" if decision == suggested else f" (comparison: {res['decision']})")
+    before = led.heads()
+    try:
+        r = led.decide(rec["id"], decision, note, parent=base["id"] if base is not None else None, member=a.member)
+    except ValueError as e:
+        raise SystemExit(str(e))
+    print(f"{r['id']}: {r['decision']}" + (" (member)" if r.get("member") else "")
+          + (f" (vs {r['parent']})" if r.get("parent") else ""))
+    _decide_baseline_note(led, [r], before)
+    _member_note(led, [r] if r.get("member") else [])
+    if item is None:
+        if candidates:
+            print("backlog not updated: name the idea with --backlog <n> (open: "
+                  + "; ".join(f"#{i['id']} {i['idea'][:50]}" for i in candidates) + ")")
+        return
+    status = "running" if decision == "inconclusive" else "done"  # an inconclusive idea gets its second seed
+    i = bl.set(item["id"], exp=rec["id"], status=status, result=f"{decision}: {note}" if note else decision)
+    print(f"backlog #{i['id']} {i['idea'][:60]} -> {i['status']}: {i['result']}")
 
 
 def cmd_features(a):
@@ -1896,6 +2774,11 @@ def cmd_gpu(a):
             print("next: make room as the WARNING above says and build again (`gpu push` refuses this script)")
         else:
             print(f"next: smoke-test the command locally, then  python -m kgkit gpu push {kdir.as_posix()}")
+    elif a.gpu_cmd == "push" and a.backend == "local":
+        rec = G.push_local(None, a.dir, hours=a.hours, force=a.force)
+        print(f"started {rec['kernel']} v{rec['version']} on this machine (pid {rec['pid']}, cap {rec['hours']:g}h, "
+              f"log {rec['dir']}/session.log). Next: python -m kgkit gpu wait {rec['kernel']} --collect  (run it in "
+              "the background)")
     elif a.gpu_cmd == "push":
         rec = G.push(None, a.dir, force=a.force, hours=a.hours, check_sources=not a.no_source_check,
                      check_sessions=not a.no_session_check)
@@ -1941,11 +2824,22 @@ def cmd_gpu(a):
         n = G.release(root, a.kernel)
         print(f"{a.kernel}: {n} reservation(s) released" if n else f"{a.kernel}: nothing in flight in the run log")
         print(G.quota_report(root, refresh=False))
+    elif a.gpu_cmd == "cancel" and G.is_local(a.kernel):
+        root = G._root(None)
+        run = G.latest_run(root, a.kernel)
+        was = G.LR.status(run) if run else None
+        print(G.LR.cancel(run) if run else f"{a.kernel}: no local run of it in the run log")
+        if was == "running":
+            G.note_status(root, a.kernel, "cancelled")
     elif a.gpu_cmd == "cancel":
         s, _ = G.kernel_status(a.kernel)
         print(G.cancel_advice(a.kernel, s))
     elif a.gpu_cmd == "wait":
-        s = G.wait(None, a.kernel, interval=a.interval, max_hours=a.max_hours)
+        max_h = a.max_hours
+        if max_h is None:
+            max_h = (float(G.latest_run(G._root(None), a.kernel).get("hours") or 12) + 1
+                     if G.is_local(a.kernel) else 13)
+        s = G.wait(None, a.kernel, interval=a.interval, max_hours=max_h)
         if s == "complete" and a.collect:
             G.collect(None, a.kernel)
         sys.exit(0 if s == "complete" else 1)
@@ -1975,26 +2869,95 @@ class _CollectArgs(argparse.Action):
         namespace.args = [*getattr(namespace, "args", []), *(v for v in vals if v is not None)]
 
 
-def _decide_baseline_note(led, done: list[dict], before: dict | None) -> None:
-    """After `ledger decide`: the baseline `ledger baseline` returns now, and a warning when a record decided
-    keep/baseline does not become it."""
+def _decide_baseline_note(led, done: list[dict], before: dict[str, dict]) -> None:
+    """After `ledger decide` / `exp finish`: the accepted baseline of each model line that changed (``before``: the
+    heads, ``Ledger.heads``, before the decisions), and a warning when a record decided keep/baseline does not
+    become its line's."""
     from . import evalset as E
     from .experiment import fmt_cv
 
-    after = led.baseline(fallback=False)
+    after = led.heads()
+
+    def label(t):
+        return "accepted baseline" if t == E.MAIN else f"accepted baseline of track {t}"
+
+    changed = False
+    for t in [*before, *(t for t in after if t not in before)]:
+        b, n = before.get(t), after.get(t)
+        if n is not None and (b is None or n["id"] != b["id"]):
+            print(f"{label(t)} is now {n['id']} (CV {fmt_cv(n)})")
+            changed = True
+        elif n is None and b is not None:
+            print(f"no {label(t)} left: " + ("`ledger baseline` falls back to the highest CV; " if not after else "")
+                  + "decide one (`ledger decide <id> baseline" + ("" if t == E.MAIN else f" --track {t}") + "`)")
+            changed = True
     last = done[-1] if done else None
-    if after is not None and (before is None or after["id"] != before["id"]):
-        print(f"accepted baseline is now {after['id']} (CV {fmt_cv(after)})")
-    elif after is not None and last is not None and last["decision"] in E.ACCEPTED:
-        print(f"accepted baseline stays {after['id']} (CV {fmt_cv(after)})")
-    elif after is None and before is not None:
-        print("no accepted baseline left: `ledger baseline` falls back to the highest CV; decide one "
-              "(`ledger decide <id> baseline`)")
-    if last is not None and last["decision"] in E.ACCEPTED and not last.get("member") \
-            and (after is None or after["id"] != last["id"]):
+    if last is None or last["decision"] not in E.ACCEPTED:
+        return
+    t = led.track(last)
+    if not changed and after.get(t) is not None:
+        print(f"{label(t)} stays {after[t]['id']} (CV {fmt_cv(after[t])})")
+    if not last.get("member") and (after.get(t) is None or after[t]["id"] != last["id"]):
         why = (": it is a re-check on re-drawn folds (recheck), not comparable with the frozen folds"
                if last.get("recheck") else "")
-        print(f"warning: {last['id']} is {last['decision']} but is not the accepted baseline{why}")
+        print(f"warning: {last['id']} is {last['decision']} but is not the {label(t)}{why}")
+
+
+def _member_note(led, members: list[dict]) -> None:
+    """After keeping records with --member: their worth is what they add to the blend, tested paired."""
+    if members:
+        print(f"note: a member is worth what it adds to the ensemble: blend it, "
+              f"`{_blend_command(led, [m['id'] for m in members])}`; the blend is compared paired with the best "
+              "accepted blend, and `kgkit exp finish <blend> keep` keeps it")
+
+
+def _blend_command(led, ids: list[str]) -> str:
+    """The `kgkit blend` call over the model lines' accepted baselines, the ensemble's members and ``ids``, with this
+    workspace's labels and folds when they are known."""
+    from . import evalset as E
+    from . import state as S
+
+    recs = led.records()
+    heads = E.track_heads(recs)
+    pool = [h["id"] for t, h in heads.items() if t != E.ENSEMBLE]
+    if E.ENSEMBLE in heads:
+        pool += E.resolve_members(heads[E.ENSEMBLE], recs)
+    return "kgkit blend --exp " + " ".join(dict.fromkeys([*pool, *ids])) + _blend_args(led, S.load(led.root))
+
+
+def _blend_args(led, st) -> str:
+    truth = st.eval_truth if st is not None and st.eval_truth else "FILE:COL"
+    folds = "data/folds.csv:fold" if (Path(led.root) / "data" / "folds.csv").is_file() else "FILE:COL"
+    return f" --truth {truth} --folds {folds}"
+
+
+def _ledger_tracks(led) -> None:
+    """`ledger tracks`: one line per model line, then what the ensemble misses."""
+    from . import evalset as E
+    from . import state as S
+    from .experiment import fmt_cv
+
+    st = S.load(led.root)
+    recs = led.records()
+    stats = E.track_stats(recs, st.greater_is_better if st is not None else True)
+    if not stats:
+        print("(ledger is empty)")
+        return
+    for t, ts in stats.items():
+        head = ts["head"]
+        what = (f"{head['id']}  CV {fmt_cv(head)}" if head is not None else
+                f"no accepted baseline yet ({ts['records']} record(s): `kgkit exp finish <id> baseline"
+                + ("" if t == E.MAIN else f" --track {t}") + "`)")
+        bits = [f"{ts['kept']} kept of {ts['compared']} compared"]
+        if ts.get("gain") is not None:
+            bits.append(f"{E.fmt_gain(ts['gain'])} since {ts['root']['id']}"
+                        + (f" ({E.fmt_gain(ts['gain_per_hour'])}/h)" if ts.get("gain_per_hour") is not None else ""))
+        print(f"{t:10s} {what}  {'; '.join(bits)}")
+    for line in E.ensemble_advice(recs, _blend_args(led, st)):
+        print(line)
+    if len(stats) > 1:
+        print("spend the next hours where the gain per hour is highest; a line whose last decisions kept nothing has "
+              "plateaued: give it a bigger change, or its time to the other lines")
 
 
 def _action_parsers(p, actions: dict, options: list) -> None:
@@ -2035,6 +2998,8 @@ _LEDGER_OPTIONS = [
                                      "competition.json)")),
     ("--public-n", dict(type=int, help="rows in the public LB (default public_lb_n): noise projected to the LB's "
                                        "sample size")),
+    ("--tries", dict(type=int, help="how many candidates the new run was picked from, for the best-of-N correction "
+                                    "(default: its sweep's members, else its parent's children on this split)")),
     ("--metric", dict(help="kgkit metric name or alias (default: competition.json)")),
     ("--test", dict(help="test predictions (.npy or FILE:COLUMN)")),
     ("--cv", dict(type=float, help="reported CV when no --truth is given")),
@@ -2047,10 +3012,22 @@ _LEDGER_OPTIONS = [
                                          "`kgkit status` warns while Kaggle would auto-select it")),
     ("--remove", dict(action="store_true", help="tag: remove the tags instead of adding them")),
     ("--member", dict(action="store_true", help="decide keep: keep it as an ensemble member without making it the "
-                                                "accepted baseline")),
+                                                "accepted baseline (its worth is tested by blending it: `kgkit blend`)")),
+    ("--track", dict(help="the model line the record belongs to (gbdt, cnn, vit-l...): each line has its own accepted "
+                          "baseline. Left out: its parent's line (a blend's: ensemble; no parent: main). With "
+                          "baseline: start the line")),
     ("--pred", dict(help="FILE:COL[,COL...] or .npy predictions on the evaluation set (holdout+lb: the holdout; else "
                          "OOF); the score is recomputed, the predictions stored and compared with the baseline")),
     ("--variant", dict(help="name shared by re-runs of one pipeline with other seeds (seed noise)")),
+    ("--units", dict(help="a unit table (CSV / parquet / .npz with an id column): one row per image, study, "
+                          "tomogram, query, problem or match, with the values the metric is built from (score; "
+                          "tp/fp/fn; inter/union; ...), optional group and fold columns. The score is recomputed "
+                          "from it and later runs on the same units are compared with it paired")),
+    ("--units-agg", dict(choices=["mean", "ratio", "iou", "dice", "fbeta", "precision", "recall", "custom"],
+                         help="the table's aggregate (default: from its column names)")),
+    ("--units-param", dict(action="append", metavar="KEY=VALUE",
+                           help="a parameter of the aggregate, e.g. beta=4, class_weights={\"apo\":1,\"rib\":3}, "
+                                "fn=mymetric:score; repeatable")),
     ("--sub", dict(help="the submission file of the record (CSV or .npy): without predictions on the evaluation set, "
                         "`ledger compare` estimates the public-LB noise between two records from these files")),
     ("--ref", dict(help="compare: a record with predictions on the evaluation set, used to calibrate the labels "
@@ -2083,28 +3060,48 @@ _LEDGER_ACTIONS = {
                                                "'lb-only': no validation score (fork of public notebooks, blend "
                                                "with public files)"),
                                   ("notes", "*", "free text")],
-            "--parent --tag --variant --notes --pred --sub " + _PAIRED),
+            "--parent --track --tag --variant --notes --pred --units --units-agg --units-param --sub " + _PAIRED),
     "tag": ("add tags to a record, or remove them (--remove): mark a logged file public-lb-fitted or public-tuned",
             [_EXP, ("tag", "+", "tags to add (or remove)")], "--remove"),
     "compare": ("paired comparison of two experiments (or artifacts/<name> folders of per-fold OOFs)",
                 [("new", None, "ledger id/name or artifacts folder"),
-                 ("baseline", "?", "default: the accepted baseline")], _PAIRED + " --ref"),
+                 ("baseline", "?", "default: its nearest kept ancestor, else its track's accepted baseline")],
+                _PAIRED + " --ref --tries"),
     "noise": ("noise of one absolute score: bounds its CV-LB gap, not a difference between two models",
               [_EXP], "--truth --groups --boot --method --public-n --metric"),
     "decide": ("record the decision on a compared experiment (or on several: a sweep decided at once)",
                [("exp_id", None, "ledger id or name, a list 3,7,9 or a range 12..20"),
                 ("baseline|keep|discard|inconclusive", None, "the decision"), ("note", "*", "why")],
-               "--parent --member"),
+               "--parent --member --track"),
     "phase": ("name the phase new records belong to (no name: list the phases), or put past records in one",
               [("name", "*", "the phase, e.g. stacking public OOFs")], "--records"),
     "journey": ("write journey/experiments.md: every record by phase, its parent, change, scores, decision and a "
                 "link to the code it ran from, and the lineage as a Mermaid graph", [], "--out --repo-url"),
-    "baseline": ("the accepted baseline (the highest CV while nothing is accepted)", [], ""),
+    "baseline": ("the accepted baseline (the highest CV while nothing is accepted), and the other model lines'",
+                 [], "--track"),
+    "tracks": ("each model line: its accepted baseline, kept/compared decisions and gain per hour (where the next "
+               "hours go), and whether the ensemble includes every line's latest baseline", [], ""),
+    "seed-noise": ("the training noise every paired comparison adds (one pipeline re-run with another seed), "
+                   "or the re-run that measures it", [("exp_id", "?", "the record to re-run (default: the accepted "
+                                                                 "baseline)")], ""),
     "lineage": ("the chain of decisions behind a record, for reverse ablation",
                 [("exp_id", "?", "default: the accepted baseline")], ""),
     "import": ("import predictions made elsewhere (teammate, public notebook)",
                [("name", None, "experiment name"), ("oof", None, "OOF predictions: .npy or FILE:COLUMN")],
-               "--test --truth --folds --cv --notes --source"),
+               "--test --truth --folds --cv --notes --source --track"),
+}
+
+_EXP_OPTIONS = [*_LEDGER_OPTIONS,
+                ("--backlog", dict(type=int, metavar="N", help="the backlog idea this experiment tests (default: the "
+                                                               "open idea that lists it with --exp)"))]
+_EXP_ACTIONS = {
+    "finish": ("end an experiment in one call: the paired comparison with its nearest kept ancestor (else its track's "
+               "accepted baseline; the "
+               "one made when the run was logged is reused), then, given a decision, record it and close the backlog "
+               "idea (inconclusive keeps it running). Without a decision it prints the verdict and records nothing",
+               [_EXP, ("keep|discard|inconclusive|baseline", "?", "the decision (left out: show the verdict only)"),
+                ("why", "*", "the note (default: the verdict's numbers)")],
+               "--parent --track --backlog --member --tries " + _PAIRED),
 }
 
 _BACKLOG_OPTIONS = [
@@ -2275,6 +3272,11 @@ def build_parser() -> argparse.ArgumentParser:
     _action_parsers(s, _LEDGER_ACTIONS, _LEDGER_OPTIONS)
     s.set_defaults(fn=cmd_ledger)
 
+    s = sub.add_parser("exp", help="one experiment's bookkeeping in one call: `exp finish <id> [decision [why]]`",
+                       epilog="`kgkit exp finish --help` shows its arguments and options")
+    _action_parsers(s, _EXP_ACTIONS, _EXP_OPTIONS)
+    s.set_defaults(fn=cmd_exp)
+
     s = sub.add_parser("backlog", help="ranked idea backlog",
                        epilog="`kgkit backlog <action> --help` shows one action's arguments and options")
     _action_parsers(s, _BACKLOG_ACTIONS, _BACKLOG_OPTIONS)
@@ -2423,6 +3425,74 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("whoami", help="your Kaggle username (never the key or token)")
     s.set_defaults(fn=cmd_whoami)
 
+    s = sub.add_parser("grind", help="a /kg-grind loop's budget, progress and runs, kept in .kaggle-gm/grind.json so "
+                                     "a compacted or new session continues it (#125)")
+    s.add_argument("action", choices=["start", "status", "note", "stop"])
+    s.add_argument("--session", default="", help="the Claude Code session that drives it (${CLAUDE_SESSION_ID})")
+    s.add_argument("--budget", help="start: 4h, 90m, 10 (experiments) or 4h,10")
+    s.add_argument("--focus", default="")
+    s.add_argument("--resume", action="store_true", help="start: continue the grind in progress from this session")
+    s.add_argument("--takeover", action="store_true", help="start --resume: even if another session drove it lately")
+    s.add_argument("--started", metavar="NAME", help="note: the run's name (its ledger / artifacts name)")
+    s.add_argument("--cmd", default="", help="note --started: the command that runs it")
+    s.add_argument("--kaggle", action="store_true", help="status: ask Kaggle for the runs it still has in flight")
+    s.add_argument("--reason", default="", help="stop: why it ended")
+    s.set_defaults(fn=cmd_grind)
+
+    s = sub.add_parser("screen", help="screens: a frozen subset (rows or units, whole groups, the latest window, some "
+                                      "folds) that cheap runs of any pipeline share, so they compare with a control "
+                                      "at the same fidelity (KG_SCREEN)")
+    s.add_argument("action", choices=["new", "list", "show", "control"])
+    s.add_argument("args", nargs="*", help="new/show: the screen's name; control: <baseline id> <screen>")
+    s.add_argument("--frac", type=float, default=1.0, help="new: the share of rows or units it keeps (default 1: all, "
+                                                           "for a screen of some folds only)")
+    s.add_argument("--folds", type=int, nargs="+", help="new: the folds a screened run trains and predicts")
+    s.add_argument("--seed", type=int, default=0)
+    s.add_argument("--group", help="new: column whose groups are kept whole (default: the group `kgkit folds` used)")
+    s.add_argument("--time-col", help="new: keep the latest window by this column (time series)")
+    s.add_argument("--no-stratify", action="store_true", help="new: draw rows at random, not a share of each class")
+    s.add_argument("--stratify", metavar="COL", help="new: a share of each value of COL (e.g. --stratify opponent: "
+                                                     "fewer games of every opponent)")
+    s.add_argument("--ids", help="new: FILE:COL of the units to draw from (tomograms, studies, problems...), other "
+                                 "columns of FILE for --group/--time-col (default: data/train.csv and its id column)")
+    s.set_defaults(fn=cmd_screen)
+
+    s = sub.add_parser("sweep", help="many variants of one pipeline by successive halving: each rung runs the "
+                                     "survivors on a screen (cheapest first), compares them with that rung's control "
+                                     "and promotes the best 1/eta; the full run is compared with the baseline as the "
+                                     "best of every variant tried")
+    s.add_argument("action", choices=["new", "run", "status", "decide", "fidelity"])
+    s.add_argument("name", nargs="?")
+    s.add_argument("--base", help="new: the baseline the variants branch from (default: the accepted one)")
+    s.add_argument("--check", type=int, default=0, metavar="N",
+                   help="new: at each rung, promote N pruned variants at random too, so `sweep fidelity` measures the "
+                        "screen on variants its pruning did not choose (N extra runs per rung)")
+    s.add_argument("--cmd", help="new: the command of one run, any pipeline's; kgkit fills in {args} (the "
+                                 "variant's), {rung_args} (the rung's settings as --key value), {base}, {sweep}, "
+                                 "{variant}, {rung}")
+    s.add_argument("--base-args", default="", help="new: the arguments that give the baseline's own run (for the "
+                                                   "controls; default none)")
+    s.add_argument("--variant", action="append", default=[], metavar="NAME=ARGS")
+    s.add_argument("--grid", action="append", default=[], metavar="--FLAG=V1,V2",
+                   help="new: one axis of a grid; several --grid make their product")
+    s.add_argument("--rung", action="append", default=[], metavar="screen=NAME,KEY=VALUE",
+                   help="new: a rung before the full run, cheapest first (a screen of `kgkit screen new`, cheaper "
+                        "settings, or both)")
+    s.add_argument("--eta", type=int, default=3, help="new: each rung promotes the best 1/eta (default 3)")
+    s.add_argument("--parallel", type=int, default=1, help="run: runs at a time (default 1)")
+    s.add_argument("--one", action="store_true", help="run: one rung, then stop")
+    s.add_argument("--dry-run", action="store_true", help="run: print the next rung's commands, run nothing")
+    s.add_argument("--new-control", action="store_true",
+                   help="run: run the controls again, not those on file (the pipeline's code changed)")
+    s.set_defaults(fn=cmd_sweep)
+
+    s = sub.add_parser("permissions", help="allow rules for kgkit's local bookkeeping and read-only calls, so they "
+                                           "stop asking after the user's next message and in subagents (#123)")
+    s.add_argument("--write", action="store_true",
+                   help="merge them into the workspace's .claude/settings.local.json (personal, git-ignored); "
+                        "ask the user first")
+    s.set_defaults(fn=cmd_permissions)
+
     s = sub.add_parser("update-check", help="is a newer kaggle-grandmaster released, and the `claude plugin update` "
                                             "command that installs it (/kg-update; then /reload-plugins)")
     s.set_defaults(fn=cmd_update_check)
@@ -2488,12 +3558,15 @@ def build_parser() -> argparse.ArgumentParser:
                         "the session slots look full, or the machine shape is not one Kaggle is known to accept")
     s.add_argument("--no-source-check", action="store_true", help="skip the check that input kernels have finished")
     s.add_argument("--no-session-check", action="store_true", help="skip the busy-session preflight")
+    s.add_argument("--backend", choices=["kaggle", "local"], default="kaggle",
+                   help="local: run the `gpu build` folder on this machine's GPU(s) as a background process (no "
+                        "quota; kernel id local/<slug>; --hours up to 168, default the build's cap)")
     s = gs.add_parser("status", help="status of active remote runs")
     s.add_argument("kernel", nargs="*")
     s = gs.add_parser("wait", help="poll a kernel until it finishes")
     s.add_argument("kernel")
     s.add_argument("--interval", type=float, default=90)
-    s.add_argument("--max-hours", type=float, default=13)
+    s.add_argument("--max-hours", type=float, default=None, help="default 13 (a local run: its cap + 1)")
     s.add_argument("--collect", action="store_true", help="collect the outputs when it completes")
     s = gs.add_parser("collect", help="bring a finished kernel's outputs back and account its GPU hours: a `gpu "
                                       "build` kernel's results go into the ledger, any other kernel's files into "
@@ -2508,12 +3581,33 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("kernel")
     s.add_argument("dir", nargs="?", help="the kernel folder (default: the one `gpu push` recorded)")
     s.add_argument("--yes", action="store_true", help="delete it: ask the user first, every version and output goes")
-    s = gs.add_parser("cancel", help="how to stop a running or queued kernel (prints the steps; deletes nothing)")
+    s = gs.add_parser("cancel", help="how to stop a running or queued kernel (prints the steps; deletes nothing); "
+                                     "a local run (local/<slug>) is stopped")
     s.add_argument("kernel")
     s = gs.add_parser("log", help="remote GPU runs and their cost")
     s.add_argument("-n", type=int, default=20)
     g.set_defaults(fn=cmd_gpu)
     return p
+
+
+_GLUED = {"sweep": ("--grid", "--cmd", "--base-args", "--variant")}
+
+
+def _glue(argv: list[str]) -> list[str]:
+    """`kgkit sweep new --grid --lr=1e-3,3e-4`: an option whose value starts with '-' is passed as --grid=VALUE, which
+    argparse reads as a value (separate, it would take it for an option of its own)."""
+    opts = _GLUED.get(argv[0] if argv else "")
+    if not opts:
+        return argv
+    out, i = [], 0
+    while i < len(argv):
+        if argv[i] in opts and i + 1 < len(argv):
+            out.append(f"{argv[i]}={argv[i + 1]}")
+            i += 2
+        else:
+            out.append(argv[i])
+            i += 1
+    return out
 
 
 def main(argv=None):
@@ -2524,7 +3618,7 @@ def main(argv=None):
             stream.reconfigure(encoding="utf-8", errors="replace", line_buffering=True)
         except (AttributeError, ValueError):
             pass
-    args = build_parser().parse_args(argv)
+    args = build_parser().parse_args(_glue(list(sys.argv[1:] if argv is None else argv)))
     try:
         args.fn(args)
     except KeyError as e:
