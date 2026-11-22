@@ -68,7 +68,7 @@ public).
     by `adopt`; `init` adds `data/` to an existing `.gitignore`
 - `templates/`: tabular (GBDTs + linear / kNN / SVM / MLP), image and transformer training, offline inference
   kernel, a notebook cell that reports a session's resources to the pane, workspace CLAUDE.md
-- `evals/`: `claude plugin eval` suite (51 cases)
+- `evals/`: `claude plugin eval` suite (52 cases)
 
 ## Data and network access
 

@@ -40,7 +40,11 @@ Follow the `final-submission-selection` skill.
    instead (a file path works in place of an id; log the blend with `ledger add <name> lb-only --sub FILE`, or
    `ledger lb <id> <score> --sub FILE`). It prints their correlation and an *estimated* SD of the public LB gap
    from simulated labels; say it is an estimate, and `--ref <id>` calibrates it on a record that has OOF.
-3. Recommend pick 1 (best honest CV) and pick 2 (credible hedge on a different risk axis), with a
+3. Run `kgkit final pick`: it simulates the private leaderboard on the candidates' OOF and ranks every set of
+   k finals by the expected *best* score, with each set's correlation and its gain over the top k by CV. Report
+   the recommended set, the records it left out and why, and its caveats (time shift, an assumed private size).
+   When it says the sets are within its error, say so: the choice is then a judgement call, not a measured gain.
+   Then recommend pick 1 (best honest CV) and pick 2 (credible hedge on a different risk axis), with a
    short argument for each and what scenario each protects against. An LB-only blend can only be the hedge;
    a public-LB-fitted file cannot be either. A public-tuned file is not a hedge: if one is proposed, put the
    CV-chosen alternative next to it.

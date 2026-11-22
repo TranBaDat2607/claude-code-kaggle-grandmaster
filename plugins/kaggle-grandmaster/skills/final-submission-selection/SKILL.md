@@ -38,6 +38,12 @@ measured about 3x too small on a binary AUC task.
   sufficiently different and credible; or a version with/without the risky component (PL,
   leak, post-processing); or the full-data retrained version.
 - Avoid two near-identical submissions (correlation > 0.995) — the second pick buys nothing.
+- **Measure the hedge**: `kgkit final pick` resamples the candidates' OOF at the private LB's size and ranks every
+  set of k finals by E[best of the set], in the metric's own direction. A weaker candidate with errors of its own
+  often beats a near-twin of pick 1 as pick 2; the simulation shows by how much, and says when the sets are within
+  its error. It sees sampling luck only, not a shift (a later period, new data), and skips rl and optimization
+  competitions. It never reads the vault: the candidates must already have passed it. After the deadline `kgkit
+  final` shows where its set would have ranked.
 - LB-only candidates (blends with public submission files, forks with no OOF; `LB-only` in the ledger)
   have no honest CV. They can be the hedge, never both picks: keep a CV-backed candidate as pick 1.
   Their weights were chosen on the public LB, so expect them to lose some of their public edge on private.

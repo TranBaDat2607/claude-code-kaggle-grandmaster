@@ -14,6 +14,7 @@ Commands
   ledger      list | best | show | lb | add | tag | compare | noise | decide | baseline | lineage | import | phase |
               journey
   final       which submissions Kaggle has selected as finals, and whether auto-selection would pick a fitted file
+              (`final pick`: the set of finals with the best expected private score, simulated)
   standing    rank, team count, medal cut-offs and ties on the leaderboard Kaggle shows (private after the end)
   exp         finish  - compare a logged run with its baseline, record the decision, close its backlog idea
   backlog     add | list | set | render | fidelity  — the ranked idea backlog (human vs GPU hours)
@@ -433,6 +434,104 @@ def _import_scored(root, slug: str, rows: list[dict]) -> int:
     return added
 
 
+def _final_pick(root, st, a) -> None:
+    """`kgkit final pick [ID ...]`: the set of finals with the highest expected best private score, from a
+    simulation of the private leaderboard on the evaluation rows (``kgkit.finalpick``). Never selects on Kaggle."""
+    import numpy as np
+
+    from . import finalpick as FP
+    from . import finals as FN
+    from . import metrics as M
+    from . import vault as V
+    from .evalset import split_spec
+    from .experiment import Ledger
+
+    if st.task in FP.SKIP_TASKS:
+        print(f"kgkit final pick does not apply to a {st.task} competition: {FP.SKIP_TASKS[st.task]}.")
+        return
+    try:
+        m = M.get(st.metric)
+    except KeyError:
+        raise SystemExit(f"the competition metric {st.metric!r} is not in kgkit's metric registry: the simulation "
+                         "scores every candidate with the exact metric, so register it first (`kgkit.metrics`). A "
+                         "metric that cannot run offline (an LLM judge) cannot be simulated.")
+    led = Ledger(root)
+    try:
+        ids = [led.get(r)["id"] for r in a.ids] if a.ids else None
+    except KeyError as e:
+        raise SystemExit(str(e.args[0]))
+    cands, excluded = FP.pool(st, led.records(), V.gate(V.meta(root)), led.eval_key(), ids)
+    truth = _default_truth(root, st)
+    if not truth:
+        raise SystemExit("needs the evaluation labels: `kgkit config eval_truth=FILE:COL[,COL...]`")
+    y = _truth(truth)
+    preds = {}
+    for r in cands:
+        p = led.load_eval_pred(r["id"])
+        why = (f"{len(p)} predictions for {len(y)} labels" if len(p) != len(y) else
+               FP.metric_problem(m, np.asarray(p)))
+        if why:
+            excluded.append((r["id"], why))
+        else:
+            preds[r["id"]] = p
+    if not preds:
+        found = "; ".join(f"{i}: {w}" for i, w in excluded) or "no accepted baseline or honest candidate yet"
+        raise SystemExit(f"no candidate to simulate ({found})")
+    mask, dropped = FP.shared_rows(preds)
+    for i in dropped:
+        excluded.append((i, "predictions on a subset of the rows: name the others to compare on those rows"))
+        preds.pop(i)
+    y = y[mask]
+    preds = {i: np.asarray(p)[mask] for i, p in preds.items()}
+    groups, groups_note = None, ""
+    if st.eval_groups:
+        groups = _col(st.eval_groups).to_numpy()
+        if len(groups) != len(mask):
+            raise SystemExit(f"eval_groups has {len(groups)} rows, the labels {len(mask)}")
+        groups = groups[mask]
+        groups_note = f"resampled in whole groups ({st.eval_groups})"
+    elif st.task == "timeseries":
+        time_col = a.time_col or (V.meta(root) or {}).get("time_col")
+        order = np.arange(len(mask))
+        if time_col:
+            import pandas as pd
+
+            t = _col(f"{split_spec(truth)[0]}:{time_col}")
+            order = (t if pd.api.types.is_numeric_dtype(t) else pd.to_datetime(t)).to_numpy()
+        groups = FP.time_blocks(order[mask])
+        groups_note = (f"resampled in {len(set(groups.tolist()))} contiguous time blocks (by "
+                       f"{time_col or 'row order: pass --time-col'}); the private LB is usually a later period, a "
+                       "shift this cannot see")
+    if a.size:
+        size, others, note = a.size, [], f"private LB of {a.size:,} rows (--size)"
+    else:
+        n_test = None
+        for r in cands:
+            if r.get("test_path"):
+                try:
+                    n_test = int(np.load(Path(root) / r["test_path"], mmap_mode="r").shape[0])
+                    break
+                except (OSError, ValueError):
+                    continue
+        size, others, note = FP.private_sizes(n_test, st.public_lb_n, len(y), st.code_competition)
+    k = FN._picks(st)
+    try:
+        sim = FP.simulate(y, preds, m.name, groups=groups, size=size, n_draws=a.draws, seed=a.seed)
+        alts = {s: FP.rank_sets(FP.simulate(y, preds, m.name, groups=groups, size=s, n_draws=a.draws, seed=a.seed),
+                                k, m.greater_is_better) for s in others}
+    except ValueError as e:
+        raise SystemExit(f"could not simulate: {e}")
+    ranked = FP.rank_sets(sim, k, m.greater_is_better)
+    recs = {r["id"]: r for r in cands}
+    if len(preds) <= k:
+        note += f"; {len(preds)} candidate(s) for {k} finals: the set is all of them"
+    print("\n".join(FP.lines(sim, ranked, recs, note=note, others=alts, top_n=a.top, excluded=excluded,
+                            groups_note=groups_note)))
+    path = FP.save(root, st, ranked, sim, size)
+    print(f"\nsaved to {path.relative_to(root).as_posix()}: after the deadline `kgkit final` shows how this set "
+          "would have ranked")
+
+
 def cmd_final(a):
     """Ask Kaggle which submissions are selected as finals; with none selected, which ones its auto-selection would
     take, and whether any is a public-lb-fitted file. Records the selection in ``final_picks`` and stamps
@@ -457,6 +556,8 @@ def cmd_final(a):
         print(f"recorded: {rid} may be a final pick without a vault pass ({a.why.strip()}); written to "
               "reports/final-selection.md")
         return
+    if getattr(a, "action", None) == "pick":
+        return _final_pick(root, st, a)
     recs = Ledger(root).records()
     after = FN.past_deadline(st)
     if after:
@@ -466,7 +567,7 @@ def cmd_final(a):
         _import_scored(root, st.slug, data["scored"])
     ended = data is not None and (after or FN.revealed(data))
     if ended:
-        text, picks = FN.outcome(st, recs, data)
+        text, picks = FN.outcome(st, recs, data, FN.load_pick(root, st.slug))
         FN.save_standing(root, st, recs, data)  # for the session brief after the deadline
         FN.save_board(root, st.slug, data, by="final")
     elif after:
@@ -3436,6 +3537,17 @@ def build_parser() -> argparse.ArgumentParser:
                    help="record that this record may be a final pick without a vault pass (needs --why); it is "
                         "written to reports/final-selection.md")
     s.add_argument("--why", help="--accept-unvaulted: the reason, e.g. 'no checks left' or 'deadline'")
+    s.add_argument("action", nargs="?", choices=["pick"],
+                   help="pick: the set of finals with the highest expected best private score, simulated on the "
+                        "evaluation rows (offline; never selects on Kaggle)")
+    s.add_argument("ids", nargs="*", metavar="ID",
+                   help="pick: the candidates (default: the honest candidates and every model line's baseline)")
+    s.add_argument("--size", type=int, help="pick: rows of the private LB (default: test rows - public_lb_n)")
+    s.add_argument("--draws", type=int, help="pick: simulated private leaderboards (default 20,000 normal draws, or "
+                                             "2,000 / 500 bootstrap resamples)")
+    s.add_argument("--top", type=int, default=5, help="pick: sets to show")
+    s.add_argument("--seed", type=int, default=0)
+    s.add_argument("--time-col", help="pick, timeseries: the time column of the labels file, for the time blocks")
     s.set_defaults(fn=cmd_final)
 
     s = sub.add_parser("standing", help="rank, team count, medal cut-offs and ties on the leaderboard Kaggle shows",
