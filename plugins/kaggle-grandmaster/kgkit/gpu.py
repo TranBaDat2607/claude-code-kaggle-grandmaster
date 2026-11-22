@@ -1254,6 +1254,9 @@ def build_bundle(root: Path, include: list[str], baseline_dir: Path | None = Non
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED, compresslevel=9) as z:
         _add_tree(z, KGKIT_DIR, "kgkit", skip=BUNDLE_KGKIT_LOCAL_ONLY)
         z.write(root / S.STATE_DIR / S.STATE_FILE, f"{S.STATE_DIR}/{S.STATE_FILE}")
+        vault_meta = root / S.STATE_DIR / "vault.json"  # no labels: the remote records then carry the vault_hash
+        if vault_meta.is_file():
+            z.write(vault_meta, f"{S.STATE_DIR}/vault.json")
         for arc, blob in (extra or {}).items():
             z.writestr(arc, blob)
         for inc in include:
@@ -2268,7 +2271,7 @@ def _import_ledger(root: Path, out: Path, report: dict, kernel: str, version: in
         src_art = out / "artifacts" / old_id
         if src_art.is_dir():
             _merge_tree(src_art, root / "artifacts" / new_id)
-        for k in ("oof_path", "test_path", "holdout_path"):
+        for k in ("oof_path", "test_path", "holdout_path", "vault_path"):
             if rec.get(k):
                 rec[k] = rec[k].replace(f"artifacts/{old_id}/", f"artifacts/{new_id}/")
         if rec.get("submission"):

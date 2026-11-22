@@ -23,6 +23,9 @@ import pandas as pd
 from sklearn.model_selection import GroupKFold, KFold, StratifiedGroupKFold, StratifiedKFold
 
 STRATEGIES = ("auto", "kfold", "stratified", "group", "stratified_group", "multilabel")
+# The fold of a row in the sealed vault (kgkit.vault.VAULT): never trained on, never validated. -1 is different:
+# trained on by every fold, scored by none.
+VAULT = -2
 
 
 def _is_classification_target(y: pd.Series, max_classes: int = 50) -> bool:
@@ -228,11 +231,11 @@ def purged_kfold_splits(
 
 
 def split_indices(folds: Sequence[int]) -> Iterator[tuple[int, np.ndarray, np.ndarray]]:
-    """Yield (fold, train_idx, valid_idx) from a fold-id column; rows with fold < 0
-    (e.g. held out / excluded) are never used for validation but are still trained on."""
+    """Yield (fold, train_idx, valid_idx) from a fold-id column; rows with fold -1 (or another negative fold) are
+    never used for validation but are still trained on. Rows in the sealed vault (``VAULT``) are in neither."""
     folds = np.asarray(folds)
     for f in sorted(set(folds[folds >= 0].tolist())):
-        yield f, np.flatnonzero(folds != f), np.flatnonzero(folds == f)
+        yield f, np.flatnonzero((folds != f) & (folds != VAULT)), np.flatnonzero(folds == f)
 
 
 def fold_report(

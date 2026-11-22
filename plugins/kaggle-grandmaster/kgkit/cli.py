@@ -449,6 +449,14 @@ def cmd_final(a):
     st = S.load()
     if st is None or root is None:
         raise SystemExit("not inside a kaggle-grandmaster workspace (no .kaggle-gm/competition.json)")
+    from . import vault as V
+
+    if getattr(a, "accept_unvaulted", None):
+        rid = Ledger(root).get(a.accept_unvaulted)["id"]
+        V.accept_unvaulted(root, rid, a.why or "")
+        print(f"recorded: {rid} may be a final pick without a vault pass ({a.why.strip()}); written to "
+              "reports/final-selection.md")
+        return
     recs = Ledger(root).records()
     after = FN.past_deadline(st)
     if after:
@@ -479,6 +487,10 @@ def cmd_final(a):
         st.save(root)
         print(f"intended picks {', '.join(st.final_picks)} were not selected on Kaggle" if ended else
               f"intended picks {', '.join(st.final_picks)} are not selected on Kaggle yet")
+    if not (ended or after):
+        blocked = FN.blocked_line(FN.selection(S.load(root), recs, (), V.gate(V.meta(root))))
+        if blocked:
+            print(blocked)
     print()
     if ended or after:
         print("next: `python -m kgkit ledger sync-lb` attaches the public and private scores to the ledger, then "
@@ -799,6 +811,11 @@ def cmd_status(a):
 
     if PM.status_line(root):
         print(PM.status_line(root))
+    from . import vault as V
+
+    vault_line = V.status_line(root, recs)  # the same line as the session brief
+    if vault_line:
+        print(vault_line)
     print(f"experiments logged: {len(recs)}")
     if recs:
         best = led.best(1)
@@ -867,22 +884,162 @@ def cmd_status(a):
 
 def cmd_folds(a):
     from .cv import assign_folds, fold_report
+    from . import state as S
+    from . import vault as V
 
     df = _read(a.train)
     target = a.target.split(",") if a.target and "," in a.target else a.target
+    root = S.find_root()
+    spec = {"train": a.train, "strategy": a.strategy, "target": a.target, "group": a.group,
+            "n_splits": a.n_splits, "seed": a.seed, "id_col": a.id_col, "out": a.out}
+    report_target = target if isinstance(target, str) else None
+    if root is not None and V.sealed(root):  # the train file has no vault rows: the split keeps naming them
+        _folds_sealed(root, df, spec, a, report_target)
+        return
+    vault = None if getattr(a, "no_vault", False) else getattr(a, "vault", None)
+    if vault and root is not None:
+        why = _vault_skip(root, df, a, vault, target)
+        if why is None:
+            m = V.seal(root, vault, train=a.train, target=a.target, group=a.group, time_col=a.time_col,
+                       id_col=a.id_col, seed=a.vault_seed, budget=a.vault_budget, spec=spec, folds_out=a.out)
+            rest = _read(a.train)
+            folds = pd_read_folds(root, m)
+            rest["fold"] = folds
+            print(fold_report(rest, "fold", target=report_target, group=a.group))
+            print(f"\nwrote {a.out} ({len(rest)} rows in {a.n_splits} folds + {m['n_rows']} vault rows, "
+                  f"strategy={a.strategy}, seed={a.seed})")
+            print(_sealed_text(root, m))
+            return
+        print(why)
+    elif vault:
+        print("note: --vault needs a competition workspace (`kgkit init`): no vault sealed")
     folds = assign_folds(df, a.n_splits, a.strategy, target=target, group=a.group, seed=a.seed)
     df["fold"] = folds
     keep = [c for c in [a.id_col] if c and c in df.columns] + ["fold"]
     df[keep].to_csv(a.out, index=False)
+    if root is not None:  # remember how the split was made, so `kgkit recheck` can re-draw it with another seed
+        (root / S.STATE_DIR / "folds_spec.json").write_text(json.dumps(spec, indent=1), encoding="utf-8")
+    print(fold_report(df, "fold", target=report_target, group=a.group))
+    print(f"\nwrote {a.out} ({len(df)} rows, strategy={a.strategy}, seed={a.seed})")
+
+
+def pd_read_folds(root, m: dict):
+    """The folds of the visible training rows, from the split a seal wrote (its vault rows left out)."""
+    import pandas as pd
+
+    from . import vault as V
+
+    f = pd.read_csv(root / m["folds"])
+    return f.loc[f["fold"] != V.VAULT, "fold"].to_numpy()
+
+
+def _vault_skip(root, df, a, frac: float, target) -> str | None:
+    """Why `kgkit folds --vault` does not seal here (and what to do), or None to seal."""
+    from . import vault as V
+
+    if not a.id_col or a.id_col not in df.columns:
+        return ("note: no vault sealed: it needs an id column (--id-col), which names the vault rows in the split so a "
+                "remote run on the original data can drop them")
+    if V._records_in_play(root):
+        return ("note: no vault sealed: records are already logged on the current folds, and sealing re-draws the "
+                "split. `kgkit vault seal --reset-comparisons` seals one anyway")
+    small = V.small_reason(df, frac, target, a.group)
+    if small:
+        return (f"SMALL DATA: no vault sealed yet: {small}, which may be too noisy to judge anything. Measure it "
+                "first: train two quick pipelines on these folds (the template, and the template with --model "
+                "linear), then `kgkit vault size --exp <template run> --vs <linear run>`: it says which fraction "
+                "confirms a real gain. Ask the user before sealing a larger fraction (`kgkit vault seal --frac F`) or "
+                "none.")
+    return None
+
+
+def _sealed_text(root, m: dict) -> str:
+    from . import vault as V
+
+    unit = f" ({m['n_units']} {m['unit']})" if m.get("unit") != "rows" else ""
+    pre = (f"\n{m['pre_vault_records']} earlier record(s) marked pre_vault: they scored rows the vault took, so none "
+           "is a baseline, the best CV or a final pick again; re-run the baseline on the new split"
+           if m.get("pre_vault_records") else "")
+    zips = V._zip_note(root)
+    return (f"\nVAULT sealed: {m['n_rows']} rows{unit}, {float(m['frac']):.0%} of the training set. Their labels "
+            f"left the workspace (the hook denies reading them); data/vault.csv has their features, and the "
+            f"templates predict it like the test set. `kgkit vault check <id>` answers PASS or FAIL only, "
+            f"{m['budget']} checks in all: spend them on final candidates, after the CV gate and `kgkit recheck`."
+            + pre + (f"\n{zips}" if zips else ""))
+
+
+def _folds_sealed(root, df, spec: dict, a, report_target) -> None:
+    """`kgkit folds` with a sealed vault: re-draw the visible rows' folds, keep the vault rows as VAULT."""
+    import pandas as pd
+
+    from . import vault as V
+    from .cv import fold_report
+
+    m = V.meta(root)
+    old = pd.read_csv(root / m["folds"])
+    ids = old.loc[old["fold"] == V.VAULT, m["id_col"]].to_numpy()
+    spec = {**spec, "id_col": spec.get("id_col") or m["id_col"], "out": a.out,
+            "vault": {"frac": m["frac"], "seed": m["seed"], "time_col": m.get("time_col")}}
+    folds = V.write_folds(root, df, spec, a.out, vault_ids=ids)
+    (root / ".kaggle-gm" / "folds_spec.json").write_text(json.dumps(spec, indent=1), encoding="utf-8")
+    df["fold"] = folds
+    print(fold_report(df, "fold", target=report_target, group=a.group))
+    print(f"\nwrote {a.out} ({len(df)} rows + the {len(ids)} vault rows, strategy={a.strategy}, seed={a.seed}); the "
+          "vault stays sealed")
+
+
+def cmd_vault(a):
+    """`kgkit vault seal|size|check|status|open`: the sealed vault split (#141, kgkit.vault)."""
     from . import state as S
+    from . import vault as V
+    from .experiment import Ledger
 
     root = S.find_root()
-    if root is not None:  # remember how the split was made, so `kgkit recheck` can re-draw it with another seed
-        spec = {"train": a.train, "strategy": a.strategy, "target": a.target, "group": a.group,
-                "n_splits": a.n_splits, "seed": a.seed, "id_col": a.id_col, "out": a.out}
-        (root / S.STATE_DIR / "folds_spec.json").write_text(json.dumps(spec, indent=1), encoding="utf-8")
-    print(fold_report(df, "fold", target=target if isinstance(target, str) else None, group=a.group))
-    print(f"\nwrote {a.out} ({len(df)} rows, strategy={a.strategy}, seed={a.seed})")
+    if root is None:
+        raise SystemExit("not inside a competition workspace (`kgkit init`)")
+    if a.action == "seal":
+        m = V.seal(root, a.frac, train=a.train, target=a.target, group=a.group, time_col=a.time_col,
+                   id_col=a.id_col, seed=a.seed, budget=a.budget, reset=a.reset_comparisons,
+                   folds_out=a.out)
+        print(_sealed_text(root, m))
+        if m.get("mode") == "holdout":
+            print("holdout+lb: the holdout file lost the vault rows (earlier holdout scores are not comparable). Log "
+                  "each pipeline's predictions on data/vault.csv's ids: `kgkit ledger add <name> auto --pred ... "
+                  "--vault-pred FILE:ID,PRED`")
+    elif a.action == "size":
+        print(V.format_size(V.size(root, a.exp, a.vs, tuple(float(x) for x in a.fracs.split(",")))))
+    elif a.action == "check":
+        print(V.format_check(V.check(root, a.id, a.against)))
+    elif a.action == "status":
+        line = V.status_line(root, Ledger(root).records())
+        if not line:
+            print("no vault in this workspace: `kgkit folds ... --vault 0.1` (a new workspace) or `kgkit vault seal`")
+            return
+        print(line)
+        m = V.meta(root)
+        print(f"mode {m.get('mode')}, sealed {m.get('sealed_at')}, {m.get('n_rows')} rows, vault_hash "
+              f"{m.get('vault_hash')}")
+        for c in V.checks(m):
+            print(f"  {c.get('time')}  {c.get('exp')} vs {c.get('against')}"
+                  + (f" (baseline {c['baseline']})" if c.get("baseline") else "") + f": {c.get('result')}")
+        for i, why in V.overrides(root).items():
+            print(f"  accepted without a pass: {i} ({why})")
+    elif a.action == "open":
+        st = S.load(root)
+        m = V.open_vault(root)
+        print(f"vault opened: its {m['n_rows']} rows are back in "
+              + ("the holdout file" if m.get("mode") == "holdout" else
+                 f"{m['train']} and train every fold (fold -1 in the split, scored by none)")
+              + "; no more checks.")
+        led = Ledger(root)
+        for ref in (st.final_picks if st else []) or []:
+            try:
+                r = led.get(ref)
+            except KeyError:
+                continue
+            print(f"  retrain {r['id']} on all rows: {r.get('cmd') or '(no command on file: re-run its pipeline)'}")
+        print("The retrained runs are what ship; their CV is on the same scored rows but they trained on more, so "
+              "submit them as the finals' files.")
 
 
 def cmd_eda(a):
@@ -990,6 +1147,7 @@ def cmd_ledger(a):
         P.main(led, a)
     elif a.action == "add":
         extra = {"variant": a.variant} if a.variant else {}
+        extra.update(_vault_pred_arg(a))
         if a.sub:
             extra["submission"] = a.sub
         if a.track:
@@ -1223,6 +1381,27 @@ def _ledger_sync_lb(led, a) -> None:
         print(agreement)
     if private:
         print("next: python -m kgkit ledger predictiveness   (which signal predicted the private leaderboard)")
+
+
+def _vault_pred_arg(a) -> dict:
+    """`ledger add --vault-pred FILE[:COLS]`: predictions on the sealed vault's rows, put in data/vault.csv's order by
+    the id column. They are stored for `kgkit vault check` and never scored here."""
+    spec = getattr(a, "vault_pred", None)
+    if not spec:
+        return {}
+    from . import state as S
+    from . import vault as V
+
+    root = S.find_root()
+    m = V.meta(root)
+    if not V.sealed(root):
+        raise SystemExit("--vault-pred: no sealed vault in this workspace (`kgkit vault status`)")
+    feats = root / V.FEATURES
+    p = _preds(spec, f"{feats}:{m['id_col']}", m["id_col"])
+    if len(p) != int(m["n_rows"]):
+        raise SystemExit(f"{spec} has {len(p)} rows but the vault has {m['n_rows']} (data/vault.csv): predict every "
+                         "row of it, with its id column so the rows can be matched")
+    return {"vault_pred": p}
 
 
 def _ledger_add_preds(led, a, extra: dict) -> dict:
@@ -1994,7 +2173,7 @@ def cmd_blend(a):
         if not a.folds:
             raise SystemExit(f"--method {a.method} needs --folds FILE:COLUMN (meta-models are fit out-of-fold)")
         folds = _col(a.folds).to_numpy()
-        tests = {e: led.load_test(e) for e in oofs}
+        tests, n_test = _tests_with_vault(led, list(oofs))
         if a.method == "stack":
             res = E.multi_level_stack(oofs, tests, y, folds, metric, n_layers=a.levels)
             for i, ls in enumerate(res["layer_scores"], start=2):
@@ -2011,10 +2190,11 @@ def cmd_blend(a):
         print(f"meta OOF {metric}: {score:.6f} (out-of-fold; stacking on the same folds is still slightly optimistic)")
         if res.get("final_honest") is not None:
             print(f"honest (nested) final-blend {metric}: {res['final_honest']:.6f}")
-        rec = led.log(a.name, score, model="blend", params=params, oof=res["oof"], test_pred=res["test"],
-                      notes=f"{a.method} of {', '.join(oofs)}", metric=metric, parent=parent)
+        test_pred, vault_pred = _split_vault(res["test"], n_test)
+        rec = led.log(a.name, score, model="blend", params=params, oof=res["oof"], test_pred=test_pred,
+                      notes=f"{a.method} of {', '.join(oofs)}", metric=metric, parent=parent, vault_pred=vault_pred)
         print(f"logged {rec['id']}")
-        _write_blend_sub(led, rec, res["test"], a)
+        _write_blend_sub(led, rec, test_pred, a)
         _blend_compare(led, rec, a, in_sample=False)
         return
     if a.method == "hill":
@@ -2033,19 +2213,47 @@ def cmd_blend(a):
         print(f"honest (nested) blended {metric}: {honest['oof_score']:.6f}")
     method = "rank" if a.method == "rank" else "mean"
     blended_oof = E.blend(oofs, res["weights"], method)
-    tests = {e: led.load_test(e) for e in res["weights"]}
-    blended_test = E.blend(tests, res["weights"], method)
+    tests, n_test = _tests_with_vault(led, list(res["weights"]))
+    blended_test, vault_pred = _split_vault(E.blend(tests, res["weights"], method), n_test)
     fitted = a.method in ("hill", "weights")  # rank: equal weights, nothing fit on the OOFs
     nested = fitted and honest is not None  # the logged OOF and CV are the nested ones: not fit to the rows they score
     params = {"weights": res["weights"], "method": a.method, "members": ids, "in_sample_cv": float(res["score"]),
               "oof": "nested" if nested else ("in-sample" if fitted else "equal weights")}
     rec = led.log(a.name, honest["oof_score"] if nested else res["score"], model="blend", params=params,
                   oof=honest["oof"] if nested else blended_oof, test_pred=blended_test,
-                  notes=f"blend of {', '.join(a.exp)}", metric=metric, parent=parent)
+                  notes=f"blend of {', '.join(a.exp)}", metric=metric, parent=parent, vault_pred=vault_pred)
     print(f"logged {rec['id']}" + (" (its CV and OOF are the nested blend's; the test prediction uses the weights "
                                    "fit on every fold)" if nested else ""))
     _write_blend_sub(led, rec, blended_test, a)
     _blend_compare(led, rec, a, in_sample=fitted and not nested)
+
+
+def _tests_with_vault(led, members: list[str]) -> tuple[dict, int | None]:
+    """The members' test predictions; when every member predicted the sealed vault, each with its vault predictions
+    appended (so a blend or a meta-model is applied to both alike), and the number of test rows. Else (tests, None)."""
+    import numpy as np
+
+    from . import vault as V
+
+    tests = {e: led.load_test(e) for e in members}
+    h = V.current_hash(led.root)
+    recs = [led.get(e) for e in members]
+    if not h or not all(r.get("vault_path") and r.get("vault_hash") == h for r in recs):
+        if h:
+            print("note: not every member predicted the vault: the blend has no vault predictions, so it cannot be "
+                  "vault-checked (re-run the members with this kgkit's templates)")
+        return tests, None
+    n = {len(t) for t in tests.values()}
+    if len(n) != 1:
+        return tests, None
+    return {e: np.concatenate([tests[e], led.load_vault(e)]) for e in members}, n.pop()
+
+
+def _split_vault(pred, n_test: int | None):
+    """(test predictions, vault predictions or None) of a prediction made on tests from ``_tests_with_vault``."""
+    if n_test is None or pred is None:
+        return pred, None
+    return pred[:n_test], pred[n_test:]
 
 
 def _blend_compare(led, rec: dict, a, in_sample: bool) -> None:
@@ -3018,6 +3226,8 @@ _LEDGER_OPTIONS = [
                           "baseline: start the line")),
     ("--pred", dict(help="FILE:COL[,COL...] or .npy predictions on the evaluation set (holdout+lb: the holdout; else "
                          "OOF); the score is recomputed, the predictions stored and compared with the baseline")),
+    ("--vault-pred", dict(help="FILE:COL[,COL...] (with the id column) or .npy predictions on the sealed vault's rows "
+                               "(data/vault.csv): stored for `kgkit vault check`, never scored here")),
     ("--variant", dict(help="name shared by re-runs of one pipeline with other seeds (seed noise)")),
     ("--units", dict(help="a unit table (CSV / parquet / .npz with an id column): one row per image, study, "
                           "tomogram, query, problem or match, with the values the metric is built from (score; "
@@ -3060,7 +3270,8 @@ _LEDGER_ACTIONS = {
                                                "'lb-only': no validation score (fork of public notebooks, blend "
                                                "with public files)"),
                                   ("notes", "*", "free text")],
-            "--parent --track --tag --variant --notes --pred --units --units-agg --units-param --sub " + _PAIRED),
+            "--parent --track --tag --variant --notes --pred --vault-pred --units --units-agg --units-param --sub "
+            + _PAIRED),
     "tag": ("add tags to a record, or remove them (--remove): mark a logged file public-lb-fitted or public-tuned",
             [_EXP, ("tag", "+", "tags to add (or remove)")], "--remove"),
     "compare": ("paired comparison of two experiments (or artifacts/<name> folders of per-fold OOFs)",
@@ -3219,7 +3430,12 @@ def build_parser() -> argparse.ArgumentParser:
                                    "the selection in competition.json (final_picks). After the deadline: the private "
                                    "scores of the finals (or of the pool Kaggle picked from when none was selected), "
                                    "the team's rank, the medal zone computed from Kaggle's progression table, and the "
-                                   "best private score of any submission.")
+                                   "best private score of any submission. With a sealed vault (`kgkit vault`), a "
+                                   "pick that has not passed it is BLOCKED.")
+    s.add_argument("--accept-unvaulted", metavar="ID",
+                   help="record that this record may be a final pick without a vault pass (needs --why); it is "
+                        "written to reports/final-selection.md")
+    s.add_argument("--why", help="--accept-unvaulted: the reason, e.g. 'no checks left' or 'deadline'")
     s.set_defaults(fn=cmd_final)
 
     s = sub.add_parser("standing", help="rank, team count, medal cut-offs and ties on the leaderboard Kaggle shows",
@@ -3240,7 +3456,48 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--seed", type=int, default=42)
     s.add_argument("--id-col")
     s.add_argument("--out", default="folds.csv")
+    s.add_argument("--vault", type=float, metavar="FRAC",
+                   help="also seal a vault of this fraction of the rows (0.1 = 10%%) in a new workspace: their labels "
+                        "leave the workspace, and `kgkit vault check` judges final candidates on them, pass/fail only "
+                        "(see `kgkit vault -h`). With little data it measures first (SMALL DATA)")
+    s.add_argument("--no-vault", action="store_true", help="never seal a vault (overrides --vault)")
+    s.add_argument("--time-col", help="--vault: the vault is the latest rows by this column")
+    s.add_argument("--vault-seed", type=int, default=141, help="--vault: the seed of the vault draw")
+    s.add_argument("--vault-budget", type=int, default=20, help="--vault: how many checks the vault answers")
     s.set_defaults(fn=cmd_folds)
+
+    s = sub.add_parser("vault", help="a sealed held-out split the agent never sees, checked pass/fail before a "
+                                     "final candidate (#141)",
+                       description="The vault: about 10%% of the training rows, drawn the way the folds are, whose "
+                                   "labels leave the workspace (~/.kaggle-gm/vault/, which the hook denies reading). "
+                                   "Templates predict data/vault.csv like the test set; `check` answers PASS or FAIL "
+                                   "only, from a fixed budget. Gate of a final candidate: the CV gate, then "
+                                   "`kgkit recheck`, then `vault check`.")
+    vs = s.add_subparsers(dest="action", required=True)
+    v = vs.add_parser("seal", help="seal a vault (a workspace with records needs --reset-comparisons)")
+    v.add_argument("--frac", type=float, default=0.10, help="share of the rows (holdout+lb: of the holdout)")
+    v.add_argument("--train", default="data/train.csv")
+    v.add_argument("--target", help="default: the folds recipe, else competition.json")
+    v.add_argument("--group", default=None, help="default: the folds recipe's group")
+    v.add_argument("--time-col", help="the vault is the latest rows by this column")
+    v.add_argument("--id-col", help="default: the folds recipe, else competition.json")
+    v.add_argument("--seed", type=int, default=141)
+    v.add_argument("--budget", type=int, default=20, help="how many checks it answers (default 20)")
+    v.add_argument("--out", default="data/folds.csv", help="the split file to re-draw")
+    v.add_argument("--reset-comparisons", action="store_true",
+                   help="seal although records are logged: they are marked pre_vault (never a baseline, the best CV "
+                        "or a final pick), as they scored rows the vault takes")
+    v = vs.add_parser("size", help="before sealing with little data: how noisy a vault of each fraction would be, "
+                                   "measured on two quick runs' OOF")
+    v.add_argument("--exp", required=True, help="the stronger quick run (e.g. the template)")
+    v.add_argument("--vs", required=True, help="the weaker one (e.g. --model linear)")
+    v.add_argument("--fracs", default="0.1,0.15,0.2,0.25,0.3")
+    v = vs.add_parser("check", help="spend one check: PASS or FAIL, never a score")
+    v.add_argument("id", help="the candidate")
+    v.add_argument("--against", help="where its gain starts (default: the oldest ancestor that predicted the vault)")
+    vs.add_parser("status", help="the vault, the checks left and what passed")
+    vs.add_parser("open", help="after the final picks: put the vault rows back so the picks retrain on all rows")
+    s.set_defaults(fn=cmd_vault)
 
     s = sub.add_parser("eda", help="quick EDA report")
     s.add_argument("train")

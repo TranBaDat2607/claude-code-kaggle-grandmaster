@@ -78,7 +78,7 @@ def seed_everything(seed: int = 42, deterministic_torch: bool = False) -> None:
         if deterministic_torch:
             torch.backends.cudnn.deterministic = True
             torch.backends.cudnn.benchmark = False
-    except ImportError:
+    except (ImportError, OSError):  # OSError: a torch whose DLLs fail to load (Windows) must not stop a GBDT run
         pass
 
 
@@ -342,6 +342,7 @@ class Ledger:
         holdout_pred: np.ndarray | None = None,
         track: str | None = None,
         units=None,
+        vault_pred: np.ndarray | None = None,
         **extra,
     ) -> dict:
         """Append an experiment. ``folds_hash`` fingerprints the CV split (``folds`` if given, else the fold
@@ -351,7 +352,9 @@ class Ledger:
         workspace's labelled holdout (``eval_truth``), fingerprinted by ``eval_hash``, so two records can be
         compared paired on it. ``track``: the model line it starts (gbdt, cnn, ...); left out, it is its parent's
         line (a blend's: ``ensemble``; no parent: ``main``). ``units``: a ``kgkit.units.Units`` table, stored
-        beside the arrays (see :meth:`log_units`)."""
+        beside the arrays (see :meth:`log_units`). ``vault_pred``: predictions on the sealed vault's rows
+        (``data/vault.csv``, ``kgkit.vault``), fingerprinted by ``vault_hash``; only ``kgkit vault check`` scores
+        them."""
         if track:
             E.check_track(track)
         from . import screen as SC
@@ -400,7 +403,11 @@ class Ledger:
             **_git_info(self.root, exp_id),
             **_jsonable(extra),
         }
-        arrays = {"oof": oof, "test": test_pred, "holdout": holdout_pred}
+        arrays = {"oof": oof, "test": test_pred, "holdout": holdout_pred, "vault": vault_pred}
+        if vault_pred is not None:
+            from . import vault as V
+
+            rec["vault_hash"] = V.current_hash(self.root)
         if any(v is not None for v in arrays.values()):
             d = self.artifacts / exp_id
             d.mkdir(parents=True, exist_ok=True)
@@ -495,6 +502,20 @@ class Ledger:
                 self._write_all(recs)
                 return r
         raise KeyError(exp_id)
+
+    @_locked
+    def mark(self, exp_ids: Sequence[str], **fields) -> int:
+        """Set ``fields`` on several records in one rewrite; returns how many changed."""
+        want = set(exp_ids)
+        recs = self.records()
+        n = 0
+        for r in recs:
+            if r["id"] in want:
+                r.update(_jsonable(fields))
+                n += 1
+        if n:
+            self._write_all(recs)
+        return n
 
     def attach_lb(self, exp_id: str, public: float | None = None, private: float | None = None,
                   submission: str | None = None) -> dict:
@@ -704,6 +725,10 @@ class Ledger:
     def load_test(self, exp_id: str) -> np.ndarray:
         return np.load(self.root / self.get(exp_id)["test_path"])
 
+    def load_vault(self, exp_id: str) -> np.ndarray:
+        """Predictions on the sealed vault's rows (``kgkit.vault``); KeyError when the record has none."""
+        return np.load(self.root / self.get(exp_id)["vault_path"])
+
     def _gib(self) -> bool:
         st = S.load(self.root)
         if st is not None:
@@ -714,6 +739,7 @@ class Ledger:
         holdout = self._holdout()
         recs = [r for r in self.records() if r.get(key) is not None and not r.get("recheck")
                 and not r.get("replica_of")  # a seed re-run measures noise: its luckier score is no best CV
+                and not r.get("pre_vault")  # scored rows that the vault took since (kgkit.vault)
                 and (key != "cv" or has_own_cv(r, holdout))]
         return sorted(recs, key=lambda r: r[key], reverse=self._gib())[:n]
 
