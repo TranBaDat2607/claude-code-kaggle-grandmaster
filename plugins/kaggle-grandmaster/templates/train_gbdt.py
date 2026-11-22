@@ -38,6 +38,8 @@ What it guarantees:
     OOF with NaN elsewhere and writes no submission; it is then compared with the baseline's control (#134)
   * under KG_SEED + KG_REPLICA_OF: trains with new seeds and logs a seed replica of that record, which measures
     the seed noise every paired comparison then adds (`kgkit ledger seed-noise` prints the command)
+  * with a sealed vault (`kgkit vault`): its rows are predicted like test rows and logged as vault_pred for
+    `kgkit vault check`; nothing trains or scores on them (a remote run drops the split's fold = VAULT rows)
 """
 
 from __future__ import annotations
@@ -70,6 +72,10 @@ try:  # a kgkit vendored before #134 has no screens: every run is then a full ru
 except ImportError:
     SC = None
 from kgkit.thresholds import OptimizedRounder, best_threshold
+try:  # a kgkit vendored before #141 has no vault: its split has no VAULT rows
+    from kgkit.cv import VAULT
+except ImportError:
+    VAULT = -2
 
 # ----------------------------------------------------------------------------- config
 CONFIG = dict(
@@ -78,6 +84,7 @@ CONFIG = dict(
     test="data/test.csv",
     sample="data/sample_submission.csv",
     folds=os.environ.get("KG_FOLDS_FILE", "data/folds.csv"),  # kgkit recheck points this at a re-drawn split
+    vault="data/vault.csv",  # the sealed vault's features (`kgkit vault`): predicted like the test set
     id_col=None,          # default: from .kaggle-gm/competition.json
     target=None,          # default: from .kaggle-gm/competition.json
     metric=None,          # default: from .kaggle-gm/competition.json
@@ -370,6 +377,7 @@ def main():
         train["fold"] = folds_df["fold"].to_numpy()
     if train["fold"].isna().any():
         raise SystemExit("some training rows have no fold — regenerate folds.csv")
+    train, test, n_test = with_vault(cfg, train, test, skip=args.smoke)
     es_how, es_groups, es_times = stop_slice(cfg, train)
     train, test = add_features(train, test)
 
@@ -447,6 +455,9 @@ def main():
     va_mask = np.zeros(len(train), dtype=bool)  # the rows a fold scored
     for _, _, va in fold_list:
         va_mask[va] = True
+    vault_pred = None
+    if len(test) > n_test:  # the vault rows rode along with the test rows: their predictions go apart
+        vault_pred, test_pred, test = test_pred[n_test:], test_pred[:n_test], test.iloc[:n_test]
 
     # ------------------------------------------------------------ metric-space conversion
     # raw model outputs -> what the metric (and submission) expects; the ledger keeps the raw outputs
@@ -483,13 +494,14 @@ def main():
         run_params.update(early_stopping_on=es_on, es_fraction=cfg["es_fraction"] if es_on == "inner" else None,
                           refit=bool(cfg["refit"] and es_on == "inner"),
                           es_slice=es_how if es_on == "inner" else None)
-    if screen is not None:  # NaN where no fold of the screen predicted: compared on the rows it scored
+    if screen is not None or not va_mask.all():  # NaN where no fold predicted (a screen, fold -1 rows)
         oof = np.where(va_mask if oof.ndim == 1 else va_mask[:, None], oof, np.nan)
     rec = Ledger().log(
         cfg["name"], cv, fold_scores=fold_scores, params=run_params, parent=args.parent, track=args.track,
         features=feats, model=kind, notes=cfg["notes"], oof=oof, test_pred=None if screen is not None else test_pred,
         task=task, seeds=cfg["seeds"], best_iterations=best_iters, runtime_s=round(time.time() - t0, 1),
         train_scores=train_scores, oof_selection="scored-fold" if es_on == "scored-fold" else "independent",
+        **({"vault_pred": vault_pred} if vault_pred is not None else {}),
     )
     if screen is None:
         write_submission(cfg, rec, test, task, classes, n_classes, metric, test_pred, test_m)
@@ -497,6 +509,28 @@ def main():
         print(f"logged {rec['id']} (screen {screen.name}: no submission)")
     if report_comparison is not None:
         report_comparison(rec, parent=args.parent, truth=f"{cfg['train']}:{target}")
+
+
+def with_vault(cfg, train: pd.DataFrame, test: pd.DataFrame, skip: bool = False):
+    """(train without the sealed vault's rows, test with them appended, the number of real test rows). The vault
+    rows are predicted by every fold model like test rows and logged apart as ``vault_pred`` for `kgkit vault
+    check`; nothing ever trains or scores on them. A remote run sees the original train.csv, where the split marks
+    them ``fold = VAULT``; locally train.csv has none of them and data/vault.csv has their features. A screen or a
+    smoke run skips them."""
+    in_vault = (train["fold"] == VAULT).to_numpy()
+    rows = train.loc[in_vault].drop(columns=["fold"]) if in_vault.any() else None
+    train = train.loc[~in_vault].reset_index(drop=True)
+    n_test = len(test)
+    screen = SC.active() if SC is not None else None
+    if skip or screen is not None or not hasattr(Ledger, "load_vault"):  # an older kgkit cannot store them
+        return train, test, n_test
+    if rows is None and Path(cfg["vault"]).is_file():
+        rows = pd.read_csv(cfg["vault"])
+    if rows is None or not len(rows):
+        return train, test, n_test
+    cols = [c for c in test.columns if c in rows.columns]
+    print(f"vault: {len(rows)} sealed rows predicted like the test set (never trained or scored on)")
+    return train, pd.concat([test, rows[cols]], ignore_index=True), n_test
 
 
 def write_submission(cfg, rec, test, task, classes, n_classes, metric, test_pred, test_m):

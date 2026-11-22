@@ -32,6 +32,9 @@ Early stopping, done legally (#119): --es-holdout 0.05 holds 5% of each fold's t
 (stratified, or whole groups with group_col), keeps the epoch that scores best on it and stops after es_patience
 epochs without a gain there. The scored fold chooses nothing, so the OOF stays honest.
 
+A sealed vault (`kgkit vault`): its rows (training images) are predicted by every fold model like the test set and
+logged as vault_pred for `kgkit vault check`; nothing trains or scores on them.
+
 Pruning (kgkit.budget): on Kaggle with `gpu build --prune-against`, a run that trails the control's curve stops
 early. With select="last" it also stops when the current score trails the control's and has fallen below the run's
 own peak for two evaluations (it ties early, then declines); --select best judges the best epoch only.
@@ -75,6 +78,10 @@ try:  # a kgkit vendored before #134 has no screens: every run is then a full ru
     from kgkit import screen as SC
 except ImportError:
     SC = None
+try:  # a kgkit vendored before #141 has no vault: its split has no VAULT rows
+    from kgkit.cv import VAULT
+except ImportError:
+    VAULT = -2
 
 CONFIG = dict(
     name="img_baseline",
@@ -82,6 +89,7 @@ CONFIG = dict(
     test="data/test.csv",
     sample="data/sample_submission.csv",
     folds=os.environ.get("KG_FOLDS_FILE", "data/folds.csv"),  # kgkit recheck points this at a re-drawn split
+    vault="data/vault.csv",     # the sealed vault's rows (`kgkit vault`): predicted like the test set
     image_dir="data/train_images",
     test_image_dir="data/test_images",
     path_col="image_path",      # column with file names (relative to image_dir)
@@ -287,6 +295,24 @@ def holdout_config(cfg, select_arg=None):
     return cfg
 
 
+def split_vault(cfg, train, skip=False):
+    """(train without the sealed vault's rows, the vault rows to predict or None). Every fold model predicts them
+    like test rows, logged apart as ``vault_pred`` for `kgkit vault check`; nothing trains or scores on them. A
+    remote run sees the original train.csv, where the split marks them ``fold = VAULT``; locally train.csv has none
+    of them and data/vault.csv lists them. A screen, a smoke run and a bench skip them."""
+    in_vault = (train["fold"] == VAULT).to_numpy()
+    rows = train.loc[in_vault] if in_vault.any() else None
+    train = train.loc[~in_vault].reset_index(drop=True)
+    if skip or (SC is not None and SC.active() is not None) or not hasattr(Ledger, "load_vault"):
+        return train, None
+    if rows is None and Path(cfg["vault"]).is_file():
+        rows = pd.read_csv(cfg["vault"])
+    if rows is None or not len(rows):
+        return train, None
+    print(f"vault: {len(rows)} sealed rows predicted like the test set (never trained or scored on)", flush=True)
+    return train, rows.reset_index(drop=True)
+
+
 def metric_input(task, metric, pred):
     if metric.kind == "label" and task == "multiclass":
         return pred.argmax(1)
@@ -405,6 +431,7 @@ def main():
     else:
         train["fold"] = folds_df["fold"].to_numpy()
     test = pd.read_csv(cfg["test"]) if Path(cfg["test"]).exists() else None
+    train, vault = split_vault(cfg, train, skip=bool(a.smoke or a.bench))
 
     classes = None
     if task == "multiclass":
@@ -419,16 +446,19 @@ def main():
     test_paths = None
     if test is not None:
         test_paths = [str(Path(cfg["test_image_dir"]) / f"{p}{cfg['path_suffix']}") for p in test[cfg["path_col"]]]
+    vault_paths = None  # the vault's images are training images
+    if vault is not None:
+        vault_paths = [str(Path(cfg["image_dir"]) / f"{p}{cfg['path_suffix']}") for p in vault[cfg["path_col"]]]
 
     screen = SC.active() if SC is not None else None  # KG_SCREEN: train and score only the screen's rows and folds
     out_dir = Path("artifacts") / (cfg["name"] + (SC.run_tag() if SC is not None else ""))  # apart from a full run's
     out_dir.mkdir(parents=True, exist_ok=True)
-    all_folds = sorted(train["fold"].unique().tolist())
+    all_folds = sorted(f for f in train["fold"].unique().tolist() if f >= 0)  # fold -1: trained on, never scored
     use = None
     if screen is not None:
         use = screen.mask(train[id_col] if id_col and id_col in train.columns else np.arange(len(train)))
         all_folds = [f for f in all_folds if not screen.folds or f in screen.folds]
-        test_paths = None  # a screen is never submitted: no test predictions to pay for
+        test_paths = vault_paths = None  # a screen is never submitted: no test predictions to pay for
         print(f"screen {screen.name}: {int(use.sum())} of {len(train)} rows, folds {' '.join(map(str, all_folds))}; "
               f"no submission (compared with its control, never submitted); files in {out_dir}", flush=True)
     run_folds = a.folds if a.folds is not None else all_folds
@@ -533,7 +563,8 @@ def main():
             torch.save({"model": model.state_dict(), "ema": ema.module.state_dict(), "opt": opt.state_dict(),
                     "sched": sched.state_dict(), "scaler": scaler.state_dict(), "epoch": epoch + 1, "best": best,
                     "best_pred": kept_pred, "kept": kept, "kept_pred": kept_pred, "es_best": es_best,
-                    "es_bad": es_bad}, resume)
+                    "es_bad": es_bad}, str(resume) + ".tmp")
+            os.replace(str(resume) + ".tmp", resume)  # a run killed mid-write leaves the last whole checkpoint
 
         for epoch in range(start_epoch, cfg["epochs"]):
             budget.start_epoch()
@@ -588,6 +619,10 @@ def main():
             dl_te = DataLoader(ImageDataset(test_paths, None, tf_eval), batch_size=cfg["batch_size"] * 2, **loader_kw)
             ema.module.load_state_dict(torch.load(out_dir / f"fold{fold}.pt", map_location=device))
             np.save(out_dir / f"fold{fold}_test.npy", predict(ema.module, dl_te, device, task, amp, cfg["tta_hflip"]))
+        if vault_paths is not None and not a.smoke:
+            dl_vt = DataLoader(ImageDataset(vault_paths, None, tf_eval), batch_size=cfg["batch_size"] * 2, **loader_kw)
+            ema.module.load_state_dict(torch.load(out_dir / f"fold{fold}.pt", map_location=device))
+            np.save(out_dir / f"fold{fold}_vault.npy", predict(ema.module, dl_vt, device, task, amp, cfg["tta_hflip"]))
         if not a.smoke:
             budget.best = kept
             budget.write_status("done", **({"early_stop_after": early} if early is not None else {}))
@@ -617,18 +652,22 @@ def main():
         oof[idx] = p
         seen[idx] = True
         fold_scores.append(metric(y_metric[idx], metric_input(task, metric, p)))
-    if use is not None:  # NaN where no fold of the screen predicted: compared on the rows it scored
+    if use is not None or not seen.all():  # NaN where no fold predicted (a screen, fold -1 rows): scored rows only
         oof[~seen] = np.nan
-    rows = seen if use is not None else slice(None)
+    rows = seen if (use is not None or not seen.all()) else slice(None)
     cv = metric(y_metric[rows], metric_input(task, metric, oof[rows]))
     test_pred = None
     if test_paths is not None:
         test_pred = np.mean([np.load(out_dir / f"fold{f}_test.npy") for f in all_folds], axis=0)
+    vault_pred = None
+    if vault_paths is not None and all((out_dir / f"fold{f}_vault.npy").exists() for f in all_folds):
+        vault_pred = np.mean([np.load(out_dir / f"fold{f}_vault.npy") for f in all_folds], axis=0)
     rec = Ledger().log(cfg["name"], cv, fold_scores=fold_scores, model=cfg["backbone"], notes=cfg["notes"],
                        parent=a.parent, track=a.track,
                        params={k: v for k, v in cfg.items() if k not in ("notes",)}, oof=oof, test_pred=test_pred,
                        runtime_s=round(time.time() - t0, 1),
-                       oof_selection="scored-fold" if cfg["select"] == "best" else "independent")
+                       oof_selection="scored-fold" if cfg["select"] == "best" else "independent",
+                       **({"vault_pred": vault_pred} if vault_pred is not None else {}))
     print(f"[{cfg['name']}] {metric.name} CV {cv:.5f} +/- {np.std(fold_scores):.5f} -> {rec['id']}")
     if test_pred is not None and Path(cfg["sample"]).exists():
         sample = pd.read_csv(cfg["sample"])
