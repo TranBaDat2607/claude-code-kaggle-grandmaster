@@ -35,3 +35,9 @@ def binary_df():
         "grp": rng.integers(0, 300, size=n),
         "target": y,
     })
+
+
+@pytest.fixture(autouse=True)
+def _vault_home(tmp_path_factory, monkeypatch):
+    """Sealed vault labels (kgkit.vault) go to a temp folder, never the developer's ~/.kaggle-gm/vault."""
+    monkeypatch.setenv("KG_VAULT_HOME", str(tmp_path_factory.mktemp("vault-home")))
