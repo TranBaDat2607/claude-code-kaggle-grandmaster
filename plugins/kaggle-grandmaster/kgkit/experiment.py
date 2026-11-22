@@ -321,6 +321,7 @@ class Ledger:
         decision: str | None = None,
         holdout_pred: np.ndarray | None = None,
         track: str | None = None,
+        units=None,
         **extra,
     ) -> dict:
         """Append an experiment. ``folds_hash`` fingerprints the CV split (``folds`` if given, else the fold
@@ -329,7 +330,8 @@ class Ledger:
         such as a blend with public submission files. ``holdout_pred`` stores per-row predictions on the
         workspace's labelled holdout (``eval_truth``), fingerprinted by ``eval_hash``, so two records can be
         compared paired on it. ``track``: the model line it starts (gbdt, cnn, ...); left out, it is its parent's
-        line (a blend's: ``ensemble``; no parent: ``main``)."""
+        line (a blend's: ``ensemble``; no parent: ``main``). ``units``: a ``kgkit.units.Units`` table, stored
+        beside the arrays (see :meth:`log_units`)."""
         if track:
             E.check_track(track)
         recs = self.records()
@@ -376,10 +378,37 @@ class Ledger:
                     rec[f"{kind}_path"] = str((d / f"{kind}.npy").relative_to(self.root)).replace("\\", "/")
         if holdout_pred is not None:
             rec["eval_hash"] = E.spec_hash(self.root, st.eval_truth) if st is not None and st.eval_truth else None
+        if units is not None:
+            path = self.artifacts / exp_id / "units.npz"
+            rec["units"] = {**units.save(path),
+                            "path": str(path.relative_to(self.root)).replace("\\", "/")}
         self.dir.mkdir(parents=True, exist_ok=True)
         with self.path.open("a", encoding="utf-8") as f:
             f.write(json.dumps(rec) + "\n")
         return rec
+
+    def log_units(self, name: str, units, fold_scores: Sequence[float] | None = None, **kw) -> dict:
+        """Log a run scored on a unit table (``kgkit.units``): a custom pipeline (segmentation, detection, a
+        multi-stage or 3D model, an LLM problem set, matches) whose metric is not one array of row predictions. The
+        CV is the table's aggregate, the fold scores come from its ``fold`` column, and later runs on the same units
+        are compared with it paired (``ledger compare``, ``report_comparison``). A ``mean`` table that does not say
+        its direction takes the competition metric's."""
+        if units.agg == "mean" and units.greater_is_better is None:
+            units.greater_is_better = self._gib()
+        if fold_scores is None:
+            fold_scores = units.fold_scores()
+        return self.log(name, units.score(), fold_scores=fold_scores, units=units, **kw)
+
+    def load_units(self, exp_id: str):
+        """The unit table of a record (``kgkit.units.Units``); ValueError when it has none."""
+        from . import units as U
+
+        r = self.get(exp_id)
+        spec = r.get("units")
+        if not spec:
+            raise ValueError(f"{r['id']} has no unit table: log it with `Ledger.log_units` or "
+                             "`kgkit ledger add <name> auto --units FILE`")
+        return U.load(self.root / spec["path"], spec)
 
     def _resolve_id(self, ref: str) -> str:
         """Canonical id for a ref; unknown refs are kept verbatim (e.g. a local id named inside a remote

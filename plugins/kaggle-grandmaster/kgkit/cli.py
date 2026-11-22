@@ -811,6 +811,10 @@ def cmd_ledger(a):
             extra["submission"] = a.sub
         if a.track:
             extra["track"] = a.track
+        if a.units:
+            r = _ledger_add_units(led, a, extra)
+            _auto_compare(led, a, r)
+            return
         if a.pred:
             r = _ledger_add_preds(led, a, extra)
             _auto_compare(led, a, r)
@@ -1077,19 +1081,59 @@ def _ledger_add_preds(led, a, extra: dict) -> dict:
     return r
 
 
+def _units_params(pairs) -> dict:
+    """--units-param KEY=VALUE pairs: a VALUE that parses as JSON (4, 0.5, {"a": 1}) is taken as such, else as text."""
+    out = {}
+    for p in pairs or ():
+        key, sep, value = p.partition("=")
+        if not sep or not key.strip():
+            raise SystemExit(f"--units-param takes KEY=VALUE, not {p!r}")
+        try:
+            out[key.strip()] = json.loads(value)
+        except json.JSONDecodeError:
+            out[key.strip()] = value
+    return out
+
+
+def _ledger_add_units(led, a, extra: dict) -> dict:
+    """`ledger add <name> <cv|auto> --units FILE`: a run scored on a unit table (``kgkit.units``); the score and the
+    fold scores are recomputed from it and the table is stored, so later runs on the same units compare paired."""
+    from . import units as U
+
+    try:
+        u = U.read(a.units, agg=a.units_agg, params=_units_params(a.units_param))
+    except (OSError, ValueError) as e:
+        raise SystemExit(f"--units {a.units}: {e}")
+    auto = a.args[1].lower() == "auto"
+    passed = None if auto else _cv_arg(a.args[1])
+    if not auto and passed is None:
+        raise SystemExit("an LB-only record has no score to recompute: drop --units, or pass 'auto'")
+    r = led.log_units(a.args[0], u, notes=_add_notes(a), parent=a.parent, tags=a.tag or (),
+                      **({"metric": a.metric} if a.metric else {}), **extra)
+    if passed is not None and abs(passed - r["cv"]) > 1e-6 * max(1.0, abs(r["cv"])):
+        print(f"note: the score recomputed from the units is {r['cv']:.6f}, not {passed}; logging the recomputed score")
+    spec = r["units"]
+    parts = [f"{spec['n']} units"] + ([f"{spec['n_groups']} groups"] if spec.get("n_groups") else []) \
+        + ([f"{spec['n_folds']} folds"] if spec.get("n_folds") else [])
+    params = "".join(f" {k}={v}" for k, v in spec["params"].items())
+    print(f"logged {r['id']}: {spec['agg']}{params} {r['cv']:.5f} recomputed from {', '.join(parts)}, table stored"
+          + _fitted_note(r))
+    return r
+
+
 def _auto_compare(led, a, r: dict) -> None:
-    """After `ledger add --pred`: compare the new record, paired, with the accepted baseline when that baseline
-    has predictions on the same evaluation set."""
+    """After `ledger add --pred` / `--units`: compare the new record, paired, with the accepted baseline when that
+    baseline has predictions on the same evaluation set (a unit table, for a record logged with one)."""
     import argparse
 
     base = _default_base(led, r)
-    path = "holdout_path" if led._holdout() else "oof_path"
+    path = "units" if r.get("units") else "holdout_path" if led._holdout() else "oof_path"
     if base is None or base["id"] == r["id"] or not base.get(path):
         if base is None:
             print(f"{_no_baseline_yet(led, r)}: `kgkit ledger decide <id> baseline`, then later records are compared "
                   "with it automatically")
         return
-    if led.eval_record_key(base) != led.eval_record_key(r):
+    if path != "units" and led.eval_record_key(base) != led.eval_record_key(r):
         print(f"not compared with the baseline {base['id']}: its predictions are on a different evaluation set")
         return
     print()
@@ -1128,6 +1172,9 @@ def _ledger_compare(led, a, hint: bool = True, backlog: int | None = None) -> di
     for ref in refs:
         if not Path(ref).is_dir() and not _is_file_ref(led, ref):
             led.get(ref)  # fail early on a typo
+    pair = _unit_records(led, refs)
+    if pair is not None:  # both scored on unit tables: compared on them, whatever else they stored
+        return _ledger_compare_units(led, a, *pair, hint=hint, backlog=backlog)
     if not any(Path(r).is_dir() for r in refs):
         why = _test_route(led, refs, holdout, bool(a.truth))
         if why:  # no predictions on the evaluation set for one of them: compare the files the LB scored
@@ -1219,6 +1266,56 @@ def _ledger_compare(led, a, hint: bool = True, backlog: int | None = None) -> di
            "folds_improved": folds_res["folds_improved"] if folds_res is not None else None}
     if hint:
         print(f"\nrecord it: {_finish_command(led, new_id, base_id, res['decision'].lower(), backlog)}")
+    return res
+
+
+def _unit_records(led, refs) -> tuple[dict, dict] | None:
+    """The two ledger records of a comparison when both carry a unit table, else None."""
+    if any(Path(r).is_dir() or _is_file_ref(led, r) for r in refs):
+        return None
+    ra, rb = (led.get(r) for r in refs)
+    return (ra, rb) if ra.get("units") and rb.get("units") else None
+
+
+def _ledger_compare_units(led, a, ra: dict, rb: dict, hint: bool = True, backlog: int | None = None) -> dict:
+    """`ledger compare` of two records scored on unit tables (``kgkit.units``): the paired unit bootstrap (whole
+    groups when the table has them), plus the per-fold pairing when both assign units to the same folds."""
+    from . import state as S
+    from . import units as U
+    from .compare import compare_folds, describe, format_comparison, verdict
+    from .experiment import selection_note
+
+    if ra["id"] == rb["id"]:
+        raise SystemExit(f"{rb['id']} is both the new experiment and the baseline (no accepted baseline yet? pass the "
+                         "baseline explicitly, or `ledger decide <id> baseline`)")
+    sel = selection_note(ra, rb)
+    if sel:
+        print(("WARNING: " if "scored fold" in sel else "note: ") + sel)
+    st = S.load(led.root)
+    ua, ub = led.load_units(ra["id"]), led.load_units(rb["id"])
+    rope = a.rope if a.rope is not None else (st.rope if st else None)
+    try:
+        boot = U.compare(ua, ub, n_boot=a.boot, rope=rope)
+        folds = U.paired_folds(ua, ub)
+    except ValueError as e:
+        raise SystemExit(f"{ra['id']} vs {rb['id']}: {e}")
+    boot = _add_seed_noise(led, boot, ra["id"], rb["id"])
+    folds_res = compare_folds(*folds, ua.gib) if folds else None
+    tries = getattr(a, "tries", None) or _tries(led, (ra["id"], rb["id"]))
+    v = verdict(folds_res, boot, tries=tries)
+    print(format_comparison(ra["id"], rb["id"], v))
+    print(f"  {describe(boot)}; aggregate {ua.agg}" + "".join(f" {k}={x}" for k, x in ua.params.items()))
+    for c in boot["caveats"]:
+        print(f"  note: {c}")
+    if a.public_n:
+        print("  public LB noise not projected: a unit table holds no rows to project to the public LB's size")
+    _log_comparison(led, ra["id"], rb["id"], folds_res, boot, None, v["decision"], v["flags"], v["tries"],
+                    v["strength"])
+    res = {**v, "new": ra["id"], "base": rb["id"], "se": boot["se"],
+           "k": folds_res["k"] if folds_res is not None else None,
+           "folds_improved": folds_res["folds_improved"] if folds_res is not None else None}
+    if hint:
+        print(f"\nrecord it: {_finish_command(led, ra['id'], rb['id'], res['decision'].lower(), backlog)}")
     return res
 
 
@@ -1525,6 +1622,16 @@ def _ledger_noise(led, a):
     from .evalset import fmt_se
 
     st = S.load()
+    if not Path(a.args[0]).is_dir() and led.get(a.args[0]).get("units") and not a.truth:
+        from . import units as U
+
+        rec = led.get(a.args[0])
+        u = led.load_units(rec["id"])
+        res = U.compare(u, None, n_boot=a.boot)
+        print(f"{rec['id']}: {u.agg} {res['value']:.5f}; {describe(res)}")
+        for c in res["caveats"]:
+            print(f"  note: {c}")
+        return
     truth_spec = a.truth or (st.eval_truth if st else "")
     metric_name = a.metric or (st.metric if st else None)
     if not truth_spec or not metric_name:
@@ -2601,6 +2708,15 @@ _LEDGER_OPTIONS = [
     ("--pred", dict(help="FILE:COL[,COL...] or .npy predictions on the evaluation set (holdout+lb: the holdout; else "
                          "OOF); the score is recomputed, the predictions stored and compared with the baseline")),
     ("--variant", dict(help="name shared by re-runs of one pipeline with other seeds (seed noise)")),
+    ("--units", dict(help="a unit table (CSV / parquet / .npz with an id column): one row per image, study, "
+                          "tomogram, query, problem or match, with the values the metric is built from (score; "
+                          "tp/fp/fn; inter/union; ...), optional group and fold columns. The score is recomputed "
+                          "from it and later runs on the same units are compared with it paired")),
+    ("--units-agg", dict(choices=["mean", "ratio", "iou", "dice", "fbeta", "precision", "recall", "custom"],
+                         help="the table's aggregate (default: from its column names)")),
+    ("--units-param", dict(action="append", metavar="KEY=VALUE",
+                           help="a parameter of the aggregate, e.g. beta=4, class_weights={\"apo\":1,\"rib\":3}, "
+                                "fn=mymetric:score; repeatable")),
     ("--sub", dict(help="the submission file of the record (CSV or .npy): without predictions on the evaluation set, "
                         "`ledger compare` estimates the public-LB noise between two records from these files")),
     ("--ref", dict(help="compare: a record with predictions on the evaluation set, used to calibrate the labels "
@@ -2633,7 +2749,7 @@ _LEDGER_ACTIONS = {
                                                "'lb-only': no validation score (fork of public notebooks, blend "
                                                "with public files)"),
                                   ("notes", "*", "free text")],
-            "--parent --track --tag --variant --notes --pred --sub " + _PAIRED),
+            "--parent --track --tag --variant --notes --pred --units --units-agg --units-param --sub " + _PAIRED),
     "tag": ("add tags to a record, or remove them (--remove): mark a logged file public-lb-fitted or public-tuned",
             [_EXP, ("tag", "+", "tags to add (or remove)")], "--remove"),
     "compare": ("paired comparison of two experiments (or artifacts/<name> folders of per-fold OOFs)",

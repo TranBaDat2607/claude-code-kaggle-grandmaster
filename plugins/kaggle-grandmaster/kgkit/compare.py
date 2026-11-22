@@ -248,13 +248,14 @@ def _clt(m, y, pa, pb, sign, inv, caveats, *, rows, size, **ctx) -> dict:
 
 def _result(question: str, value: float, method: str, members, n_units: int, rows, size, rope=None,
             stats: np.ndarray | None = None, se: float | None = None, redrawn: int = 0, kept_degenerate: int = 0,
-            failed: int = 0, caveats=()) -> dict:
+            failed: int = 0, caveats=(), unit: str | None = None) -> dict:
     """The common result. ``stats``: resampled values (percentile CI, empirical probabilities); else a normal
-    approximation around ``value`` with standard error ``se``."""
+    approximation around ``value`` with standard error ``se``. ``unit``: what was resampled, when not rows or
+    groups of rows (``kgkit.units``: units)."""
     caveats = list(caveats)
     if stats is not None:
         se = float(stats.std(ddof=1)) if len(stats) > 1 else float("nan")
-    unit = "rows" if members is None else "groups"
+    unit = unit or ("rows" if members is None else "groups")
     if n_units < SMALL_N:
         caveats.append(f"small evaluation set ({n_units} {unit}): the interval is approximate")
     if size:

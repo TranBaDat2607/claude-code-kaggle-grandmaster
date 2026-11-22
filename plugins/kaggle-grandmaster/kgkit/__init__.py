@@ -17,6 +17,8 @@ parts of a competition that are easy to get subtly wrong:
 - ``kgkit.compare``     is the new experiment really better? Paired fold test, and the noise of a score or
                         a paired difference on any metric (bootstrap, Bayesian bootstrap, influence CLT,
                         projected to the public LB's size), seed noise from re-runs, ROPE
+- ``kgkit.units``       per-unit scores (images, studies, tomograms, queries, problems, matches): paired comparisons
+                        for metrics that are not one array of row predictions (means, summed counts, custom)
 - ``kgkit.evalset``     the evaluation set's fingerprint and the paired noise measured on it
 - ``kgkit.backlog``     the ranked idea backlog and screen-vs-full fidelity
 - ``kgkit.kernels``     study and reproduce public notebooks; their public score on record and title claims
