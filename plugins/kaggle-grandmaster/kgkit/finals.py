@@ -776,10 +776,12 @@ def _auto_heading(n: int, auto: list) -> str:
     return f"Competition ended; no finals were selected, so Kaggle auto-selected the {n} best public score(s)"
 
 
-def outcome(st: S.CompetitionState, recs: list[dict], data: dict) -> tuple[list[str], list[str] | None]:
+def outcome(st: S.CompetitionState, recs: list[dict], data: dict,
+            pick: dict | None = None) -> tuple[list[str], list[str] | None]:
     """The text of ``kgkit final`` once the competition has ended, and the ids to record as ``final_picks`` (None
     when nothing was selected): the finals, or the pool Kaggle picked from when nobody selected, with their private
-    scores; the team's standing; the best private score of any submission and how far the finals were from it."""
+    scores; the team's standing; the best private score of any submission and how far the finals were from it.
+    ``pick``: the set ``kgkit final pick`` recommended (``load_pick``), to show how it would have done."""
     index = _index([r for r in recs if isinstance(r, dict)])
     n, greater = _picks(st), st.greater_is_better
     better = max if greater else min
@@ -836,10 +838,53 @@ def outcome(st: S.CompetitionState, recs: list[dict], data: dict) -> tuple[list[
         line += (" The finals reached it." if gap <= 1e-9 else
                  f" The finals scored {_fmt(final)}, {gap:.5f} short of it.")
     out.append(line)
+    out += pick_lines(pick, views, data, final, greater)
     return out, picks
 
 
 # ---------------------------------------------------------------------------- what the session brief says after the end
+PICK_FILE = "final_pick.json"  # the set `kgkit final pick` recommended (kgkit.finalpick), for the outcome report
+
+
+def load_pick(root, slug: str) -> dict | None:
+    """The set ``kgkit final pick`` last recommended in this workspace, or None."""
+    try:
+        d = json.loads((Path(root) / S.STATE_DIR / PICK_FILE).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    ok = isinstance(d, dict) and d.get("slug") == slug and isinstance(d.get("ids"), list) and d["ids"]
+    return d if ok else None
+
+
+def pick_lines(pick: dict | None, views: list[dict], data: dict, final: float | None, greater: bool) -> list[str]:
+    """After the deadline: how the set ``kgkit final pick`` recommended would have scored and ranked, next to the
+    finals, so the method is measured on finished competitions."""
+    if not pick:
+        return []
+    best = max if greater else min
+    private: dict[str, float] = {}
+    for v in views:
+        if v["id"] in pick["ids"] and v["private"] is not None:
+            private[v["id"]] = best(private.get(v["id"], v["private"]), v["private"])
+    names = " + ".join(str(i) for i in pick["ids"])
+    head = f"Recommended by `kgkit final pick` ({pick.get('when') or '?'}): {names}"
+    missing = [str(i) for i in pick["ids"] if i not in private]
+    if not private:
+        return [f"{head}: none of it has a private score (never submitted?)."]
+    score = best(private.values())
+    shown = _board(data)[0]
+    rank = rank_text(rank_if(shown, score, greater)) if shown else "-"
+    line = f"{head}: best private {_fmt(score)} ({rank})"
+    if final is not None:
+        gap = (score - final) if greater else (final - score)
+        line += (", the same as the finals" if abs(gap) <= 1e-9 else
+                 f", {abs(gap):.5f} {'above' if gap > 0 else 'below'} the finals' {_fmt(final)}")
+    line += "."
+    if missing:
+        line += f" {', '.join(missing)} had no private score: only the rest are counted."
+    return [line]
+
+
 STANDING = "standing.json"  # the outcome `kgkit final` last read after the deadline, for the session brief
 POSTMORTEM = Path("reports") / "postmortem.md"
 
