@@ -543,12 +543,14 @@ def _screen_new(root, a) -> None:
         spec = Path(root) / S.STATE_DIR / "folds_spec.json"
         if spec.is_file():
             group = json.loads(spec.read_text(encoding="utf-8")).get("group") or None
-    for c in (id_col, group, a.time_col):
+    for c in (id_col, group, a.time_col, a.stratify):
         if c and c not in df.columns:
             raise SystemExit(f"{a.ids or 'data/train.csv'} has no column {c!r}")
     strata, strategy = None, "random"
     if a.time_col:
         strategy = f"time:{a.time_col}" + (f", groups {group}" if group else "")
+    elif a.stratify:  # a share of each value: e.g. fewer games of every opponent
+        strata, strategy = df[a.stratify].astype(str).to_numpy(), f"stratified:{a.stratify}"
     elif group:
         strategy = f"group:{group}"
     elif not a.no_stratify and not a.ids and st is not None and st.target in df.columns \
@@ -3371,6 +3373,8 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--group", help="new: column whose groups are kept whole (default: the group `kgkit folds` used)")
     s.add_argument("--time-col", help="new: keep the latest window by this column (time series)")
     s.add_argument("--no-stratify", action="store_true", help="new: draw rows at random, not a share of each class")
+    s.add_argument("--stratify", metavar="COL", help="new: a share of each value of COL (e.g. --stratify opponent: "
+                                                     "fewer games of every opponent)")
     s.add_argument("--ids", help="new: FILE:COL of the units to draw from (tomograms, studies, problems...), other "
                                  "columns of FILE for --group/--time-col (default: data/train.csv and its id column)")
     s.set_defaults(fn=cmd_screen)

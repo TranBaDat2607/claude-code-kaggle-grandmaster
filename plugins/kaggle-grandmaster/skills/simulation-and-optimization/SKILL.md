@@ -55,3 +55,18 @@ LB, so this is pure optimisation.
 6. For LLM-themed optimisation (e.g. permutation puzzles scored by a language model's
    perplexity), cache scores, batch evaluations on GPU, and treat it as black-box local search
    with smart move proposals.
+
+## C. Paired arena, screens and sweeps
+- **One schedule for every version**: `U.schedule(opponents, games=200)` (`from kgkit import units as U`) fixes the
+  matches (opponent, environment seed, seat; each seed from every seat). The control and each variant play exactly
+  those, so their results pair match by match and most of the game's randomness cancels. Log a version with
+  `Ledger().log_units(name, U.matches(results), parent=<baseline id>)`: one unit per match scored 1 / 0.5 / 0 (or
+  the reward), grouped by opponent, so the paired comparison resamples whole opponents.
+- **Screen** = fewer games of every opponent: write the schedule to `fixtures.csv`, then `kgkit screen new g40
+  --ids fixtures.csv:id --frac 0.2 --stratify opponent`; under `KG_SCREEN` the arena plays only
+  `SC.active().mask(ids)` (`from kgkit import screen as SC`). A shorter schedule is a prefix of the longer one.
+- **Sweeps** of agent parameters (search depth, heuristic weights, temperature) then run as in `/kg-grind --sweep`,
+  each rung with more games. Not a screen question: time per move, and strength against opponents not in the pool.
+- **Optimisation**: instances are the units (`U.make(instance_ids, score=scores, agg="mean", group=size_bucket,
+  greater_is_better=...)`); a screen is a stratified subset of instances or a shorter search budget.
+

@@ -32,6 +32,10 @@ A metric that is no function of per-unit values (a global ranking over all detec
 rows that hold what it needs (one row per detection, ``group`` = its image) and is resampled per group.
 
 Reserved columns: ``id`` (required, unique), ``group`` (resampled whole) and ``fold`` (per-fold pairing).
+
+Simulation competitions: ``schedule(opponents, games)`` fixes the matches every agent version plays (opponent,
+environment seed, seat), and ``matches(results)`` turns their results into a ``mean`` table grouped by opponent, so
+two versions compare paired, match by match, resampling whole opponents.
 """
 
 from __future__ import annotations
@@ -246,6 +250,55 @@ def make(ids, *, score=None, weight=None, counts: dict | None = None, agg: str |
         if weight is not None:
             cols["weight"] = weight
     return Units(np.asarray(list(ids)), cols, agg or infer(cols), params or {}, greater_is_better, group, fold)
+
+
+# ---------------------------------------------------------------------------- matches (simulation competitions)
+RESULTS = {"win": 1.0, "w": 1.0, "won": 1.0, "draw": 0.5, "d": 0.5, "tie": 0.5, "loss": 0.0, "l": 0.0, "lost": 0.0,
+           "lose": 0.0}
+
+
+def fixture_id(opponent, seed, seat) -> str:
+    """The id of one match of a schedule: the same game has the same id in every agent's table."""
+    return f"{opponent}|s{seed}|p{seat}"
+
+
+def schedule(opponents, games: int, seats: int = 2, seed: int = 0) -> list[dict]:
+    """The matches every agent version plays (the control and each variant alike), so their results pair match by
+    match: ``games`` per opponent, each environment seed played from every seat in turn (``seed``, ``seed`` + 1,
+    ...). A shorter schedule is a prefix of a longer one, so a screen of fewer games plays the same first ones."""
+    if games < 1 or seats < 1:
+        raise ValueError("a schedule needs at least one game and one seat")
+    return [{"id": fixture_id(o, seed + i // seats, i % seats), "opponent": str(o), "seed": seed + i // seats,
+             "seat": i % seats} for o in opponents for i in range(int(games))]
+
+
+def _result(v) -> float:
+    if isinstance(v, (bool, np.bool_)):
+        return float(v)
+    if isinstance(v, (int, float, np.integer, np.floating)) and math.isfinite(float(v)):
+        return float(v)
+    key = str(v).strip().lower()
+    if key in RESULTS:
+        return RESULTS[key]
+    try:
+        return float(key)
+    except ValueError:
+        raise ValueError(f"a match result is win / draw / loss (or a number: 1, 0.5, 0, a reward), not {v!r}") from None
+
+
+def matches(rows, *, result: str = "result", opponent: str = "opponent", seed: str = "seed", seat: str = "seat",
+            fold=None) -> Units:
+    """A unit table of match results (rows: a DataFrame or dicts with opponent, seed, seat and result): one unit per
+    match scored 1 / 0.5 / 0 (or the reward given), grouped by opponent, so the comparison resamples whole opponents.
+    Its score is the mean result (the win rate, with draws as half)."""
+    recs = rows.to_dict("records") if hasattr(rows, "to_dict") else list(rows)
+    for col in (opponent, seed, seat, result):
+        if recs and col not in recs[0]:
+            raise ValueError(f"the match results have no {col!r} column (they need {opponent}, {seed}, {seat}, "
+                             f"{result})")
+    ids = [fixture_id(r[opponent], r[seed], r[seat]) for r in recs]
+    return make(ids, score=np.array([_result(r[result]) for r in recs], dtype=float), agg="mean",
+                group=np.array([str(r[opponent]) for r in recs]), fold=fold, greater_is_better=True)
 
 
 def load(path, spec: dict) -> Units:
