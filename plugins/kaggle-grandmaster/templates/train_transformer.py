@@ -2,6 +2,9 @@
 
 Copy to src/, edit CONFIG, then:
 
+    # a screen (`kgkit screen new s30`, `kgkit sweep`): its rows and folds only, files in
+    # artifacts/<name>__s30-<hash>/, no submission
+    KG_SCREEN=s30 KG_FIDELITY='{"epochs": 3}' python src/train_transformer.py --name x_v2 --parent 0007 --epochs 3
     python src/train_transformer.py --smoke
     python src/train_transformer.py --bench          # data loader vs GPU step vs real loop, padding share
     python src/train_transformer.py --name debv3b_512 --model microsoft/deberta-v3-base --max-len 512
@@ -59,6 +62,10 @@ try:  # a kgkit vendored before #127 has no report_comparison: the run then ends
     from kgkit.experiment import report_comparison
 except ImportError:
     report_comparison = None
+try:  # a kgkit vendored before #134 has no screens: every run is then a full run
+    from kgkit import screen as SC
+except ImportError:
+    SC = None
 
 CONFIG = dict(
     name="deberta_baseline",
@@ -421,12 +428,21 @@ def main():
         texts = df[cfg["text_cols"]].fillna("").astype(str).agg(sep.join, axis=1).tolist()
         return tok(texts, truncation=True, max_length=cfg["max_len"])
 
+    screen = SC.active() if SC is not None else None  # KG_SCREEN: train and score only the screen's rows and folds
+    if screen is not None:
+        test = None  # a screen is never submitted: no test predictions to pay for
     enc = encode(train)
     enc_test = encode(test) if test is not None else None
     collate = Collate(tok, task)
-    out_dir = Path("artifacts") / cfg["name"]
+    out_dir = Path("artifacts") / (cfg["name"] + (SC.run_tag() if SC is not None else ""))  # apart from a full run's
     out_dir.mkdir(parents=True, exist_ok=True)
     all_folds = sorted(train["fold"].unique().tolist())
+    use = None
+    if screen is not None:
+        use = screen.mask(train[id_col] if id_col and id_col in train.columns else np.arange(len(train)))
+        all_folds = [f for f in all_folds if not screen.folds or f in screen.folds]
+        print(f"screen {screen.name}: {int(use.sum())} of {len(train)} rows, folds {' '.join(map(str, all_folds))}; "
+              f"no submission (compared with its control, never submitted); files in {out_dir}", flush=True)
     run_folds = a.folds if a.folds is not None else all_folds
     if a.smoke:
         run_folds, cfg["epochs"] = run_folds[:1], 1
@@ -467,6 +483,8 @@ def main():
     for fold in ([] if a.assemble else run_folds):
         folds_arr = train["fold"].to_numpy()
         tr, va = np.flatnonzero(folds_arr != fold), np.flatnonzero(folds_arr == fold)
+        if use is not None:
+            tr, va = tr[use[tr]], va[use[va]]
         if a.smoke:
             tr, va = tr[: 4 * cfg["batch_size"]], va[: 2 * cfg["batch_size"]]
         es, ds_es = None, None
@@ -625,12 +643,16 @@ def main():
         return
 
     oof = np.zeros((len(train), n_out), dtype=np.float32)
-    fold_scores = []
+    fold_scores, seen = [], np.zeros(len(train), dtype=bool)
     for f in all_folds:
         idx, p = np.load(out_dir / f"fold{f}_idx.npy"), np.load(out_dir / f"fold{f}_oof.npy")
         oof[idx] = p
+        seen[idx] = True
         fold_scores.append(metric(y_metric[idx], metric_input(task, metric, p)))
-    cv = metric(y_metric, metric_input(task, metric, oof))
+    if use is not None:  # NaN where no fold of the screen predicted: compared on the rows it scored
+        oof[~seen] = np.nan
+    rows = seen if use is not None else slice(None)
+    cv = metric(y_metric[rows], metric_input(task, metric, oof[rows]))
     test_pred = np.mean([np.load(out_dir / f"fold{f}_test.npy") for f in all_folds], axis=0) if test is not None else None
     rec = Ledger().log(cfg["name"], cv, fold_scores=fold_scores, model=cfg["model"], notes=cfg["notes"],
                        parent=a.parent, track=a.track,
@@ -658,6 +680,8 @@ def main():
         sub.to_csv(out, index=False)
         Ledger().update(rec["id"], submission=str(out).replace("\\", "/"))
         print(f"wrote {out}")
+    if screen is not None:
+        print(f"screen {screen.name}: no submission")
     if report_comparison is not None:  # #127: the verdict against --parent (else the accepted baseline)
         report_comparison(rec, parent=a.parent, truth=f"{cfg['train']}:{','.join(targets)}")
 

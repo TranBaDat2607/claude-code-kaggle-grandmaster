@@ -2,6 +2,9 @@
 
 Copy to src/, edit CONFIG, then:
 
+    # a screen (`kgkit screen new s30`, `kgkit sweep`): its rows and folds only, files in
+    # artifacts/<name>__s30-<hash>/, no submission
+    KG_SCREEN=s30 KG_FIDELITY='{"epochs": 3}' python src/train_image.py --name cnx_v2 --parent 0007 --epochs 3
     python src/train_image.py --smoke                     # 1 fold, 2 batches/epoch — crash test
     python src/train_image.py --bench                     # data loader vs GPU step vs real loop: input- or compute-bound?
     python src/train_image.py --name effb3_384 --backbone tf_efficientnet_b3.ns_jft_in1k --img-size 384
@@ -67,6 +70,10 @@ try:  # a kgkit vendored before #127 has no report_comparison: the run then ends
     from kgkit.experiment import report_comparison
 except ImportError:
     report_comparison = None
+try:  # a kgkit vendored before #134 has no screens: every run is then a full run
+    from kgkit import screen as SC
+except ImportError:
+    SC = None
 
 CONFIG = dict(
     name="img_baseline",
@@ -411,9 +418,17 @@ def main():
     if test is not None:
         test_paths = [str(Path(cfg["test_image_dir"]) / f"{p}{cfg['path_suffix']}") for p in test[cfg["path_col"]]]
 
-    out_dir = Path("artifacts") / cfg["name"]
+    screen = SC.active() if SC is not None else None  # KG_SCREEN: train and score only the screen's rows and folds
+    out_dir = Path("artifacts") / (cfg["name"] + (SC.run_tag() if SC is not None else ""))  # apart from a full run's
     out_dir.mkdir(parents=True, exist_ok=True)
     all_folds = sorted(train["fold"].unique().tolist())
+    use = None
+    if screen is not None:
+        use = screen.mask(train[id_col] if id_col and id_col in train.columns else np.arange(len(train)))
+        all_folds = [f for f in all_folds if not screen.folds or f in screen.folds]
+        test_paths = None  # a screen is never submitted: no test predictions to pay for
+        print(f"screen {screen.name}: {int(use.sum())} of {len(train)} rows, folds {' '.join(map(str, all_folds))}; "
+              f"no submission (compared with its control, never submitted); files in {out_dir}", flush=True)
     run_folds = a.folds if a.folds is not None else all_folds
     if a.smoke:
         run_folds = run_folds[:1]
@@ -453,6 +468,8 @@ def main():
     for fold in ([] if a.assemble else run_folds):
         tr = np.flatnonzero(train["fold"].to_numpy() != fold)
         va = np.flatnonzero(train["fold"].to_numpy() == fold)
+        if use is not None:
+            tr, va = tr[use[tr]], va[use[va]]
         if a.smoke:
             tr, va = tr[: 2 * cfg["batch_size"]], va[: cfg["batch_size"]]
         es, dl_es = None, None
@@ -592,12 +609,16 @@ def main():
 
     # ------------------------------------------------------------ assemble + log
     oof = np.zeros((len(train), n_out), dtype=np.float32)
-    fold_scores = []
+    fold_scores, seen = [], np.zeros(len(train), dtype=bool)
     for f in all_folds:
         idx, p = np.load(out_dir / f"fold{f}_idx.npy"), np.load(out_dir / f"fold{f}_oof.npy")
         oof[idx] = p
+        seen[idx] = True
         fold_scores.append(metric(y_metric[idx], metric_input(task, metric, p)))
-    cv = metric(y_metric, metric_input(task, metric, oof))
+    if use is not None:  # NaN where no fold of the screen predicted: compared on the rows it scored
+        oof[~seen] = np.nan
+    rows = seen if use is not None else slice(None)
+    cv = metric(y_metric[rows], metric_input(task, metric, oof[rows]))
     test_pred = None
     if test_paths is not None:
         test_pred = np.mean([np.load(out_dir / f"fold{f}_test.npy") for f in all_folds], axis=0)
@@ -627,6 +648,8 @@ def main():
         sub.to_csv(out, index=False)
         Ledger().update(rec["id"], submission=str(out).replace("\\", "/"))
         print(f"wrote {out}")
+    if screen is not None:
+        print(f"screen {screen.name}: no submission")
     if report_comparison is not None:  # #127: the verdict against --parent (else the accepted baseline)
         report_comparison(rec, parent=a.parent, truth=f"{cfg['train']}:{','.join(targets)}")
 

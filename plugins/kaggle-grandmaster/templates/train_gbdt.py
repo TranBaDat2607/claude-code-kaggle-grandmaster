@@ -13,6 +13,7 @@ Copy to src/, edit CONFIG and add_features(), then:
     python -m kgkit bench --run "python src/train_gbdt.py --smoke" --run "python src/train_gbdt.py --smoke --device cuda"
     python src/train_gbdt.py --name lr08 --params '{"learning_rate": 0.08}' --parent 0007   # lineage in the ledger
     python src/train_gbdt.py --no-refit              # quick screens: keep the model fitted on 90% of each fold
+    KG_SCREEN=s30 python src/train_gbdt.py --name v2 --parent 0007   # a screen: its rows and folds, no submission
 
 The experiment name defaults to "<model>_baseline" (e.g. xgb_baseline) when neither --name nor
 CONFIG["name"] is set.
@@ -32,6 +33,8 @@ What it guarantees:
   * the run ends with the paired comparison against --parent (else the accepted baseline) and the
     `kgkit exp finish` call that records the decision (#127)
   * every run logged to the experiment ledger with OOF/test artefacts and a submission file
+  * under KG_SCREEN (kgkit screen, kgkit sweep): trains and scores only the screen's rows and folds, logs the
+    OOF with NaN elsewhere and writes no submission; it is then compared with the baseline's control (#134)
 """
 
 from __future__ import annotations
@@ -59,6 +62,10 @@ try:  # a kgkit vendored before #127 has no report_comparison: the run then ends
     from kgkit.experiment import report_comparison
 except ImportError:
     report_comparison = None
+try:  # a kgkit vendored before #134 has no screens: every run is then a full run
+    from kgkit import screen as SC
+except ImportError:
+    SC = None
 from kgkit.thresholds import OptimizedRounder, best_threshold
 
 # ----------------------------------------------------------------------------- config
@@ -393,6 +400,17 @@ def main():
     test_pred = np.zeros((len(test), n_classes)) if task == "multiclass" else np.zeros(len(test))
     fold_scores, best_iters, in_sample = [], [], []  # in_sample: (fold, fitted rows, their predictions)
     fold_list = list(split_indices(folds))[: 1 if args.smoke else None]
+    screen = SC.active() if SC is not None else None  # KG_SCREEN: train and score only the screen's rows and folds
+    if screen is not None:
+        use = screen.mask(train[id_col] if id_col and id_col in train.columns else np.arange(len(train)))
+        fold_list = [(f, tr[use[tr]], va[use[va]]) for f, tr, va in fold_list
+                     if not screen.folds or f in screen.folds]
+        if not fold_list or not all(len(va) for _, _, va in fold_list):
+            raise SystemExit(f"screen {screen.name}: none of its rows are in the folds it names "
+                             f"({screen.folds}): was it made on another folds.csv?")
+        print(f"screen {screen.name}: {int(use.sum())} of {len(train)} rows, folds "
+              f"{' '.join(str(f) for f, _, _ in fold_list)}; no submission (compared with its control, never "
+              "submitted)")
     kind = cfg["model"]
     stops = kind in ES_KINDS
     es_on = ("scored-fold" if cfg["es_on_valid"] else "inner") if stops else None
@@ -419,9 +437,12 @@ def main():
                 model, _ = fit(model, kind, X.iloc[tr], y[tr], None, None, cats, cfg["early_stopping"])
                 fit_rows = tr
             oof[va] += predict(model, task, X.iloc[va]) / len(cfg["seeds"])
-            test_pred += predict(model, task, X_test) / (len(cfg["seeds"]) * len(fold_list))
+            if screen is None:  # a screen is never submitted: no test predictions to pay for
+                test_pred += predict(model, task, X_test) / (len(cfg["seeds"]) * len(fold_list))
             in_sample.append((f, fit_rows, predict(model, task, X.iloc[fit_rows])))
-    va_mask = np.isin(folds, [f for f, _, _ in fold_list])
+    va_mask = np.zeros(len(train), dtype=bool)  # the rows a fold scored
+    for _, _, va in fold_list:
+        va_mask[va] = True
 
     # ------------------------------------------------------------ metric-space conversion
     # raw model outputs -> what the metric (and submission) expects; the ledger keeps the raw outputs
@@ -458,12 +479,23 @@ def main():
         run_params.update(early_stopping_on=es_on, es_fraction=cfg["es_fraction"] if es_on == "inner" else None,
                           refit=bool(cfg["refit"] and es_on == "inner"),
                           es_slice=es_how if es_on == "inner" else None)
+    if screen is not None:  # NaN where no fold of the screen predicted: compared on the rows it scored
+        oof = np.where(va_mask if oof.ndim == 1 else va_mask[:, None], oof, np.nan)
     rec = Ledger().log(
         cfg["name"], cv, fold_scores=fold_scores, params=run_params, parent=args.parent, track=args.track,
-        features=feats, model=kind, notes=cfg["notes"], oof=oof, test_pred=test_pred,
+        features=feats, model=kind, notes=cfg["notes"], oof=oof, test_pred=None if screen is not None else test_pred,
         task=task, seeds=cfg["seeds"], best_iterations=best_iters, runtime_s=round(time.time() - t0, 1),
         train_scores=train_scores, oof_selection="scored-fold" if es_on == "scored-fold" else "independent",
     )
+    if screen is None:
+        write_submission(cfg, rec, test, task, classes, n_classes, metric, test_pred, test_m)
+    else:
+        print(f"logged {rec['id']} (screen {screen.name}: no submission)")
+    if report_comparison is not None:
+        report_comparison(rec, parent=args.parent, truth=f"{cfg['train']}:{target}")
+
+
+def write_submission(cfg, rec, test, task, classes, n_classes, metric, test_pred, test_m):
     sample = pd.read_csv(cfg["sample"])
     key = sample.columns[0]
     value_cols = list(sample.columns[1:])
@@ -486,8 +518,6 @@ def main():
     sub.to_csv(out, index=False)
     Ledger().update(rec["id"], submission=str(out).replace("\\", "/"))
     print(f"logged {rec['id']} -> {out}")
-    if report_comparison is not None:
-        report_comparison(rec, parent=args.parent, truth=f"{cfg['train']}:{target}")
 
 
 if __name__ == "__main__":
