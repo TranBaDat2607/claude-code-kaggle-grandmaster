@@ -293,12 +293,24 @@ def lb_fitted(rec: dict) -> bool:
 ACCEPTED = ("baseline", "keep")
 
 
+def partial(rec: dict) -> bool:
+    """True for a screen (``kgkit.screen``): a run at reduced fidelity (a subset of the rows or units, some folds,
+    cheaper settings). Its score tells variants apart, compared with a control at the same fidelity; it is no
+    estimate of the full pipeline's, so it is never its own score, a baseline or a final pick."""
+    return isinstance(rec, dict) and bool(rec.get("fidelity"))
+
+
+def fidelity_key(rec: dict) -> str:
+    """Two records compare only when this is equal: '' for full runs, else their fidelity as canonical JSON."""
+    return json.dumps(rec.get("fidelity"), sort_keys=True, default=str) if partial(rec) else ""
+
+
 def kept(rec: dict) -> bool:
     """True for a kept node of the experiment tree: decided keep/baseline (an ensemble member kept with
-    ``--member`` too), not a re-check on re-drawn folds, not fitted to the public LB. What branches from it is
-    compared with it."""
+    ``--member`` too), not a re-check on re-drawn folds, not a screen, not fitted to the public LB. What branches
+    from it is compared with it."""
     return (isinstance(rec, dict) and rec.get("decision") in ACCEPTED and not rec.get("recheck")
-            and not lb_fitted(rec))
+            and not partial(rec) and not lb_fitted(rec))
 
 
 def accepted(rec: dict) -> bool:
@@ -476,8 +488,9 @@ def own_score(rec: dict, holdout: bool = False) -> bool:
     was borrowed from a component). Fixed holdout (``holdout=True``): the blend itself is scored on the holdout, so
     ``lb-blend`` only says it includes public files; only ``lb-only`` means no score of its own. A score recomputed
     from the record's own stored holdout predictions is always its own, except for a ``public-lb-fitted`` record
-    (in either mode): it was tilted toward the public labels, so no score of it is an honest estimate."""
-    if not isinstance(rec.get("cv"), (int, float)) or lb_fitted(rec):
+    (in either mode): it was tilted toward the public labels, so no score of it is an honest estimate. A screen
+    (``partial``) has none either: its score is on a subset, or at cheaper settings."""
+    if not isinstance(rec.get("cv"), (int, float)) or lb_fitted(rec) or partial(rec):
         return False
     if rec.get("holdout_path"):
         return True

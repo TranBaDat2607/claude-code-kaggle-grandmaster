@@ -6,8 +6,8 @@ subagents it starts. So `/kg-start` after a question, `/kg-grind` after "continu
 session and subagents; that file is personal and git-ignored by Claude Code, so nothing here reaches the public repo.
 
 ``RULES`` are the local bookkeeping and read-only calls. Left out on purpose: whatever spends quota, deletes or
-publishes (``gpu push`` / ``repush`` / ``cancel``, ``vendor``), runs a command it is given (``bench``, ``recheck``:
-approving them would approve that command), and ``folds`` (a frozen split is never redrawn without asking). Kaggle
+publishes (``gpu push`` / ``repush`` / ``cancel``, ``vendor``), runs a command it is given (``bench``, ``recheck``,
+``sweep run``: approving them would approve that command), and ``folds`` (a frozen split is never redrawn without asking). Kaggle
 CLI submits, pushes and uploads are not kgkit calls: the hooks and the user still gate them.
 
 Standard library only.
@@ -27,9 +27,10 @@ SUBCOMMANDS: dict[str, bool] = {
     "blend": False, "features": False, "pages": True, "discussions": False, "kernels top": True,
     "kernels pull": False, "datasets": False, "audit-repo": True, "whoami": True, "update-check": True,
     "gpu quota": True, "gpu plan": True, "gpu status": True, "gpu log": True, "gpu wait": False,
-    "gpu collect": False, "gpu build": False, "gpu release": False, "grind": False,
+    "gpu collect": False, "gpu build": False, "gpu release": False, "grind": False, "screen": False,
+    "sweep status": True, "sweep decide": False,
 }
-NEVER = ("gpu push", "gpu repush", "gpu cancel", "vendor", "bench", "recheck", "folds", "init", "adopt")
+NEVER = ("gpu push", "gpu repush", "gpu cancel", "vendor", "bench", "recheck", "sweep run", "folds", "init", "adopt")
 SETTINGS = Path(".claude") / "settings.local.json"
 
 

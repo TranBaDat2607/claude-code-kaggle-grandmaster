@@ -29,6 +29,8 @@ Commands
   update-check  is a newer kaggle-grandmaster released, and the command that installs it (/kg-update)
   permissions   the allow rules for kgkit's bookkeeping calls; --write adds them to .claude/settings.local.json
   grind         a /kg-grind loop's state: start (--resume), status, note --started, stop
+  screen        new | list | show | control  — frozen subsets cheap runs share (KG_SCREEN), compared with a control
+  sweep         new | run | status | decide  — many variants by successive halving over screens, best of N at the end
   datasets    pull  — download a dataset, file by file when the whole-dataset download returns 404
   gpu         quota | plan | build | push | status | wait | collect | repush | release | cancel | log  — Kaggle GPUs/TPUs
 """
@@ -483,6 +485,177 @@ def cmd_final(a):
               "`python -m kgkit ledger predictiveness` measures which signal predicted the private leaderboard")
         return
     print("\n".join(FN.steps(st)))
+
+
+def cmd_screen(a):
+    """`kgkit screen new|list|show|control`: the frozen subsets screened runs share (``kgkit.screen``)."""
+    from . import screen as SC
+    from . import state as S
+
+    root = S.find_root()
+    if root is None:
+        raise SystemExit("not inside a kaggle-grandmaster workspace (no .kaggle-gm/)")
+    if a.action == "list":
+        screens = SC.listed(root)
+        for s in screens:
+            print(f"  {s.describe()}")
+        if not screens:
+            print("(no screens yet: `kgkit screen new <name> --frac 0.3 [--folds 0]`)")
+        return
+    if not a.args:
+        raise SystemExit(f"`kgkit screen {a.action}` needs the screen's name"
+                         + (": `kgkit screen control <baseline id> <screen>`" if a.action == "control" else ""))
+    if a.action == "show":
+        try:
+            s = SC.load(root, a.args[0])
+        except ValueError as e:
+            raise SystemExit(str(e))
+        print(s.describe())
+        print(f"  ids: {s.ids_file}; fingerprint {s.hash}; seed {s.seed}")
+        return
+    if a.action == "control":
+        _screen_control(root, a)
+        return
+    _screen_new(root, a)
+
+
+def _screen_new(root, a) -> None:
+    import pandas as pd
+
+    from . import screen as SC
+    from . import state as S
+
+    st = S.load(root)
+    if a.ids:
+        path, _, col = a.ids.rpartition(":")
+        df, id_col = _read(path), col
+    else:
+        train = Path(root) / "data" / "train.csv"
+        if not train.is_file():
+            raise SystemExit("no data/train.csv: name the units to draw from with --ids FILE:COL")
+        df = _read(str(train))
+        id_col = st.id_col if st and st.id_col in df.columns else None
+        if id_col is None:
+            raise SystemExit(f"data/train.csv has no id column {st.id_col if st else ''!r}: set it "
+                             "(`kgkit config id_col=<col>`) or pass --ids FILE:COL")
+    group = a.group
+    if group is None and not a.ids:
+        spec = Path(root) / S.STATE_DIR / "folds_spec.json"
+        if spec.is_file():
+            group = json.loads(spec.read_text(encoding="utf-8")).get("group") or None
+    for c in (id_col, group, a.time_col):
+        if c and c not in df.columns:
+            raise SystemExit(f"{a.ids or 'data/train.csv'} has no column {c!r}")
+    strata, strategy = None, "random"
+    if a.time_col:
+        strategy = f"time:{a.time_col}" + (f", groups {group}" if group else "")
+    elif group:
+        strategy = f"group:{group}"
+    elif not a.no_stratify and not a.ids and st is not None and st.target in df.columns \
+            and df[st.target].nunique() <= 50:
+        strata, strategy = df[st.target].to_numpy(), f"stratified:{st.target}"
+    time = None
+    if a.time_col:
+        t = df[a.time_col]
+        time = t.to_numpy() if pd.api.types.is_numeric_dtype(t) else pd.to_datetime(t).to_numpy()
+    try:
+        s = SC.create(root, a.args[0], df[id_col].to_numpy(), a.frac, folds=a.folds, seed=a.seed,
+                      group=df[group].to_numpy() if group else None, time=time, strata=strata, strategy=strategy)
+    except ValueError as e:
+        raise SystemExit(str(e))
+    print(f"{s.describe()}; frozen in .kaggle-gm/screens/{s.name}.json")
+    print(f"a pipeline run with KG_SCREEN={s.name} trains and scores only these rows"
+          + (" and folds" if s.folds else "") + "; compare its runs with a control: `kgkit screen control <baseline> "
+          f"{s.name}`")
+
+
+def _screen_control(root, a) -> None:
+    from . import screen as SC
+    from .experiment import Ledger
+
+    if len(a.args) < 2:
+        raise SystemExit("`kgkit screen control <baseline id> <screen>`")
+    led = Ledger(root)
+    try:
+        base, s = led.get(a.args[0]), SC.load(root, a.args[1])
+    except (KeyError, ValueError) as e:
+        raise SystemExit(str(e.args[0]) if e.args else str(e))
+    env = f"KG_SCREEN={s.name} KG_CONTROL_OF={base['id']}"
+    have = led.control(base["id"], {"fidelity": s.fidelity()})
+    if have is not None:
+        print(f"{base['id']} already has a control on {s.name}: {have['id']} (another run replaces it)")
+    if base.get("cmd"):
+        print(f"{env} {base['cmd']}")
+        print("add the same KG_FIDELITY='{...}' as the screens when they run at cheaper settings")
+    else:
+        print(f"{base['id']} has no command on record (logged by hand): run its pipeline with {env}")
+
+
+def cmd_sweep(a):
+    """`kgkit sweep new|run|status|decide` (``kgkit.sweep``)."""
+    from . import state as S
+    from . import sweep as SW
+
+    root = S.find_root()
+    if root is None:
+        raise SystemExit("not inside a kaggle-grandmaster workspace (no .kaggle-gm/)")
+    if a.action == "status" and not a.name:
+        sweeps = SW.listed(root)
+        for st in sweeps:
+            print(f"  {st['name']}: {len(st['variants'])} variant(s) of {st['base']}, {st['state']}")
+        if not sweeps:
+            print("(no sweeps yet: `kgkit sweep new <name> --cmd '...' --variant NAME=ARGS --rung screen=<s>`)")
+        return
+    if not a.name:
+        raise SystemExit(f"`kgkit sweep {a.action}` needs the sweep's name")
+    try:
+        if a.action == "new":
+            _sweep_new(root, a)
+        elif a.action == "run":
+            SW.run(root, a.name, parallel=a.parallel, one=a.one, dry_run=a.dry_run, new_control=a.new_control)
+        elif a.action == "status":
+            print("\n".join(SW.status_lines(root, a.name)))
+        else:
+            SW.decide(root, a.name)
+    except ValueError as e:
+        raise SystemExit(str(e))
+
+
+def _sweep_new(root, a) -> None:
+    import math
+
+    from . import evalset as E
+    from . import screen as SC
+    from . import sweep as SW
+    from .experiment import Ledger
+
+    if not a.cmd:
+        raise SystemExit("`kgkit sweep new` needs --cmd: the command of one run, with {args} where each variant's "
+                         "arguments go")
+    led = Ledger(root)
+    try:
+        base = led.get(a.base) if a.base else led.baseline()
+    except KeyError as e:
+        raise SystemExit(str(e.args[0]) if e.args else str(e))
+    if base is None:
+        raise SystemExit("no accepted baseline yet: name the run the variants branch from with --base <id>")
+    if E.partial(base) or not isinstance(base.get("cv"), (int, float)):
+        raise SystemExit(f"{base['id']} is not a full run with a score of its own: a sweep branches from one")
+    rung_list = SW.rungs(a.rung)
+    for r in rung_list:
+        if r["screen"]:
+            SC.load(root, r["screen"])  # ValueError on an unknown screen
+    variant_list = SW.variants(a.variant, a.grid)
+    st = SW.new(root, a.name, base["id"], a.cmd, variant_list, rung_list, eta=a.eta, base_args=a.base_args)
+    n, total = len(variant_list), 0
+    for r in range(len(rung_list)):
+        total += n
+        n = max(1, math.ceil(n / max(1, a.eta)))
+    print(f"sweep {a.name}: {len(variant_list)} variant(s) of {base['id']}, rungs "
+          + " -> ".join(SW.describe_rung(st, r) for r in range(len(rung_list)))
+          + f", eta {a.eta}: at most {total} runs, plus {len(rung_list) - 1} control(s) (reused when on file)")
+    print(f"`kgkit sweep run {a.name} --dry-run` prints the first commands; `kgkit sweep run {a.name} [--parallel N]` "
+          "runs them")
 
 
 def cmd_grind(a):
@@ -1172,6 +1345,7 @@ def _ledger_compare(led, a, hint: bool = True, backlog: int | None = None) -> di
     for ref in refs:
         if not Path(ref).is_dir() and not _is_file_ref(led, ref):
             led.get(ref)  # fail early on a typo
+    _check_fidelity(led, refs)
     pair = _unit_records(led, refs)
     if pair is not None:  # both scored on unit tables: compared on them, whatever else they stored
         return _ledger_compare_units(led, a, *pair, hint=hint, backlog=backlog)
@@ -1265,8 +1439,43 @@ def _ledger_compare(led, a, hint: bool = True, backlog: int | None = None) -> di
            "k": folds_res["k"] if folds_res is not None else None,
            "folds_improved": folds_res["folds_improved"] if folds_res is not None else None}
     if hint:
-        print(f"\nrecord it: {_finish_command(led, new_id, base_id, res['decision'].lower(), backlog)}")
+        print(f"\n{_record_hint(led, new_id, base_id, res['decision'].lower(), backlog)}")
     return res
+
+
+def _check_fidelity(led, refs) -> None:
+    """Refuse to compare runs made at different fidelity (a screen with a full run, two screens of other settings):
+    the gap would measure the fidelity, not the change."""
+    from . import evalset as E
+    from . import screen as SC
+
+    if any(Path(r).is_dir() or _is_file_ref(led, r) for r in refs):
+        return
+    ra, rb = (led.get(r) for r in refs)
+    if E.fidelity_key(ra) != E.fidelity_key(rb):
+        name = (ra.get("fidelity") or rb.get("fidelity") or {}).get("screen")
+        base = rb if E.partial(ra) else ra
+        how = (f"`kgkit screen control {base['id']} {name}` prints the command for the control" if name else
+               "run the baseline's pipeline with the same KG_FIDELITY and KG_CONTROL_OF=<baseline>")
+        raise SystemExit(f"{ra['id']} ({SC.describe(ra.get('fidelity'))}) and {rb['id']} "
+                         f"({SC.describe(rb.get('fidelity'))}) were run at different fidelity: the gap would measure "
+                         f"that, not the change. A screen is compared with its control, the baseline's pipeline at the "
+                         f"same fidelity ({how}); a full run with a full run")
+
+
+def _record_hint(led, new_id: str, base_id: str, decision: str, backlog: int | None = None) -> str:
+    """The line after a verdict: the `exp finish` call that records it, or for a screen, what to do with it."""
+    from . import evalset as E
+
+    try:
+        screen = E.partial(led.get(new_id))
+    except KeyError:
+        screen = False
+    if screen:
+        return (f"screen {decision.upper()} against its control: a screen is never kept. Promote one that passed (run "
+                "it at the next fidelity, up to the full run that is decided as usual: `kgkit sweep` does it); "
+                f"record one that failed with `kgkit exp finish {new_id} discard \"<why>\"`")
+    return f"record it: {_finish_command(led, new_id, base_id, decision, backlog)}"
 
 
 def _unit_records(led, refs) -> tuple[dict, dict] | None:
@@ -1315,7 +1524,7 @@ def _ledger_compare_units(led, a, ra: dict, rb: dict, hint: bool = True, backlog
            "k": folds_res["k"] if folds_res is not None else None,
            "folds_improved": folds_res["folds_improved"] if folds_res is not None else None}
     if hint:
-        print(f"\nrecord it: {_finish_command(led, ra['id'], rb['id'], res['decision'].lower(), backlog)}")
+        print(f"\n{_record_hint(led, ra['id'], rb['id'], res['decision'].lower(), backlog)}")
     return res
 
 
@@ -1332,8 +1541,12 @@ def _tries(led, refs) -> int:
 def _default_base(led, rec: dict) -> dict | None:
     """What a record is compared with when no baseline is named (``Ledger.base_for``): its nearest kept ancestor,
     else its parent; without a parent, its track's accepted baseline."""
+    from .experiment import NoControl
+
     try:
         return led.base_for(rec)
+    except NoControl as e:
+        raise SystemExit(str(e))
     except KeyError:
         raise SystemExit(f"{rec['id']}'s parent {rec['parent']} is not in this ledger: name the baseline with "
                          "--parent <id>")
@@ -1583,6 +1796,7 @@ def _log_comparison(led, new_id: str, base_id: str, folds_res: dict | None, boot
     """Append the measured paired noise to .kaggle-gm/comparisons.jsonl: `status` and the session hook read it
     there instead of re-running a bootstrap (or guessing from the size of the evaluation set), and `exp finish`
     reads the verdict back (``k``, ``folds_improved``, ``flags``) instead of comparing the pair again."""
+    import hashlib
     import math
 
     from . import evalset as EV
@@ -1591,10 +1805,14 @@ def _log_comparison(led, new_id: str, base_id: str, folds_res: dict | None, boot
     if src is None or not (isinstance(src.get("se"), float) and math.isfinite(src["se"]) and src["se"] > 0):
         return
     try:
-        key = led.eval_record_key(led.get(new_id))
+        new_rec = led.get(new_id)
+        key = led.eval_record_key(new_rec)
     except KeyError:  # an artefact folder
-        key = None
-    entry = {"new": new_id, "base": base_id, "eval": key or led.eval_key(), "question": "paired",
+        new_rec, key = {}, None
+    key = key or led.eval_key()
+    if EV.partial(new_rec):  # a screen's noise is a subset's: kept apart from the noise `status` reports
+        key = f"{key}|fidelity:{hashlib.sha1(EV.fidelity_key(new_rec).encode()).hexdigest()[:12]}"
+    entry = {"new": new_id, "base": base_id, "eval": key, "question": "paired",
              "gain": src["gain"], "se": src["se"], "decision": decision,
              "method": boot["method"] if boot is not None else "fold-paired t",
              "unit": boot["unit"] if boot is not None else "folds",
@@ -1932,11 +2150,21 @@ def compare_logged(rec: dict, parent: str | None = None, truth: str | None = Non
 
     led = Ledger(root)
     rec = led.get(rec["id"])
+    if rec.get("control_of"):
+        from . import screen as SC
+
+        print(f"\n{rec['id']}: control of {rec['control_of']} at {SC.describe(rec.get('fidelity'))}; the screens run "
+              "at this fidelity are compared with it")
+        return None
     if parent:
+        from . import evalset as E
+
         try:
             base = led.get(parent)
         except KeyError:
             raise SystemExit(f"its parent {parent} is not in this ledger")
+        if E.fidelity_key(base) != E.fidelity_key(rec):  # a screen of that baseline: compared with its control
+            base = _default_base(led, rec) if rec.get("parent") == base["id"] else led.control(base["id"], rec) or base
     else:
         base = _default_base(led, rec)
     if base is None:
@@ -2046,7 +2274,7 @@ def _exp_finish(led, a) -> None:
     suggested = res["decision"].lower() if res is not None else None
     if decision is None:
         if suggested:
-            print(f"\nrecord it: {_finish_command(led, rec['id'], base['id'], suggested, item['id'] if item else None)}")
+            print(f"\n{_record_hint(led, rec['id'], base['id'], suggested, item['id'] if item else None)}")
         else:
             print(f"\nno verdict from the comparison: decide by hand, `kgkit exp finish {rec['id']} "
                   "keep|discard|inconclusive \"<why>\"`")
@@ -3125,6 +3353,48 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--reason", default="", help="stop: why it ended")
     s.set_defaults(fn=cmd_grind)
 
+    s = sub.add_parser("screen", help="screens: a frozen subset (rows or units, whole groups, the latest window, some "
+                                      "folds) that cheap runs of any pipeline share, so they compare with a control "
+                                      "at the same fidelity (KG_SCREEN)")
+    s.add_argument("action", choices=["new", "list", "show", "control"])
+    s.add_argument("args", nargs="*", help="new/show: the screen's name; control: <baseline id> <screen>")
+    s.add_argument("--frac", type=float, default=1.0, help="new: the share of rows or units it keeps (default 1: all, "
+                                                           "for a screen of some folds only)")
+    s.add_argument("--folds", type=int, nargs="+", help="new: the folds a screened run trains and predicts")
+    s.add_argument("--seed", type=int, default=0)
+    s.add_argument("--group", help="new: column whose groups are kept whole (default: the group `kgkit folds` used)")
+    s.add_argument("--time-col", help="new: keep the latest window by this column (time series)")
+    s.add_argument("--no-stratify", action="store_true", help="new: draw rows at random, not a share of each class")
+    s.add_argument("--ids", help="new: FILE:COL of the units to draw from (tomograms, studies, problems...), other "
+                                 "columns of FILE for --group/--time-col (default: data/train.csv and its id column)")
+    s.set_defaults(fn=cmd_screen)
+
+    s = sub.add_parser("sweep", help="many variants of one pipeline by successive halving: each rung runs the "
+                                     "survivors on a screen (cheapest first), compares them with that rung's control "
+                                     "and promotes the best 1/eta; the full run is compared with the baseline as the "
+                                     "best of every variant tried")
+    s.add_argument("action", choices=["new", "run", "status", "decide"])
+    s.add_argument("name", nargs="?")
+    s.add_argument("--base", help="new: the baseline the variants branch from (default: the accepted one)")
+    s.add_argument("--cmd", help="new: the command of one run, any pipeline's; kgkit fills in {args} (the "
+                                 "variant's), {rung_args} (the rung's settings as --key value), {base}, {sweep}, "
+                                 "{variant}, {rung}")
+    s.add_argument("--base-args", default="", help="new: the arguments that give the baseline's own run (for the "
+                                                   "controls; default none)")
+    s.add_argument("--variant", action="append", default=[], metavar="NAME=ARGS")
+    s.add_argument("--grid", action="append", default=[], metavar="--FLAG=V1,V2",
+                   help="new: one axis of a grid; several --grid make their product")
+    s.add_argument("--rung", action="append", default=[], metavar="screen=NAME,KEY=VALUE",
+                   help="new: a rung before the full run, cheapest first (a screen of `kgkit screen new`, cheaper "
+                        "settings, or both)")
+    s.add_argument("--eta", type=int, default=3, help="new: each rung promotes the best 1/eta (default 3)")
+    s.add_argument("--parallel", type=int, default=1, help="run: runs at a time (default 1)")
+    s.add_argument("--one", action="store_true", help="run: one rung, then stop")
+    s.add_argument("--dry-run", action="store_true", help="run: print the next rung's commands, run nothing")
+    s.add_argument("--new-control", action="store_true",
+                   help="run: run the controls again, not those on file (the pipeline's code changed)")
+    s.set_defaults(fn=cmd_sweep)
+
     s = sub.add_parser("permissions", help="allow rules for kgkit's local bookkeeping and read-only calls, so they "
                                            "stop asking after the user's next message and in subagents (#123)")
     s.add_argument("--write", action="store_true",
@@ -3229,6 +3499,26 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
+_GLUED = {"sweep": ("--grid", "--cmd", "--base-args", "--variant")}
+
+
+def _glue(argv: list[str]) -> list[str]:
+    """`kgkit sweep new --grid --lr=1e-3,3e-4`: an option whose value starts with '-' is passed as --grid=VALUE, which
+    argparse reads as a value (separate, it would take it for an option of its own)."""
+    opts = _GLUED.get(argv[0] if argv else "")
+    if not opts:
+        return argv
+    out, i = [], 0
+    while i < len(argv):
+        if argv[i] in opts and i + 1 < len(argv):
+            out.append(f"{argv[i]}={argv[i + 1]}")
+            i += 2
+        else:
+            out.append(argv[i])
+            i += 1
+    return out
+
+
 def main(argv=None):
     # Line-buffered: piped stdout is otherwise written at exit, after a SystemExit message on stderr that points
     # to the output "above".
@@ -3237,7 +3527,7 @@ def main(argv=None):
             stream.reconfigure(encoding="utf-8", errors="replace", line_buffering=True)
         except (AttributeError, ValueError):
             pass
-    args = build_parser().parse_args(argv)
+    args = build_parser().parse_args(_glue(list(sys.argv[1:] if argv is None else argv)))
     try:
         args.fn(args)
     except KeyError as e:

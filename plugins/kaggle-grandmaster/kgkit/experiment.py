@@ -100,6 +100,10 @@ MIN_DISTINCT_CV = 4
 KEY_FIELDS = ("folds_hash", "eval_hash")  # fingerprints of the evaluation set a record was scored on
 
 
+class NoControl(LookupError):
+    """A screen whose baseline has no control at the screen's fidelity: there is nothing honest to compare it with."""
+
+
 def has_own_cv(r: dict, holdout: bool = False) -> bool:
     """A score of its own on the evaluation set (see ``kgkit.evalset.own_score``)."""
     return E.own_score(r, holdout)
@@ -334,6 +338,12 @@ class Ledger:
         beside the arrays (see :meth:`log_units`)."""
         if track:
             E.check_track(track)
+        from . import screen as SC
+        from . import sweep as SW
+
+        fidelity = extra.pop("fidelity", None) or SC.current_fidelity(self.root)
+        control = extra.pop("control_of", None) or SC.control_of()
+        sweep = extra.pop("sweep", None) or SW.tag()
         recs = self.records()
         if cv is None and not set(tags) & set(LB_ONLY_TAGS):
             tags = [*tags, "lb-only"]
@@ -361,6 +371,9 @@ class Ledger:
             "recheck": os.environ.get("KG_RECHECK") or None,  # set by `kgkit recheck`: not on the frozen folds
             "parent": self._resolve_id(parent) if parent else None,
             **({"track": track} if track else {}),
+            **({"fidelity": _jsonable(fidelity)} if fidelity else {}),  # a screen (KG_SCREEN / KG_FIDELITY)
+            **({"control_of": self._resolve_id(control)} if control else {}),  # the baseline it is the control of
+            **({"sweep": sweep} if sweep else {}),  # {name, variant, rung} of a `kgkit sweep` run
             "decision": _check_decision(decision) if decision else None,
             **({"decision_seq": self._next_decision_seq()} if decision else {}),
             "phase": (st.phase or None) if st else None,
@@ -471,6 +484,12 @@ class Ledger:
             raise ValueError(f"{rec['id']} is tagged public-lb-fitted (tilted toward the public labels): it is display "
                              f"only and cannot be {decision}; decide discard, or remove the tag with "
                              f"`ledger tag {rec['id']} public-lb-fitted --remove` if it is not fitted")
+        if decision in ACCEPTED and E.partial(rec):
+            from . import screen as SC
+
+            raise ValueError(f"{rec['id']} is a screen ({SC.describe(rec['fidelity'])}): its score is no estimate of "
+                             f"the full pipeline's, so it is never {decision}. Promote it: run it at the next fidelity "
+                             "(the full run), and decide that run; a screen is recorded discard or inconclusive")
         fields: dict[str, Any] = {"decision": decision, "decided_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
                                   "decision_seq": self._next_decision_seq()}
         if member or rec.get("member"):
@@ -535,9 +554,32 @@ class Ledger:
 
     def base_for(self, rec: dict) -> dict | None:
         """What ``rec`` is compared with when no baseline is named (``evalset.base_for``): its nearest kept
-        ancestor, else its parent; without a parent, its track's accepted baseline. KeyError on a parent this
+        ancestor, else its parent; without a parent, its track's accepted baseline. A screen is compared with that
+        baseline's control at its own fidelity (``NoControl`` when there is none). KeyError on a parent this
         ledger does not have."""
-        return E.base_for(self.get(rec["id"]) if rec.get("id") else rec, self.records())
+        rec = self.get(rec["id"]) if rec.get("id") else rec
+        base = E.base_for(rec, self.records())
+        if base is None or E.fidelity_key(base) == E.fidelity_key(rec):
+            return base
+        ctl = self.control(base["id"], rec)
+        if ctl is None:
+            from . import screen as SC
+
+            name = (rec.get("fidelity") or {}).get("screen")
+            how = (f"`kgkit screen control {base['id']} {name}` prints the command" if name else
+                   f"run {base['id']}'s pipeline with the same KG_FIDELITY and KG_CONTROL_OF={base['id']}")
+            raise NoControl(f"{rec['id']} is a screen ({SC.describe(rec.get('fidelity'))}) and {base['id']} is "
+                            f"{SC.describe(base.get('fidelity'))}: it is compared with a control, {base['id']}'s "
+                            f"pipeline run at the same fidelity, and there is none yet: {how}"
+                            " (`kgkit sweep` runs it for you)")
+        return ctl
+
+    def control(self, base_id: str, like: dict) -> dict | None:
+        """The newest control of ``base_id`` at the fidelity of ``like``, None when there is none."""
+        key = E.fidelity_key(like)
+        hits = [r for r in self.records() if r.get("control_of") == base_id and E.fidelity_key(r) == key
+                and r["id"] != like.get("id") and not r.get("recheck")]
+        return hits[-1] if hits else None
 
     def lineage(self, exp_id: str) -> list[dict]:
         """Chain of parents back to the root, oldest first — the list of changes a reverse ablation
@@ -559,16 +601,23 @@ class Ledger:
         included. A sweep's runs share their parent, and ideas tried one after another against one baseline count
         as much: each was a chance for noise to pass. Only runs with their own score on the same evaluation set
         count; re-checks on re-drawn folds do not, and re-runs of one pipeline with other seeds
-        (``compare.replica_key``) count once."""
+        (``compare.replica_key``) count once, as does one variant of a sweep at each of its rungs. A screen counts
+        (each was a chance for noise to promote a variant), the control of a rung does not."""
         from .compare import replica_key
+
+        def one(r):
+            sw = r.get("sweep") or {}
+            return f"sweep:{sw['name']}:{sw['variant']}" if sw.get("name") and sw.get("variant") else (
+                replica_key(r) or r["id"])
 
         rec = self.get(exp_id)
         parent = rec.get("parent") or (self._resolve_id(base_id) if base_id else None)
         family = [r for r in self.records() if parent and r.get("parent") == parent]
         holdout, key = self._holdout(), self.eval_record_key(rec)
-        family = [r for r in family if not r.get("recheck") and E.own_score(r, holdout)
+        family = [r for r in family if not r.get("recheck") and not r.get("control_of")
+                  and (E.own_score(r, holdout) or (E.partial(r) and isinstance(r.get("cv"), (int, float))))
                   and self.eval_record_key(r) == key]
-        return max(1, len({replica_key(r) or r["id"] for r in [*family, rec]}))
+        return max(1, len({one(r) for r in [*family, rec]}))
 
     def decisions_on_folds(self, folds_hash: str | None) -> int:
         """How many keep/discard decisions were taken on one fold split — every decision spends a
@@ -623,7 +672,7 @@ class Ledger:
         CV): left out of best CV and the CV-LB correlation."""
         holdout = self._holdout()
         return [r for r in self.records() if isinstance(r.get("cv"), (int, float)) and not r.get("recheck")
-                and not has_own_cv(r, holdout)]
+                and not E.partial(r) and not has_own_cv(r, holdout)]
 
     def cv_lb_pairs(self) -> list[tuple[float, float]]:
         """(CV, public LB) of submissions that have a cross-validated score of their own."""

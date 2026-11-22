@@ -173,6 +173,12 @@ def brief_line(root: str | Path) -> str:
     return "\n".join(out)
 
 
+def undecided(recs: list[dict]) -> list[dict]:
+    """Records that still need a decision: not re-checks, and not controls (a screen's reference run is never
+    decided)."""
+    return [r for r in recs if not r.get("decision") and not r.get("recheck") and not r.get("control_of")]
+
+
 def journey_lines(st, recs: list[dict]) -> list[str]:
     """The phase the work is in and the records with no decision: the journey of the finished competition is told
     from both (`kgkit ledger journey`), so the brief asks for them while the work happens rather than having them
@@ -186,9 +192,9 @@ def journey_lines(st, recs: list[dict]) -> list[str]:
     elif len(recs) >= UNDECIDED_MIN:
         out.append("No phase named: `kgkit ledger phase \"<what the work is about now>\"` groups the records that "
                    "follow, so the competition's journey can be told phase by phase when it ends.")
-    undecided = [r for r in recs if not r.get("decision") and not r.get("recheck")]
-    if len(undecided) >= UNDECIDED_MIN:
-        out.append(f"{len(undecided)} record(s) have no decision (oldest {undecided[0]['id']}): decide each, or a sweep "
+    waiting = undecided(recs)
+    if len(waiting) >= UNDECIDED_MIN:
+        out.append(f"{len(waiting)} record(s) have no decision (oldest {waiting[0]['id']}): decide each, or a sweep "
                    "at once (`kgkit ledger decide 12..20 discard \"<why>\"`), so the lineage shows how each idea "
                    "fared.")
     return out
