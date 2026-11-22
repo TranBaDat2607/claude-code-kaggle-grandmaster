@@ -344,21 +344,109 @@ def describe(res: dict) -> str:
     return f"{what}{at} {fmt_se(res['se'])} ({how} {src} {res['n_units']} {res['unit']}{redrawn})"
 
 
-def verdict(folds: dict | None, boot: dict | None = None, z: float = 2.0) -> dict:
+# ----------------------------------------------------------------------------- best of N (#134)
+# A run promoted from N tries against one baseline (a sweep, or ideas tried one after another until one passed) is the
+# luckiest of N noisy draws: with no real gain anywhere, its z is the maximum of N standard normals. The usual z = 2
+# then passes far more often than its one-comparison rate alpha, so KEEP asks for the z that the best of N pure-noise
+# runs reaches with probability alpha (Sidak: (1 - alpha)^(1/N) quantile). One try keeps the usual z.
+Z_KEEP = 2.0
+
+
+def _norm_inv_upper(p: float) -> float:
+    """The z with P(Z > z) = p, accurate for tiny p."""
+    from statistics import NormalDist
+
+    return -NormalDist().inv_cdf(p)
+
+
+def best_of_n_z(n: int, z: float = Z_KEEP) -> float:
+    """The z a KEEP needs when the run is the best of ``n`` tries: same false-promotion rate as ``z`` for one."""
+    n = max(1, int(n))
+    if n == 1:
+        return float(z)
+    alpha = 1 - _phi(z)
+    return _norm_inv_upper(-math.expm1(math.log1p(-alpha) / n))
+
+
+_EMAX: dict[int, float] = {}
+
+
+def expected_max(n: int) -> float:
+    """E[max of ``n`` independent standard normals]: what pure noise gives the best of n tries, in SE."""
+    n = max(1, int(n))
+    if n not in _EMAX:
+        if n == 1:
+            _EMAX[n] = 0.0
+        else:
+            x = np.linspace(-9.0, 9.0, 36001)
+            cdf = 0.5 * (1 + np.vectorize(math.erf)(x / math.sqrt(2)))
+            pdf = np.exp(-x * x / 2) / math.sqrt(2 * math.pi)
+            f = x * n * pdf * cdf ** (n - 1)
+            _EMAX[n] = float(np.sum((f[1:] + f[:-1]) / 2 * np.diff(x)))
+    return _EMAX[n]
+
+
+def best_of_line(tries: int, need: float, z: float = Z_KEEP) -> str:
+    return (f"best of {tries}: noise alone puts the best of {tries} tries at ~{expected_max(tries):.2f} SE on average; "
+            f"KEEP needs {need:.2f} SE (the {z:g} SE of one comparison, corrected for {tries} tries)")
+
+
+def _strength(folds: dict | None, boot: dict | None) -> float:
+    """The stronger of the two paired statistics (fold t, bootstrap z), NaN when neither is defined."""
+    vals = []
+    if folds is not None and folds["k"] > 1 and folds["t"] == folds["t"]:
+        vals.append(float(folds["t"]))
+    if boot is not None and boot["z"] == boot["z"]:
+        vals.append(float(boot["z"]))
+    return max(vals) if vals else float("nan")
+
+
+def rejudge(logged: dict, tries: int, z: float = Z_KEEP) -> dict:
+    """A comparison logged earlier (comparisons.jsonl), judged again with ``tries`` as they are now: a KEEP whose
+    strength (else gain / SE) falls short of the best-of-N z becomes INCONCLUSIVE. Only ever stricter: the other
+    conditions of a KEEP (most folds improving, no test against) are not on file to grant one."""
+    tries = max(1, int(tries or 1))
+    out = {**logged, "reasons": list(logged.get("reasons") or ()), "tries": tries}
+    if tries <= int(logged.get("tries") or 1):
+        out["tries"] = int(logged.get("tries") or 1)
+        return out
+    need = best_of_n_z(tries, z)
+    out["z_needed"] = need
+    out["reasons"].append(best_of_line(tries, need, z))
+    strength = logged.get("strength")
+    if not isinstance(strength, (int, float)):
+        se = logged.get("se")
+        strength = logged["gain"] / se if isinstance(se, (int, float)) and se > 0 else float("nan")
+    if logged.get("decision") == "KEEP" and not strength >= need:
+        out["decision"] = "INCONCLUSIVE"
+        out["reasons"].append(_short_of_best(z, tries))
+    return out
+
+
+def _short_of_best(z: float, tries: int) -> str:
+    return (f"passes the {z:g} SE of one comparison but not as the best of {tries} tries: confirm it (a second seed, "
+            "the full folds) before accepting")
+
+
+def verdict(folds: dict | None, boot: dict | None = None, z: float = Z_KEEP, tries: int = 1) -> dict:
     """KEEP / DISCARD / INCONCLUSIVE from the paired fold test and/or the paired bootstrap.
 
     KEEP needs a positive gain that is >= ``z`` standard errors from zero in one test, with the
-    other test (if available) not pointing the other way and most folds improving.
+    other test (if available) not pointing the other way and most folds improving. ``tries``: how many
+    candidates the new run was picked from (``Ledger.tries``); above 1, ``z`` becomes ``best_of_n_z(tries, z)``.
     A gain far above the baseline's fold std is flagged: audit it for leakage before accepting.
     """
     if folds is None and boot is None:
         raise ValueError("need fold scores or OOF predictions")
+    tries = max(1, int(tries or 1))
+    need = best_of_n_z(tries, z)
     gain = folds["gain"] if folds is not None else boot["gain"]
     reasons, flags = [], []
-    fold_strong = folds is not None and folds["k"] > 1 and folds["t"] >= z
+    fold_strong = folds is not None and folds["k"] > 1 and folds["t"] >= need
     majority = folds is None or folds["folds_improved"] * 2 > folds["k"]
-    boot_strong = boot is not None and boot["z"] == boot["z"] and boot["z"] >= z
+    boot_strong = boot is not None and boot["z"] == boot["z"] and boot["z"] >= need
     boot_against = boot is not None and boot["gain"] < 0
+    strength = _strength(folds, boot)
     if folds is not None:
         reasons.append(f"folds: gain {fmt_gain(folds['gain'])}, improved {folds['folds_improved']}/{folds['k']}, "
                        f"paired SE {fmt_se(folds['se'])} (t={folds['t']:.2f}); baseline fold std "
@@ -373,6 +461,8 @@ def verdict(folds: dict | None, boot: dict | None = None, z: float = 2.0) -> dic
     if boot is not None and boot.get("p_rope") is not None:
         reasons.append(f"ROPE +/-{boot['rope']:g}: P(better by more) {boot['p_above_rope']:.2f}, P(practically "
                        f"equivalent) {boot['p_rope']:.2f}, P(worse by more) {boot['p_below_rope']:.2f}")
+    if tries > 1:
+        reasons.append(best_of_line(tries, need, z))
     if equivalent:
         decision = "INCONCLUSIVE"
         reasons.append("practically equivalent: keep whichever is simpler or cheaper")
@@ -382,9 +472,13 @@ def verdict(folds: dict | None, boot: dict | None = None, z: float = 2.0) -> dic
         decision = "KEEP"
     else:
         decision = "INCONCLUSIVE"
-        reasons.append("positive but within noise: rerun with a second seed (or more folds) before "
-                       "accepting, or keep only if it is free (no extra complexity / runtime)")
-    return {"decision": decision, "gain": gain, "reasons": reasons, "flags": flags}
+        if tries > 1 and strength >= z and majority and not boot_against:
+            reasons.append(_short_of_best(z, tries))
+        else:
+            reasons.append("positive but within noise: rerun with a second seed (or more folds) before "
+                           "accepting, or keep only if it is free (no extra complexity / runtime)")
+    return {"decision": decision, "gain": gain, "reasons": reasons, "flags": flags, "tries": tries,
+            "z_needed": need, "strength": strength}
 
 
 def format_comparison(new_id: str, base_id: str, res: dict) -> str:

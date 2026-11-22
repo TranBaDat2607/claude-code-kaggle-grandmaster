@@ -1194,7 +1194,8 @@ def _ledger_compare(led, a, hint: bool = True, backlog: int | None = None) -> di
         rope = a.rope if a.rope is not None else (st.rope if st else None)
         boot = estimate(y, pa, pb, m.name, method=_method(a), n_boot=a.boot, groups=groups, mask=ok, rope=rope)
         boot = _add_seed_noise(led, boot, a.args[0], base_ref)
-    v = verdict(folds_res, boot)
+    tries = getattr(a, "tries", None) or _tries(led, refs)
+    v = verdict(folds_res, boot, tries=tries)
     print(format_comparison(new_id, base_id, v))
     lb = None
     if boot is None and (a.public_n or (st.public_lb_n if st else None)):
@@ -1211,7 +1212,7 @@ def _ledger_compare(led, a, hint: bool = True, backlog: int | None = None) -> di
             lb = estimate(y, pa, pb, m.name, method=_method(a), n_boot=a.boot, groups=groups, mask=ok, size=public_n)
             print(f"  public LB (n={public_n}): {describe(lb)}: LB gaps between these two under "
                   f"~{fmt_se(2 * lb['se'])} are noise (assumes the public rows look like the evaluation rows)")
-    _log_comparison(led, new_id, base_id, folds_res, boot, lb, v["decision"], v["flags"])
+    _log_comparison(led, new_id, base_id, folds_res, boot, lb, v["decision"], v["flags"], v["tries"], v["strength"])
     src = boot if boot is not None else folds_res
     res = {**v, "new": new_id, "base": base_id, "se": src["se"],
            "k": folds_res["k"] if folds_res is not None else None,
@@ -1219,6 +1220,16 @@ def _ledger_compare(led, a, hint: bool = True, backlog: int | None = None) -> di
     if hint:
         print(f"\nrecord it: {_finish_command(led, new_id, base_id, res['decision'].lower(), backlog)}")
     return res
+
+
+def _tries(led, refs) -> int:
+    """`Ledger.tries` of the new ref against the base ref; 1 when either is an artefact folder or a file."""
+    if any(Path(r).is_dir() or _is_file_ref(led, r) for r in refs):
+        return 1
+    try:
+        return led.tries(refs[0], led.get(refs[1])["id"])
+    except KeyError:
+        return 1
 
 
 def _default_base(led, rec: dict) -> dict | None:
@@ -1470,7 +1481,8 @@ def _add_seed_noise(led, res: dict, new_ref: str, base_ref: str) -> dict:
 
 
 def _log_comparison(led, new_id: str, base_id: str, folds_res: dict | None, boot: dict | None, lb: dict | None,
-                    decision: str, flags: list[str] | None = None) -> None:
+                    decision: str, flags: list[str] | None = None, tries: int = 1,
+                    strength: float | None = None) -> None:
     """Append the measured paired noise to .kaggle-gm/comparisons.jsonl: `status` and the session hook read it
     there instead of re-running a bootstrap (or guessing from the size of the evaluation set), and `exp finish`
     reads the verdict back (``k``, ``folds_improved``, ``flags``) instead of comparing the pair again."""
@@ -1494,6 +1506,9 @@ def _log_comparison(led, new_id: str, base_id: str, folds_res: dict | None, boot
         entry.update(k=folds_res["k"], folds_improved=folds_res["folds_improved"])
     if flags:
         entry["flags"] = list(flags)
+    entry["tries"] = int(tries or 1)
+    if isinstance(strength, float) and math.isfinite(strength):
+        entry["strength"] = strength
     if lb is not None:
         entry.update(public_n=lb["size"], se_public=lb["se"])
     EV.log_comparison(led.root, entry)
@@ -1908,13 +1923,19 @@ def _exp_finish(led, a) -> None:
             opts["method"] = a.method
         logged = None if opts else _logged_comparison(led, rec["id"], base["id"])
         if logged is not None:
-            res = {**logged, "reasons": [], "flags": logged.get("flags") or []}
-            print(f"{rec['id']} vs {base['id']}: {logged['decision']} ({_verdict_summary(res)}, "
+            from .compare import rejudge
+
+            # the run was compared when it logged, often before the rest of its sweep ran: count the tries as now
+            res = rejudge({**logged, "reasons": [], "flags": logged.get("flags") or []},
+                          a.tries or led.tries(rec["id"], base["id"]))
+            print(f"{rec['id']} vs {base['id']}: {res['decision']} ({_verdict_summary(res)}, "
                   f"{logged.get('method', 'paired')}) - compared when it was logged")
+            for r in res["reasons"]:
+                print(f"  {r}")
             for f in res["flags"]:
                 print(f"  WARNING: {f}")
         else:
-            res = exp_compare(led, rec["id"], base["id"], opts, hint=False)
+            res = exp_compare(led, rec["id"], base["id"], {**opts, "tries": a.tries}, hint=False)
     suggested = res["decision"].lower() if res is not None else None
     if decision is None:
         if suggested:
@@ -2559,6 +2580,8 @@ _LEDGER_OPTIONS = [
                                      "competition.json)")),
     ("--public-n", dict(type=int, help="rows in the public LB (default public_lb_n): noise projected to the LB's "
                                        "sample size")),
+    ("--tries", dict(type=int, help="how many candidates the new run was picked from, for the best-of-N correction "
+                                    "(default: its sweep's members, else its parent's children on this split)")),
     ("--metric", dict(help="kgkit metric name or alias (default: competition.json)")),
     ("--test", dict(help="test predictions (.npy or FILE:COLUMN)")),
     ("--cv", dict(type=float, help="reported CV when no --truth is given")),
@@ -2616,7 +2639,7 @@ _LEDGER_ACTIONS = {
     "compare": ("paired comparison of two experiments (or artifacts/<name> folders of per-fold OOFs)",
                 [("new", None, "ledger id/name or artifacts folder"),
                  ("baseline", "?", "default: its nearest kept ancestor, else its track's accepted baseline")],
-                _PAIRED + " --ref"),
+                _PAIRED + " --ref --tries"),
     "noise": ("noise of one absolute score: bounds its CV-LB gap, not a difference between two models",
               [_EXP], "--truth --groups --boot --method --public-n --metric"),
     "decide": ("record the decision on a compared experiment (or on several: a sweep decided at once)",
@@ -2648,7 +2671,7 @@ _EXP_ACTIONS = {
                "idea (inconclusive keeps it running). Without a decision it prints the verdict and records nothing",
                [_EXP, ("keep|discard|inconclusive|baseline", "?", "the decision (left out: show the verdict only)"),
                 ("why", "*", "the note (default: the verdict's numbers)")],
-               "--parent --track --backlog --member " + _PAIRED),
+               "--parent --track --backlog --member --tries " + _PAIRED),
 }
 
 _BACKLOG_OPTIONS = [

@@ -524,6 +524,23 @@ class Ledger:
                 rec = None
         return chain[::-1]
 
+    def tries(self, exp_id: str, base_id: str | None = None) -> int:
+        """How many candidates ``exp_id`` was picked from, for the best-of-N correction of its comparison (#134):
+        the children of its parent (without a parent: of ``base_id``, the baseline it is compared with), itself
+        included. A sweep's runs share their parent, and ideas tried one after another against one baseline count
+        as much: each was a chance for noise to pass. Only runs with their own score on the same evaluation set
+        count; re-checks on re-drawn folds do not, and re-runs of one pipeline with other seeds
+        (``compare.replica_key``) count once."""
+        from .compare import replica_key
+
+        rec = self.get(exp_id)
+        parent = rec.get("parent") or (self._resolve_id(base_id) if base_id else None)
+        family = [r for r in self.records() if parent and r.get("parent") == parent]
+        holdout, key = self._holdout(), self.eval_record_key(rec)
+        family = [r for r in family if not r.get("recheck") and E.own_score(r, holdout)
+                  and self.eval_record_key(r) == key]
+        return max(1, len({replica_key(r) or r["id"] for r in [*family, rec]}))
+
     def decisions_on_folds(self, folds_hash: str | None) -> int:
         """How many keep/discard decisions were taken on one fold split — every decision spends a
         little of the split's ability to give unbiased estimates."""

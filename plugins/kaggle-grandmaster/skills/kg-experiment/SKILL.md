@@ -61,7 +61,10 @@ verdict, the bookkeeping is two kgkit calls: mark the idea running, then `kgkit 
    with its nearest kept ancestor (`--parent`), else its line's baseline.
 5. Decide with numbers, from the verdict the run printed: KEEP / DISCARD / INCONCLUSIVE. INCONCLUSIVE → second
    seed, logged with the same `--variant` so its spread counts as seed noise (or keep only if it adds no
-   complexity/runtime); a flagged huge jump → `validation-auditor` before accepting. The comparison needs other
+   complexity/runtime); a flagged huge jump → `validation-auditor` before accepting. A `best of N` line means
+   the run was one of N tries against that baseline (a sweep, or ideas tried in turn): KEEP then needs more than
+   2 SE, because the luckiest of N noise runs gets that far; `exp finish` counts the tries as they are when it
+   records. Never lower `--tries` to pass a run. The comparison needs other
    options (`--groups data/train.csv:<group>` when rows are clustered and `eval_groups` is unset, `--rope <gain>`
    for changes too small to matter)? Give them to `exp finish`: it then compares afresh. With no verdict printed
    (an older script), `kgkit exp finish <new>` alone compares and records nothing.
