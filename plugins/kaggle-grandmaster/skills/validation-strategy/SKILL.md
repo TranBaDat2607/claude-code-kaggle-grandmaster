@@ -39,6 +39,12 @@ patient-visit. Look for them (hash images, cluster texts, group by obvious IDs) 
 - Early stopping on the validation fold slightly inflates CV. For the final model either
   (a) use the per-fold models (average test preds over folds — the standard) or
   (b) retrain on full data with ~1.1–1.2× the mean best iteration.
+- **Seal a vault** in a new workspace: `kgkit folds ... --vault 0.1`. About 10% of the rows, drawn like the folds,
+  leave training and their labels leave the workspace. Every keep/discard decision is taken on the same folds, so
+  after many of them the CV is optimistic; the vault is the one set nothing was chosen on. `kgkit vault check <id>`
+  answers PASS or FAIL only (never a score), from a fixed budget: it tests a final candidate's total gain since the
+  root of its lineage. It is too noisy for one small step, so never use it to decide an experiment. With little
+  data `kgkit folds` says SMALL DATA: measure with `kgkit vault size` and ask the user how big a vault to seal.
 
 ## 3. Trust calibration: CV ↔ LB
 

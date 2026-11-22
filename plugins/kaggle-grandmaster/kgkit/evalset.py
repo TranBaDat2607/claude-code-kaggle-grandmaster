@@ -307,10 +307,10 @@ def fidelity_key(rec: dict) -> str:
 
 def kept(rec: dict) -> bool:
     """True for a kept node of the experiment tree: decided keep/baseline (an ensemble member kept with
-    ``--member`` too), not a re-check on re-drawn folds, not a screen, not fitted to the public LB. What branches
-    from it is compared with it."""
+    ``--member`` too), not a re-check on re-drawn folds, not a screen, not fitted to the public LB, not scored on
+    rows a vault took since (``pre_vault``, ``kgkit.vault``). What branches from it is compared with it."""
     return (isinstance(rec, dict) and rec.get("decision") in ACCEPTED and not rec.get("recheck")
-            and not partial(rec) and not lb_fitted(rec))
+            and not partial(rec) and not lb_fitted(rec) and not rec.get("pre_vault"))
 
 
 def accepted(rec: dict) -> bool:

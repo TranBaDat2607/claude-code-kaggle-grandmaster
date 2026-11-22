@@ -25,6 +25,13 @@ case "$SCRIPT" in
       *) exit 0 ;;
     esac
     ;;
+  pre_file.py)
+    # only a path in the sealed vault's folder is denied: anything else never starts Python
+    case "$INPUT" in
+      *kaggle-gm*|*KG_VAULT_HOME*) ;;
+      *) [ -n "$KG_VAULT_HOME" ] || exit 0 ;;
+    esac
+    ;;
   post_write.py)
     # only a written Python file can be model code; a CLAUDE.md is checked for a growing journal
     case "$INPUT" in

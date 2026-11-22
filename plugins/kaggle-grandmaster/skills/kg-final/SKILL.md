@@ -44,6 +44,12 @@ Follow the `final-submission-selection` skill.
    short argument for each and what scenario each protects against. An LB-only blend can only be the hedge;
    a public-LB-fitted file cannot be either. A public-tuned file is not a hedge: if one is proposed, put the
    CV-chosen alternative next to it.
+   **Vault**: when `kgkit status` shows a sealed vault, run `kgkit vault check <id>` on each pick (after it passed
+   the CV gate and `kgkit recheck`) and only on the picks: a check costs one of a fixed budget and answers PASS or
+   FAIL. A FAIL drops the candidate. `kgkit final` prints BLOCKED for a pick that has not passed; with no checks
+   left, `kgkit final --accept-unvaulted <id> --why "..."` records the exception in `reports/final-selection.md`.
+   Once the picks are settled, `kgkit vault open` returns the vault rows: retrain each pick with the command it
+   prints, submit those files and select them.
 4. Robustness checks: reproduce the chosen files from code (or confirm the kernel versions ran on
    the hidden test with runtime margin); validate files.
 5. Run `kgkit final`: it asks Kaggle which submissions are selected. With none selected, Kaggle

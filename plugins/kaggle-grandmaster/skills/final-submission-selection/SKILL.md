@@ -53,6 +53,13 @@ measured about 3x too small on a binary AUC task.
   CV-LB correlation.
 - If both CV and LB agree on a candidate, take it, and hedge with the second-best on a
   different axis.
+- **Sealed vault** (a `vault:` line in `kgkit status`): a pick must pass `kgkit vault check <id>`, the last gate
+  after the CV gate (paired, seed noise, best-of-N) and `kgkit recheck` on fresh folds. Spend checks only on real
+  candidates: each costs one of a fixed budget, and the answer is PASS or FAIL, never a score to tune against. A
+  FAIL means the gain is not confirmed on rows nothing was chosen on: drop the candidate rather than re-asking
+  with tweaks. `kgkit final` prints BLOCKED for an un-vaulted pick; `kgkit final --accept-unvaulted <id> --why
+  "..."` records an exception (no checks left, the deadline). After the picks, `kgkit vault open` puts the rows
+  back: retrain each pick on all rows, submit the retrained files and select those.
 
 ## 4. Robustness checks before locking
 

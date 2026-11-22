@@ -37,6 +37,7 @@ from pathlib import Path
 from . import adopt, gpu, safety
 from . import evalset as E
 from . import state as S
+from . import vault as V
 
 URL = "https://www.kaggle.com/competitions/{slug}/submissions"
 FITTED_WORDS = re.compile(r"public[\s_-]*lb[\s_-]*fitted", re.IGNORECASE)  # a submission description that says so
@@ -128,11 +129,13 @@ def _picks(st: S.CompetitionState) -> int:
     return max(1, int(st.final_submissions or 2))
 
 
-def selection(st: S.CompetitionState, recs: list[dict], subs=()) -> dict:
+def selection(st: S.CompetitionState, recs: list[dict], subs=(), vault: dict | None = None) -> dict:
     """What Kaggle would auto-select, from the public scores kgkit knows: ledger ``lb_public`` and the scored rows of
     ``submissions.jsonl`` (``kgkit adopt`` imports them). A row belongs to a record by ``exp_id`` or its message
     (``_link``); one that belongs to none is an unlinked entry. A record is fitted when it is tagged or a submission
-    of it says so in its message. Tolerates malformed records: a hook calls this."""
+    of it says so in its message. ``vault``: the gate of a sealed vault (``kgkit.vault.gate``): only records that
+    passed it (or were accepted without it) are candidates, and a pick that did not is ``unvaulted``. Tolerates
+    malformed records: a hook calls this."""
     greater = st.greater_is_better
     better = max if greater else min
     index = _index([r for r in recs if isinstance(r, dict)])
@@ -168,25 +171,28 @@ def selection(st: S.CompetitionState, recs: list[dict], subs=()) -> dict:
     for ref in st.final_picks or ():
         rec = _find(index, ref)
         picks.append({"ref": str(ref), "id": rec["id"] if rec else None,
-                      "fitted": rec is not None and E.lb_fitted(rec)})
+                      "fitted": rec is not None and E.lb_fitted(rec),
+                      "unvaulted": rec is not None and not V.cleared(rec, vault)})
     confirmed = st.final_picks_confirmed if isinstance(st.final_picks_confirmed, str) and picks else ""
     return {"n": n, "auto": auto, "fitted_auto": [e for e in auto if e["fitted"]], "picks": picks,
-            "confirmed": confirmed, "honest": _honest(st, by_id, score), "unlinked": len(loose),
-            "days": S.deadline_days(st)}
+            "confirmed": confirmed, "honest": _honest(st, by_id, score, vault), "unlinked": len(loose),
+            "days": S.deadline_days(st), "vault": vault}
 
 
-def _honest(st: S.CompetitionState, by_id: dict, score: dict) -> list[tuple[str, list[str]]]:
+def _honest(st: S.CompetitionState, by_id: dict, score: dict, vault: dict | None = None) -> list[tuple[str, list[str]]]:
     """Candidates that are safe to select, as ``(id, reasons)``: the accepted baseline, the best CV of its own, the
-    best public score that is not fitted. Fitted, rechecked and discarded records are not candidates."""
-    ok = [r for r in by_id.values() if not E.lb_fitted(r) and not r.get("recheck") and r.get("decision") != "discard"]
+    best public score that is not fitted. Fitted, rechecked, discarded, seed-replica and pre-vault records are not
+    candidates; with a sealed vault (``vault``), neither is a record that has not passed it."""
+    ok = [r for r in by_id.values() if not E.lb_fitted(r) and not r.get("recheck") and r.get("decision") != "discard"
+          and not r.get("replica_of") and not r.get("pre_vault") and V.cleared(r, vault)]
     untuned = [r for r in ok if not E.public_tuned(r)]  # picked on the public LB: its public score is no evidence
     sign = 1 if st.greater_is_better else -1
     found: dict[str, list[str]] = {}
     base = E.accepted_baseline(list(by_id.values()))
-    if base is not None:
+    if base is not None and V.cleared(base, vault):
         found.setdefault(base["id"], []).append("accepted baseline")
     ens = E.accepted_baseline(list(by_id.values()), E.ENSEMBLE)
-    if ens is not None:
+    if ens is not None and V.cleared(ens, vault):
         found.setdefault(ens["id"], []).append("accepted baseline of the ensemble")
     own = [r for r in ok if E.own_score(r, st.holdout)]
     if own:
@@ -283,7 +289,21 @@ def _candidates(sel: dict, recs: dict) -> str:
         r = recs.get(i, {})
         lb = _num(r.get("lb_public"))
         out.append(f"{i} ({', '.join(why)}; {_cv_text(r)}" + (f", LB {lb:.5f}" if lb is not None else "") + ")")
+    if not out and sel.get("vault") is not None:
+        return ("none has passed the vault yet (a candidate goes CV gate -> `kgkit recheck` -> "
+                "`kgkit vault check <id>`)")
     return "; ".join(out) or "none logged yet"
+
+
+def blocked_line(sel: dict) -> str | None:
+    """With a sealed vault: the final picks that have not passed it, or None."""
+    bad = [p["id"] for p in sel.get("picks") or () if p.get("unvaulted")]
+    if not bad:
+        return None
+    return (f"BLOCKED: final pick(s) {', '.join(bad)} have not passed the vault: their gain is not confirmed on rows "
+            "the pipelines never saw. Spend a check on each (`kgkit vault check <id>`, after the CV gate and "
+            "`kgkit recheck`) and pick records that pass, or record the exception with `kgkit final "
+            "--accept-unvaulted <id> --why \"...\"` (it goes in reports/final-selection.md).")
 
 
 def _unconfirmed(sel: dict, st: S.CompetitionState, recs: dict, left: str, url: str, intended: str) -> str:
@@ -304,6 +324,11 @@ def _unconfirmed(sel: dict, st: S.CompetitionState, recs: dict, left: str, url: 
 def _warning(sel: dict, st: S.CompetitionState, recs: dict) -> list[str]:
     if sel["days"] is not None and sel["days"] < 0:  # the competition has ended
         return []
+    blocked = blocked_line(sel)
+    return ([blocked] if blocked else []) + _pick_warning(sel, st, recs)
+
+
+def _pick_warning(sel: dict, st: S.CompetitionState, recs: dict) -> list[str]:
     left = f" ({sel['days']} day{'s' if sel['days'] != 1 else ''} left)" if sel["days"] is not None else ""
     url = URL.format(slug=st.slug)
     picks = sel["picks"]
@@ -355,7 +380,7 @@ def lines(root, st: S.CompetitionState, recs: list[dict], subs=None) -> list[str
     try:
         subs = S.submission_records(root) if subs is None else subs
         by_id = _index([r for r in recs if isinstance(r, dict)])[0]
-        sel = selection(st, recs, subs)
+        sel = selection(st, recs, subs, V.gate(V.meta(root)))
         return _warning(sel, st, by_id) + tuned_lines(st, recs, sel)
     except Exception:
         return []

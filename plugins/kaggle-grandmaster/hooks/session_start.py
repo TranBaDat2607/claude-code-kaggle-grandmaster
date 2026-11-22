@@ -167,6 +167,9 @@ def brief(root: Path) -> str:
                      + f" + public LB, no OOF/K-fold: {judge}; error analysis runs on the holdout predictions; "
                        "public notebooks are judged on inputs and public score.")
     recs = C.ledger_records(root)
+    vault_line = C.V.status_line(root, recs)  # the same line as `kgkit status`
+    if vault_line:
+        lines.append(vault_line + ".")
     if recs:
         scored = [r for r in recs if _own_cv(r, holdout) and not r.get("recheck")]
         lines.append(ledger_line(st, recs))

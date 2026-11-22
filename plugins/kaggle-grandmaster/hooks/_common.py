@@ -22,6 +22,7 @@ from kgkit import gpu as G  # noqa: E402  (stdlib-only module)
 from kgkit import progress as PG  # noqa: E402  (stdlib-only module)
 from kgkit import safety as SF  # noqa: E402  (stdlib-only module)
 from kgkit import state as S  # noqa: E402  (stdlib-only module)
+from kgkit import vault as V  # noqa: E402  (stdlib-only module at import time)
 from kgkit.state import (server_remaining_today, submission_records, submissions_log,  # noqa: E402,F401
                          submissions_today, today_utc)
 

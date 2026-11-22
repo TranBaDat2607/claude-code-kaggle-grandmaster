@@ -56,6 +56,7 @@ def redraw(root: Path, spec: dict, seed: int) -> Path:
     orig_path = root / (spec.get("out") or "data/folds.csv")
     if orig_path.is_file():
         orig = pd.read_csv(orig_path)["fold"].to_numpy()
+        orig = orig[orig != -2]  # kgkit.vault.VAULT rows are in no fold
         if len(orig) == len(folds) and (orig == folds).all():
             raise SystemExit(f"strategy {spec.get('strategy')!r} produced the identical split for seed {seed} "
                              "(a deterministic splitter such as GroupKFold): pass --strategy stratified_group "
@@ -65,6 +66,12 @@ def redraw(root: Path, spec: dict, seed: int) -> Path:
     id_col = spec.get("id_col")
     if id_col and id_col in train.columns:
         df.insert(0, id_col, train[id_col].to_numpy())
+        from . import vault as V
+
+        if V.sealed(root) and orig_path.is_file():  # the vault stays out of the re-drawn split too
+            old = pd.read_csv(orig_path)
+            if id_col in old.columns:
+                df = pd.concat([df, old.loc[old["fold"] == V.VAULT, [id_col, "fold"]]], ignore_index=True)
     out.parent.mkdir(parents=True, exist_ok=True)
     df.to_csv(out, index=False)
     return out
