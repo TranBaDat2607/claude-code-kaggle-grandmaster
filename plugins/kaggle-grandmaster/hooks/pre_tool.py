@@ -18,6 +18,9 @@
    earlier push added is brought up to date), so the /kaggle-monitor pane shows the session's CPU, RAM, disk and
    GPUs, and a session on a machine with fewer GPUs than its shape stops at once. Claude is told what changed
    (additionalContext).
+6. Blocks a command that names the sealed vault's folder (~/.kaggle-gm/vault/, kgkit.vault): its labels must never
+   reach the agent. `kgkit vault check` reads them itself and names no path. (hooks/pre_file.py guards the file
+   tools.)
 Relative paths (-p, -f) are read from where the command's own `cd` steps put the shell at that point.
 Valid submissions produce no output, so the normal permission flow is unchanged.
 """
@@ -224,6 +227,9 @@ def main() -> None:
     reason = secret_reason(cmd)
     if reason:
         decide(permissionDecision="deny", permissionDecisionReason="kaggle-grandmaster: " + reason)
+        return
+    if C.V.names_vault(strip_text_heredocs(cmd)):
+        decide(permissionDecision="deny", permissionDecisionReason="kaggle-grandmaster: " + C.V.DENY_REASON)
         return
 
     add_monitors(payload, cmd)
