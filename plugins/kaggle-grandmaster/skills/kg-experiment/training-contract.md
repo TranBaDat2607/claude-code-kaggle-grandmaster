@@ -9,6 +9,9 @@ when it logs, `kgkit recheck`, screens and sweeps, Kaggle GPU runs.
   re-drawn split. Never draw folds in the script.
 - Nothing about the model is chosen on the fold it predicts: no early stopping, epoch or checkpoint picked on it.
   Hold a slice of the training part out for that, and log `oof_selection="independent"`.
+- Fold `-1`: trained on by every fold, scored by none. Fold `-2` (`kgkit.cv.VAULT`): a sealed vault row
+  (`kgkit vault`), never trained on and never scored. Drop those rows before anything else: a remote run sees the
+  original `train.csv`, labels included, and only the split says which rows they are.
 
 ## Command line
 - Run it from the workspace root as `python src/<script>.py ...`: the record keeps that command, so
@@ -30,6 +33,10 @@ rec = Ledger().log(args.name, cv, fold_scores=fold_scores, oof=oof, test_pred=te
 report_comparison(rec, parent=args.parent, truth="data/train.csv:<target>")  # prints the verdict, never raises
 ```
 - `oof` has one row per row of `data/train.csv`, in its order, NaN where no fold predicted.
+- With a sealed vault, predict its rows like the test set with every fold model: locally `data/vault.csv` (their
+  features, no target), remotely the rows the split marks `-2`; both in the same order. Log the mean as
+  `vault_pred=` (`--folds` runs: `fold<k>_vault.npy`), or with `kgkit ledger add ... --vault-pred FILE:ID,PRED`.
+  Only `kgkit vault check` scores them; a record without them can never pass the final gate.
 - A metric that is not one array of row predictions (Dice or IoU per image, F-beta over the particles of a tomogram,
   mAP, accuracy per problem, the results of matches) is logged as a **unit table**: one row per unit with what the
   metric sums or averages, its fold, and the group it belongs to. The comparison then resamples units, or whole
@@ -58,8 +65,8 @@ keep = s.mask(ids) if s is not None else None    # ids as in the screen's source
 folds_to_run = (s.folds if s is not None and s.folds else None) or all_folds
 out_dir = Path("artifacts") / (args.name + SC.run_tag())   # apart from a full run of the same name
 ```
-- Train and score only the `keep` rows of the screen's folds; NaN in the OOF elsewhere; no test predictions and no
-  submission (a screen is never submitted).
+- Train and score only the `keep` rows of the screen's folds; NaN in the OOF elsewhere; no test or vault
+  predictions and no submission (a screen is never submitted).
 - `KG_FIDELITY='{"epochs": 3}'`: the cheaper settings, recorded as given. Take them from your flags (a sweep passes the
   rung's settings in `{rung_args}`: `--epochs 3`) or read them with `SC.settings()`.
 - `KG_CONTROL_OF` and the `KG_SWEEP*` variables need nothing from the script: `Ledger.log` records them.

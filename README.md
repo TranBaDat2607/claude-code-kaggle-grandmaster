@@ -77,7 +77,7 @@ short form works when no other plugin uses the name.
 ## What's inside
 
 **22 playbook skills**, Claude loads them on its own when relevant · **19 slash commands** · **9 specialist agents** ·
-**5 safety hooks** · **`kgkit`**, a tested Python toolkit (folds, 35+ metrics, ensembling, experiment ledger, Kaggle
+**6 safety hooks** · **`kgkit`**, a tested Python toolkit (folds, 35+ metrics, ensembling, experiment ledger, Kaggle
 GPU pipeline) · **training templates** for GBDTs, timm and Hugging Face transformers · **the Kaggle pane**.
 
 ## Your data and keys

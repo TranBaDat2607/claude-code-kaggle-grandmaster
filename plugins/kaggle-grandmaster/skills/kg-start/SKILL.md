@@ -56,8 +56,14 @@ Follow the `grandmaster-playbook` and `competition-recon` skills. Steps:
 7. **EDA & shift**: `kgkit eda data/train.csv --test data/test.csv --target <y> --id-col
    <id> --out reports/eda.md` and `kgkit adv ...`. For non-tabular data, launch the
    `data-detective` agent instead.
-8. **Folds**: choose the scheme per `validation-strategy` (groups? time?) and write
-   `data/folds.csv` with `kgkit folds ...`; show the fold report.
+8. **Folds and vault**: choose the scheme per `validation-strategy` (groups? time?) and write
+   `data/folds.csv` with `kgkit folds ... --vault 0.1` (plus `--time-col <col>` for time-ordered data); show the
+   fold report. `--vault` seals ~10% of the rows, drawn like the folds: their labels leave the workspace and
+   `kgkit vault check` later judges final candidates on them, pass/fail only. If it prints **SMALL DATA**, nothing
+   is sealed yet: run step 9's template and `--model linear` on these folds, then
+   `kgkit vault size --exp <template run> --vs <linear run>`. If 10% is `TOO NOISY`, ask the user whether to seal
+   the smallest fraction it calls OK (`kgkit vault seal --frac F`) or no vault; then re-run the baseline on the new
+   split. A holdout+lb workspace seals with `kgkit vault seal` once `eval_truth` is set.
 9. **Baseline**: adapt the matching template from `${CLAUDE_PLUGIN_ROOT}/templates/`
    (`train_gbdt.py`, `train_image.py`, `train_transformer.py`) into `src/`, run it quickly
    (reduced settings if large), log to the ledger, write `subs/<exp_id>.csv`, and validate it with
