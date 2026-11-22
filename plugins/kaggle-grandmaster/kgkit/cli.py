@@ -820,6 +820,8 @@ def cmd_status(a):
         for t, h in led.heads().items():  # the other model lines (#133): each compared with its own baseline
             if base is None or h["id"] != base["id"]:
                 print(f"  track {t}: {fmt_cv(h)} ({h['id']})")
+        if _seed_noise_line(led):
+            print(_seed_noise_line(led))
         for line in E.ensemble_advice(recs, _blend_args(led, st)):
             print(line)
         n_dec = led.decisions_on_evalset()
@@ -1016,6 +1018,8 @@ def cmd_ledger(a):
         _ledger_compare(led, a)
     elif a.action == "noise":
         _ledger_noise(led, a)
+    elif a.action == "seed-noise":
+        _ledger_seed_noise(led, a)
     elif a.action == "tag":
         r = led.tag(a.args[0], *a.args[1:], remove=a.remove)
         print(f"{r['id']}: tags {', '.join(r['tags']) or '(none)'}" + _fitted_note(r))
@@ -1793,9 +1797,77 @@ def _add_seed_noise(led, res: dict, new_ref: str, base_ref: str) -> dict:
     if seed is not None:
         return with_seed_noise(res, seed, n_seeds(recs[0]), n_seeds(recs[1]))
     if not abs(res.get("z", 0)) >= 4:
-        res["caveats"].append("seed noise not included: re-run one pipeline with another seed and log it with the "
-                              "same --variant (or the same params on a clean commit) to measure it")
+        res["caveats"].append("seed noise not included: `kgkit ledger seed-noise` prints the one re-run (the "
+                              "baseline with another seed) that measures it for every comparison")
     return res
+
+
+def _replica_note(led, rec: dict) -> str:
+    """What a seed re-run (KG_REPLICA_OF) measured: it is compared with nothing."""
+    from .compare import seed_variance
+    from .evalset import fmt_se
+
+    seed = f" (seed {rec['replica_seed']})" if rec.get("replica_seed") is not None else ""
+    head = f"{rec['id']}: seed replica of {rec['replica_of']}{seed}"
+    if rec.get("replica_identical"):
+        return (f"{head}, with an identical score: the pipeline ignored KG_SEED (or has no randomness), so this "
+                "measures no seed noise. Make it train with KG_SEED (`kgkit.experiment.run_seeds`; the templates do) "
+                "and re-run")
+    sv = seed_variance(led.records(), led.eval_record_key)
+    if sv is None:
+        return (f"{head}, but it does not pair with it (another evaluation set, or another number of seeds "
+                "averaged): no seed noise measured")
+    return (f"{head}: seed noise SD {fmt_se(sv['sd'])} (df {sv['df']}), now added to every paired comparison. A "
+            "replica is a measurement: no try, no decision, never the best CV")
+
+
+def _seed_noise_line(led) -> str | None:
+    """`kgkit status`: the seed noise every comparison adds, or that it is not measured yet."""
+    from .compare import seed_variance
+    from .evalset import fmt_se, own_score
+
+    recs = led.records()
+    if not any(own_score(r) for r in recs):
+        return None
+    sv = seed_variance(recs, led.eval_record_key)
+    if sv is None:
+        return ("seed noise: not measured, so close calls ignore training noise: `kgkit ledger seed-noise` prints the "
+                "one re-run that measures it")
+    return f"seed noise: SD {fmt_se(sv['sd'])} (df {sv['df']}), added to every paired comparison"
+
+
+def _ledger_seed_noise(led, a) -> None:
+    """Measure the training (seed) noise once per workspace: the SD so far, and the re-run that adds to it."""
+    from .compare import seed_variance
+    from .evalset import fmt_se
+
+    recs = led.records()
+    for r in recs:
+        if r.get("replica_identical"):
+            print(f"{r['id']} re-ran {r['replica_of']} with an identical score: the pipeline ignored KG_SEED (or has "
+                  "no randomness), so it measured nothing")
+    sv = seed_variance(recs, led.eval_record_key)
+    if sv is not None:
+        print(f"seed noise: SD {fmt_se(sv['sd'])} of one seed's score (df {sv['df']}, {sv['n_variants']} pipeline(s) "
+              "run more than once); every paired comparison adds it to the resampling SE")
+        if sv["df"] >= 3 and not a.args:
+            return
+    try:
+        rec = led.get(a.args[0]) if a.args else led.baseline()
+    except KeyError as e:
+        raise SystemExit(str(e.args[0]) if e.args else str(e))
+    if rec is None:
+        print("seed noise: not measured, and nothing is logged yet: log a baseline, then run this again")
+        return
+    if rec.get("replica_of"):
+        rec = led.get(rec["replica_of"])
+    lead = ("a rough estimate: one more re-run firms it up" if sv is not None else
+            "seed noise: not measured. Re-run one pipeline with another seed, once")
+    cmd = rec.get("cmd") or "<the command that trained it>"
+    print(f"{lead} ({rec['id']}, logged as its seed replica):\n"
+          f"  KG_SEED={led.replica_seed(rec['id'])} KG_REPLICA_OF={rec['id']} {cmd}\n"
+          "The templates train with KG_SEED (a pipeline of your own: `kgkit.experiment.run_seeds`). The replica is "
+          "no try, needs no decision and is never the best CV.")
 
 
 def _log_comparison(led, new_id: str, base_id: str, folds_res: dict | None, boot: dict | None, lb: dict | None,
@@ -2163,6 +2235,9 @@ def compare_logged(rec: dict, parent: str | None = None, truth: str | None = Non
 
         print(f"\n{rec['id']}: control of {rec['control_of']} at {SC.describe(rec.get('fidelity'))}; the screens run "
               "at this fidelity are compared with it")
+        return None
+    if rec.get("replica_of"):
+        print("\n" + _replica_note(led, rec))
         return None
     if parent:
         from . import evalset as E
@@ -3006,6 +3081,9 @@ _LEDGER_ACTIONS = {
                  [], "--track"),
     "tracks": ("each model line: its accepted baseline, kept/compared decisions and gain per hour (where the next "
                "hours go), and whether the ensemble includes every line's latest baseline", [], ""),
+    "seed-noise": ("the training noise every paired comparison adds (one pipeline re-run with another seed), "
+                   "or the re-run that measures it", [("exp_id", "?", "the record to re-run (default: the accepted "
+                                                                 "baseline)")], ""),
     "lineage": ("the chain of decisions behind a record, for reverse ablation",
                 [("exp_id", "?", "default: the accepted baseline")], ""),
     "import": ("import predictions made elsewhere (teammate, public notebook)",

@@ -50,6 +50,22 @@ from . import snapshot as SN
 from . import state as S
 
 
+SEED_ENV = "KG_SEED"  # a seed re-run: the seed(s) it trains with (`kgkit ledger seed-noise`)
+REPLICA_ENV = "KG_REPLICA_OF"  # ...and the record it re-runs, which it is grouped with for the seed noise
+
+
+def run_seeds(seeds):
+    """The seed(s) a run trains with: ``seeds`` (an int or a list) as configured, or under KG_SEED, a seed re-run,
+    as many new ones from KG_SEED on (KG_SEED, KG_SEED + 1, ...), so the re-run averages as many seeds as the
+    record it re-runs."""
+    s = os.environ.get(SEED_ENV, "").strip()
+    if not s.lstrip("-").isdigit():
+        return seeds
+    if isinstance(seeds, (list, tuple)):
+        return [int(s) + i for i in range(max(1, len(seeds)))]
+    return int(s)
+
+
 def seed_everything(seed: int = 42, deterministic_torch: bool = False) -> None:
     random.seed(seed)
     os.environ["PYTHONHASHSEED"] = str(seed)
@@ -344,6 +360,8 @@ class Ledger:
         fidelity = extra.pop("fidelity", None) or SC.current_fidelity(self.root)
         control = extra.pop("control_of", None) or SC.control_of()
         sweep = extra.pop("sweep", None) or SW.tag()
+        replica = extra.pop("replica_of", None) or os.environ.get(REPLICA_ENV, "").strip() or None
+        seed_env = os.environ.get(SEED_ENV, "").strip()
         recs = self.records()
         if cv is None and not set(tags) & set(LB_ONLY_TAGS):
             tags = [*tags, "lb-only"]
@@ -374,6 +392,7 @@ class Ledger:
             **({"fidelity": _jsonable(fidelity)} if fidelity else {}),  # a screen (KG_SCREEN / KG_FIDELITY)
             **({"control_of": self._resolve_id(control)} if control else {}),  # the baseline it is the control of
             **({"sweep": sweep} if sweep else {}),  # {name, variant, rung} of a `kgkit sweep` run
+            **(self._replica_fields(replica, cv, seed_env) if replica else {}),  # a seed re-run (KG_REPLICA_OF)
             "decision": _check_decision(decision) if decision else None,
             **({"decision_seq": self._next_decision_seq()} if decision else {}),
             "phase": (st.phase or None) if st else None,
@@ -422,6 +441,36 @@ class Ledger:
             raise ValueError(f"{r['id']} has no unit table: log it with `Ledger.log_units` or "
                              "`kgkit ledger add <name> auto --units FILE`")
         return U.load(self.root / spec["path"], spec)
+
+    def _replica_fields(self, replica: str, cv, seed_env: str) -> dict:
+        """A re-run of record ``replica`` with another seed: grouped with it for the seed noise
+        (``compare.seed_variance``). The same score again means the pipeline ignored KG_SEED (or has no randomness):
+        flagged, it measures nothing."""
+        try:
+            base = self.get(replica)
+            base = self.get(base["replica_of"]) if base.get("replica_of") else base  # a re-run of a re-run
+        except KeyError:
+            base = None
+        out = {"replica_of": base["id"] if base else self._resolve_id(replica),
+               "replica_seed": int(seed_env) if seed_env.lstrip("-").isdigit() else None}
+        base_cv = base.get("cv") if base else None
+        if isinstance(cv, (int, float)) and isinstance(base_cv, (int, float)) and \
+                abs(float(cv) - base_cv) <= 1e-12 * max(1.0, abs(base_cv)):
+            out["replica_identical"] = True
+        return out
+
+    def replica_seed(self, exp_id: str) -> int:
+        """A seed for a re-run of ``exp_id`` that none of its runs used: past the largest seed it and its replicas
+        averaged, so a run of several seeds gets as many new ones (KG_SEED, KG_SEED + 1, ...)."""
+        rec = self.get(exp_id)
+        used = []
+        for r in [rec, *(x for x in self.records() if x.get("replica_of") == rec["id"])]:
+            used += [int(s) for s in r.get("seeds") or () if isinstance(s, (int, float))]
+            for k in ("replica_seed", "seed"):
+                v = r.get(k) if k == "replica_seed" else (r.get("params") or {}).get(k)
+                if isinstance(v, (int, float)):
+                    used.append(int(v))
+        return max(used or [41]) + 1
 
     def _resolve_id(self, ref: str) -> str:
         """Canonical id for a ref; unknown refs are kept verbatim (e.g. a local id named inside a remote
@@ -614,7 +663,7 @@ class Ledger:
         parent = rec.get("parent") or (self._resolve_id(base_id) if base_id else None)
         family = [r for r in self.records() if parent and r.get("parent") == parent]
         holdout, key = self._holdout(), self.eval_record_key(rec)
-        family = [r for r in family if not r.get("recheck") and not r.get("control_of")
+        family = [r for r in family if not r.get("recheck") and not r.get("control_of") and not r.get("replica_of")
                   and (E.own_score(r, holdout) or (E.partial(r) and isinstance(r.get("cv"), (int, float))))
                   and self.eval_record_key(r) == key]
         return max(1, len({one(r) for r in [*family, rec]}))
@@ -664,6 +713,7 @@ class Ledger:
     def best(self, n: int = 5, key: str = "cv") -> list[dict]:
         holdout = self._holdout()
         recs = [r for r in self.records() if r.get(key) is not None and not r.get("recheck")
+                and not r.get("replica_of")  # a seed re-run measures noise: its luckier score is no best CV
                 and (key != "cv" or has_own_cv(r, holdout))]
         return sorted(recs, key=lambda r: r[key], reverse=self._gib())[:n]
 

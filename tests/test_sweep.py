@@ -212,6 +212,9 @@ def test_finalists_keep_the_best_and_a_failed_variant_is_no_try(ws, capsys):
     st = json.loads((ws / ".kaggle-gm" / "sweeps" / "two.json").read_text())
     meh = st["runs"]["meh"]["1"]["record"]
     assert f'kgkit exp finish {meh} discard "lost to good in sweep two"' in out
+    # every finalist is a full run with its OOF on file: the ones that lost can still add to the ensemble (#134)
+    good = st["runs"]["good"]["1"]["record"]
+    assert f"kgkit blend --exp 0001_base {good} {meh} --truth" in out and "--name two_blend" in out
 
 
 def test_sweep_run_is_never_pre_approved():
@@ -261,3 +264,15 @@ def test_check_promotes_random_pruned_variants_for_an_unbiased_fidelity(ws, caps
     cli.main(["sweep", "fidelity", "nz"])
     out = capsys.readouterr().out
     assert "rung 0 -> rung 1" in out and "5 variants" in out and "2 random checks" in out and "Spearman" in out
+
+
+def test_the_finalists_join_the_accepted_ensemble_in_the_blend_call(ws):
+    led = Ledger(ws)
+    other = led.log("cnn", 0.8, oof=np.zeros(3), track="cnn")
+    led.decide(other["id"], "baseline")
+    ens = led.log("blend", 0.81, model="blend", params={"members": ["0001_base", other["id"]]}, track="ensemble")
+    led.decide(ens["id"], "baseline")
+    fin = led.log("two_good", 0.82, oof=np.zeros(3), parent="0001_base")
+    line = SW._blend_line(led, {"base": "0001_base"}, "two", [fin, led.get("0001_base")])
+    assert f"kgkit blend --exp 0001_base {other['id']} {fin['id']} --truth" in line
+    assert SW._blend_line(led, {"base": "0001_base"}, "two", []) is None

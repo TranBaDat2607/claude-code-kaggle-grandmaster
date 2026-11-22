@@ -174,9 +174,10 @@ def brief_line(root: str | Path) -> str:
 
 
 def undecided(recs: list[dict]) -> list[dict]:
-    """Records that still need a decision: not re-checks, and not controls (a screen's reference run is never
-    decided)."""
-    return [r for r in recs if not r.get("decision") and not r.get("recheck") and not r.get("control_of")]
+    """Records that still need a decision: not re-checks, not controls (a screen's reference run is never
+    decided) and not seed replicas (a measurement of the training noise)."""
+    return [r for r in recs if not r.get("decision") and not r.get("recheck") and not r.get("control_of")
+            and not r.get("replica_of")]
 
 
 def journey_lines(st, recs: list[dict]) -> list[str]:

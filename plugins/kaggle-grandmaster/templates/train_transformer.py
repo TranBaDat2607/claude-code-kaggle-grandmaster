@@ -4,6 +4,7 @@ Copy to src/, edit CONFIG, then:
 
     # a screen (`kgkit screen new s30`, `kgkit sweep`): its rows and folds only, files in
     # artifacts/<name>__s30-<hash>/, no submission
+    KG_SEED=44 KG_REPLICA_OF=0007 python src/train_transformer.py ...  # a seed re-run (kgkit ledger seed-noise)
     KG_SCREEN=s30 KG_FIDELITY='{"epochs": 3}' python src/train_transformer.py --name x_v2 --parent 0007 --epochs 3
     python src/train_transformer.py --smoke
     python src/train_transformer.py --bench          # data loader vs GPU step vs real loop, padding share
@@ -57,7 +58,7 @@ from kgkit import bench as B
 from kgkit import metrics as M
 from kgkit import state as S
 from kgkit.budget import TrainBudget
-from kgkit.experiment import Ledger, seed_everything
+from kgkit.experiment import Ledger, run_seeds, seed_everything
 try:  # a kgkit vendored before #127 has no report_comparison: the run then ends without the verdict
     from kgkit.experiment import report_comparison
 except ImportError:
@@ -401,6 +402,7 @@ def main():
     task = cfg["task"]
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     amp = device.type == "cuda"
+    cfg["seed"] = run_seeds(cfg["seed"])  # KG_SEED: a seed re-run (`kgkit ledger seed-noise`)
     seed_everything(cfg["seed"])
 
     train = pd.read_csv(cfg["train"])

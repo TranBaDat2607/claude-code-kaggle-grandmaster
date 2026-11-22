@@ -44,6 +44,10 @@ conversation: a compaction or a new session continues it from there.
 - **A new grind**: `kgkit grind start --session ${CLAUDE_SESSION_ID} --budget <4h | 10 | 4h,10> [--focus "<area>"]`.
   It refuses while a grind is in progress: offer to resume it, or to end it with `kgkit grind stop`.
 
+- **Seed noise**: when `kgkit status` says `seed noise: not measured`, run the re-run `kgkit ledger seed-noise`
+  prints before the first experiment (once per workspace): every verdict after it includes the training noise, so
+  a lucky seed stops passing as a gain.
+
 Ask everything the budget needs in one message, before the first experiment: whether remote GPU runs are authorised and for how many hours, and anything the focus leaves open. Then the loop runs without waiting on the user. If `kgkit status` prints a **Permissions** line, offer `kgkit permissions --write` first: otherwise every kgkit call after the user's reply, and in each `experiment-runner`, asks.
 
 ## Guardrails
@@ -109,8 +113,9 @@ experiment: run them as one sweep, not one experiment each, so the full run that
 3. **Run**: `kgkit grind note --session ${CLAUDE_SESSION_ID} --started <name> --cmd "kgkit sweep run <name>"`, then
    `kgkit sweep run <name> [--parallel N]` (it asks: it runs the command). A stopped sweep resumes with that call.
 4. **Decide**: `kgkit sweep decide <name>`, then the finalist's `exp finish` call it prints (several finalists:
-   keep only the best). A screen is never kept. On a fidelity WARNING, raise the screen's fidelity before the next
-   sweep relies on it.
+   keep only the best). A screen is never kept. The finalists are full runs with OOF and test predictions: run the
+   `kgkit blend` call it prints, since a finalist that lost alone can still add to the ensemble. On a fidelity
+   WARNING, raise the screen's fidelity before the next sweep relies on it.
 
 ## Final report
 Table of experiments (id, hypothesis, paired Δ, folds improved, decision), the new accepted baseline and

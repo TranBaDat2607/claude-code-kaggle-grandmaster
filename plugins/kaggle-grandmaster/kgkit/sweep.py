@@ -601,7 +601,32 @@ def decide(root, name: str) -> dict:
         else:
             print(f"  finalist {v}: {rec['id']} {dec.upper()} against {st['base']}: "
                   f"{_finish_command(led, rec['id'], st['base'], dec)}")
+    blend = _blend_line(led, st, name, [rec for _, _, rec in finalists])
+    if blend:
+        print(blend)
     return counts
+
+
+def _blend_line(led, st: dict, name: str, finalists: list[dict]) -> str | None:
+    """The finalists are full runs with their OOF on file: one that lost on its own can still add to the ensemble.
+    The `kgkit blend` call that tests them with the accepted ensemble (else the base), paired with the best accepted
+    blend. Screens are not in it: their OOF covers the screen only."""
+    from . import evalset as E
+    from .cli import _blend_args
+    from . import state as S
+
+    full = [r["id"] for r in finalists if r.get("oof_path") and not E.partial(r)]
+    if not full:
+        return None
+    recs = led.records()
+    ens = E.track_heads(recs).get(E.ENSEMBLE)
+    members = list(E.resolve_members(ens, recs)) if ens is not None else [led.get(st["base"])["id"]]
+    ids = list(dict.fromkeys([*members, *full]))
+    if len(ids) < 2:
+        return None
+    return (f"  the {len(full)} finalist(s) keep their OOF and test predictions: test them in the ensemble, paired "
+            f"with the best accepted blend: `kgkit blend --exp {' '.join(ids)}{_blend_args(led, S.load(led.root))} "
+            f"--name {name}_blend`")
 
 
 def status_lines(root, name: str) -> list[str]:

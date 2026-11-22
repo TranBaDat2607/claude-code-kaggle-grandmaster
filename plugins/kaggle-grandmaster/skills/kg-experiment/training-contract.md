@@ -64,6 +64,12 @@ out_dir = Path("artifacts") / (args.name + SC.run_tag())   # apart from a full r
   rung's settings in `{rung_args}`: `--epochs 3`) or read them with `SC.settings()`.
 - `KG_CONTROL_OF` and the `KG_SWEEP*` variables need nothing from the script: `Ledger.log` records them.
 
+## Seeds (`KG_SEED`)
+Train with `seeds = run_seeds(args.seeds)` (`from kgkit.experiment import run_seeds`; an int or a list). Under
+`KG_SEED` it returns new seeds, as many as configured, and `Ledger.log` records the run as a seed replica of
+`KG_REPLICA_OF`: the re-run `kgkit ledger seed-noise` prints, which measures the training noise every paired
+comparison then adds. `SC.run_tag()` keeps its files apart from the record it re-runs.
+
 ## Output
 - Print ASCII only: Windows consoles are often cp1252.
 - Print progress with the elapsed time per epoch and fold, so a log tail shows where a long run is.

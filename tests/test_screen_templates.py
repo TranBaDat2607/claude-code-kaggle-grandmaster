@@ -15,7 +15,8 @@ from kgkit import screen as SC
 from kgkit.experiment import Ledger
 from test_templates import _make_ws, _tiny_local_bert
 
-SCREEN_VARS = ("KG_SCREEN", "KG_FIDELITY", "KG_CONTROL_OF", "KG_SWEEP", "KG_SWEEP_VARIANT", "KG_RUNG")
+SCREEN_VARS = ("KG_SCREEN", "KG_FIDELITY", "KG_CONTROL_OF", "KG_SWEEP", "KG_SWEEP_VARIANT", "KG_RUNG", "KG_SEED",
+               "KG_REPLICA_OF")
 
 
 def _run(args, cwd, plugin_root, **env):
@@ -168,3 +169,16 @@ def test_a_sweep_over_the_gbdt_template(tmp_path, plugin_root):
     final = recs[st["runs"][st["survivors"]["1"][0]]["1"]["record"]]
     assert "fidelity" not in final and len(final["fold_scores"]) == 5 and final["submission"]
     assert f"{final['id']} vs {base['id']}" in out and "best of 2" in out
+
+
+def test_gbdt_template_re_runs_with_kg_seed_as_a_seed_replica(tmp_path, plugin_root):
+    ws = _make_ws(tmp_path, plugin_root, "binary")
+    gbdt = ["src/train_gbdt.py", "--model", "hgb", "--name", "base", "--params",
+            '{"max_iter": 60, "early_stopping": true, "n_iter_no_change": 3}']
+    _run(gbdt, ws, plugin_root)
+    base = Ledger(ws).records()[-1]
+    out = _run(gbdt, ws, plugin_root, KG_SEED="7", KG_REPLICA_OF=base["id"])
+    rep = Ledger(ws).records()[-1]
+    assert rep["seeds"] == [7] and rep["replica_of"] == base["id"] and not rep.get("replica_identical")
+    assert f"seed replica of {base['id']} (seed 7)" in out and "seed noise SD" in out
+    assert "SD" in _run(["-m", "kgkit", "ledger", "seed-noise"], ws, plugin_root)

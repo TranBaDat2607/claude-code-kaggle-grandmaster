@@ -67,7 +67,8 @@ verdict, the bookkeeping is two kgkit calls: mark the idea running, then `kgkit 
    complexity/runtime); a flagged huge jump → `validation-auditor` before accepting. A `best of N` line means
    the run was one of N tries against that baseline (a sweep, or ideas tried in turn): KEEP then needs more than
    2 SE, because the luckiest of N noise runs gets that far; `exp finish` counts the tries as they are when it
-   records. Never lower `--tries` to pass a run. The comparison needs other
+   records. Never lower `--tries` to pass a run. `seed noise not included` under the verdict: `kgkit ledger
+   seed-noise` prints the one re-run of the baseline that measures it for every later comparison. The comparison needs other
    options (`--groups data/train.csv:<group>` when rows are clustered and `eval_groups` is unset, `--rope <gain>`
    for changes too small to matter)? Give them to `exp finish`: it then compares afresh. With no verdict printed
    (an older script), `kgkit exp finish <new>` alone compares and records nothing.

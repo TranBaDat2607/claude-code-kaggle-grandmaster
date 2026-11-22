@@ -4,6 +4,7 @@ Copy to src/, edit CONFIG, then:
 
     # a screen (`kgkit screen new s30`, `kgkit sweep`): its rows and folds only, files in
     # artifacts/<name>__s30-<hash>/, no submission
+    KG_SEED=44 KG_REPLICA_OF=0007 python src/train_image.py ...  # a seed re-run (kgkit ledger seed-noise)
     KG_SCREEN=s30 KG_FIDELITY='{"epochs": 3}' python src/train_image.py --name cnx_v2 --parent 0007 --epochs 3
     python src/train_image.py --smoke                     # 1 fold, 2 batches/epoch — crash test
     python src/train_image.py --bench                     # data loader vs GPU step vs real loop: input- or compute-bound?
@@ -65,7 +66,7 @@ from kgkit import bench as B
 from kgkit import metrics as M
 from kgkit import state as S
 from kgkit.budget import TrainBudget
-from kgkit.experiment import Ledger, seed_everything
+from kgkit.experiment import Ledger, run_seeds, seed_everything
 try:  # a kgkit vendored before #127 has no report_comparison: the run then ends without the verdict
     from kgkit.experiment import report_comparison
 except ImportError:
@@ -386,6 +387,7 @@ def main():
     task = cfg["task"]
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     amp = device.type == "cuda"
+    cfg["seed"] = run_seeds(cfg["seed"])  # KG_SEED: a seed re-run (`kgkit ledger seed-noise`)
     seed_everything(cfg["seed"])
     if device.type == "cuda":
         torch.backends.cudnn.benchmark = True  # fixed input size: cuDNN picks the fastest kernels once

@@ -14,6 +14,7 @@ Copy to src/, edit CONFIG and add_features(), then:
     python src/train_gbdt.py --name lr08 --params '{"learning_rate": 0.08}' --parent 0007   # lineage in the ledger
     python src/train_gbdt.py --no-refit              # quick screens: keep the model fitted on 90% of each fold
     KG_SCREEN=s30 python src/train_gbdt.py --name v2 --parent 0007   # a screen: its rows and folds, no submission
+    KG_SEED=44 KG_REPLICA_OF=0007 python src/train_gbdt.py ...       # a seed re-run (kgkit ledger seed-noise)
 
 The experiment name defaults to "<model>_baseline" (e.g. xgb_baseline) when neither --name nor
 CONFIG["name"] is set.
@@ -35,6 +36,8 @@ What it guarantees:
   * every run logged to the experiment ledger with OOF/test artefacts and a submission file
   * under KG_SCREEN (kgkit screen, kgkit sweep): trains and scores only the screen's rows and folds, logs the
     OOF with NaN elsewhere and writes no submission; it is then compared with the baseline's control (#134)
+  * under KG_SEED + KG_REPLICA_OF: trains with new seeds and logs a seed replica of that record, which measures
+    the seed noise every paired comparison then adds (`kgkit ledger seed-noise` prints the command)
 """
 
 from __future__ import annotations
@@ -57,7 +60,7 @@ except ImportError:  # <workspace>/third_party/kgkit, else the plugin's (KGKIT_H
 from kgkit import metrics as M
 from kgkit import state as S
 from kgkit.cv import split_indices
-from kgkit.experiment import Ledger, seed_everything
+from kgkit.experiment import Ledger, run_seeds, seed_everything
 try:  # a kgkit vendored before #127 has no report_comparison: the run then ends without the verdict
     from kgkit.experiment import report_comparison
 except ImportError:
@@ -336,6 +339,7 @@ def main():
         if getattr(args, k) is not None:
             cfg[k] = getattr(args, k)
     cfg["name"] = cfg["name"] or f"{cfg['model']}_baseline"
+    cfg["seeds"] = run_seeds(cfg["seeds"])  # KG_SEED: a seed re-run (`kgkit ledger seed-noise`)
     cfg["params"] = {**DEVICE_PARAMS.get(cfg["device"], {}).get(cfg["model"], {}), **cfg["params"]}
     if args.params:
         cfg["params"] = {**cfg["params"], **args.params}

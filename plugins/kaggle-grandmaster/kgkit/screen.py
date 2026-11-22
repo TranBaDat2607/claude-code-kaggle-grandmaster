@@ -203,13 +203,15 @@ def current_fidelity(root=None) -> dict | None:
 
 def run_tag(root=None) -> str:
     """'' for a full run; else a suffix for the run's files (``artifacts/<name><suffix>``) that keeps a screened run of
-    one name apart from its full run and from its runs at other fidelities, which would otherwise resume each
-    other's folds."""
+    one name apart from its full run and from its runs at other fidelities, and a seed re-run (KG_SEED) apart from
+    its record: they would otherwise resume each other's folds."""
+    seed = os.environ.get("KG_SEED", "").strip()
+    seed = f"__seed{seed}" if seed.lstrip("-").isdigit() else ""  # a seed re-run must not resume its record's folds
     fid = current_fidelity(root)
     if not fid:
-        return ""
+        return seed
     digest = hashlib.sha1(json.dumps(fid, sort_keys=True, default=str).encode()).hexdigest()[:8]
-    return f"__{fid.get('screen') or 'fidelity'}-{digest}"
+    return f"__{fid.get('screen') or 'fidelity'}-{digest}{seed}"
 
 
 def control_of() -> str | None:

@@ -514,14 +514,24 @@ def n_seeds(rec: dict) -> int:
 
 def seed_variance(records: Sequence[dict], eval_key: Callable[[dict], str | None] | None = None) -> dict | None:
     """Pooled single-seed SD of the score across replicas: records of one pipeline that differ only in their
-    seed, scored on the same evaluation set. None without at least one pipeline run twice."""
+    seed, scored on the same evaluation set. A seed re-run (``replica_of``, logged under KG_REPLICA_OF) joins the
+    record it re-runs whatever its params or git state; one that scored exactly the same (``replica_identical``: the
+    pipeline ignored its seed) measures nothing. None without at least one pipeline run twice."""
     from .evalset import own_score
+
+    by_id = {r.get("id"): r for r in records}
+
+    def key(r: dict) -> str | None:
+        base = by_id.get(r.get("replica_of")) if r.get("replica_of") else None
+        if base is not None:
+            return replica_key(base) or f"id:{base['id']}"
+        return replica_key(r) or f"id:{r.get('id')}"
 
     groups: dict = defaultdict(list)
     for r in records:
-        k = replica_key(r)
-        if k is None or not own_score(r) or r.get("recheck"):
+        if not own_score(r) or r.get("recheck") or r.get("replica_identical"):
             continue
+        k = key(r)
         groups[(k, eval_key(r) if eval_key else None, n_seeds(r))].append(float(r["cv"]))
     ss = df = 0.0
     variants = 0
