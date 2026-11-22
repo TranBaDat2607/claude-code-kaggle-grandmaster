@@ -599,10 +599,13 @@ def cmd_sweep(a):
     root = S.find_root()
     if root is None:
         raise SystemExit("not inside a kaggle-grandmaster workspace (no .kaggle-gm/)")
-    if a.action == "status" and not a.name:
+    if a.action in ("status", "fidelity") and not a.name:
         sweeps = SW.listed(root)
         for st in sweeps:
-            print(f"  {st['name']}: {len(st['variants'])} variant(s) of {st['base']}, {st['state']}")
+            if a.action == "status":
+                print(f"  {st['name']}: {len(st['variants'])} variant(s) of {st['base']}, {st['state']}")
+            else:
+                print(f"sweep {st['name']}:\n" + "\n".join(f"  {line}" for line in SW.fidelity_lines(st)))
         if not sweeps:
             print("(no sweeps yet: `kgkit sweep new <name> --cmd '...' --variant NAME=ARGS --rung screen=<s>`)")
         return
@@ -615,6 +618,8 @@ def cmd_sweep(a):
             SW.run(root, a.name, parallel=a.parallel, one=a.one, dry_run=a.dry_run, new_control=a.new_control)
         elif a.action == "status":
             print("\n".join(SW.status_lines(root, a.name)))
+        elif a.action == "fidelity":
+            print("\n".join(SW.fidelity_lines(SW.load(root, a.name))))
         else:
             SW.decide(root, a.name)
     except ValueError as e:
@@ -646,7 +651,8 @@ def _sweep_new(root, a) -> None:
         if r["screen"]:
             SC.load(root, r["screen"])  # ValueError on an unknown screen
     variant_list = SW.variants(a.variant, a.grid)
-    st = SW.new(root, a.name, base["id"], a.cmd, variant_list, rung_list, eta=a.eta, base_args=a.base_args)
+    st = SW.new(root, a.name, base["id"], a.cmd, variant_list, rung_list, eta=a.eta, base_args=a.base_args,
+                check=a.check)
     n, total = len(variant_list), 0
     for r in range(len(rung_list)):
         total += n
@@ -3373,9 +3379,12 @@ def build_parser() -> argparse.ArgumentParser:
                                      "survivors on a screen (cheapest first), compares them with that rung's control "
                                      "and promotes the best 1/eta; the full run is compared with the baseline as the "
                                      "best of every variant tried")
-    s.add_argument("action", choices=["new", "run", "status", "decide"])
+    s.add_argument("action", choices=["new", "run", "status", "decide", "fidelity"])
     s.add_argument("name", nargs="?")
     s.add_argument("--base", help="new: the baseline the variants branch from (default: the accepted one)")
+    s.add_argument("--check", type=int, default=0, metavar="N",
+                   help="new: at each rung, promote N pruned variants at random too, so `sweep fidelity` measures the "
+                        "screen on variants its pruning did not choose (N extra runs per rung)")
     s.add_argument("--cmd", help="new: the command of one run, any pipeline's; kgkit fills in {args} (the "
                                  "variant's), {rung_args} (the rung's settings as --key value), {base}, {sweep}, "
                                  "{variant}, {rung}")

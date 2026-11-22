@@ -1,7 +1,7 @@
 ---
 name: kg-grind
 description: "Autonomous improvement loop: picks backlog ideas, runs each as an experiment, keeps or discards it, within a time or experiment budget. Use to improve the score hands-off."
-argument-hint: "[resume | budget, e.g. 4h or 10 experiments] [focus area]"
+argument-hint: "[resume | budget, e.g. 4h or 10 experiments] [focus area] [--sweep]"
 allowed-tools:
   - Read
   - Glob
@@ -13,7 +13,11 @@ allowed-tools:
   - 'Bash(kgkit grind *)'
   - 'Bash(kgkit kernels pull *)'
   - 'Bash(kgkit ledger *)'
+  - 'Bash(kgkit screen *)'
   - 'Bash(kgkit status *)'
+  - 'Bash(kgkit sweep decide *)'
+  - 'Bash(kgkit sweep fidelity *)'
+  - 'Bash(kgkit sweep status *)'
 disable-model-invocation: true
 ---
 
@@ -88,9 +92,25 @@ Ask everything the budget needs in one message, before the first experiment: whe
    `kgkit recheck --seed <new> --run "<old pipeline>" --run "<current pipeline>" --exp <root_id>
    <baseline_id> --truth data/train.csv:<target>` (root from `kgkit ledger lineage`). If the gain
    shrank or did not survive, reverse-ablate the marginal KEEPs before adding new ideas
-   (`grandmaster-playbook`, "Guarding against overfitting the CV itself"). If `kgkit backlog fidelity` shows
-   screens disagree with full runs, raise screen fidelity before promoting more ideas.
+   (`grandmaster-playbook`, "Guarding against overfitting the CV itself"). If `kgkit backlog fidelity` or
+   `kgkit sweep fidelity` shows screens disagree with full runs, raise screen fidelity before promoting more ideas.
 8. Repeat until the budget is exhausted, then `kgkit grind stop --session ${CLAUDE_SESSION_ID} --reason "<budget spent | why it stopped>"`.
+
+## Sweeps (`--sweep`, or an idea that is many values of one lever)
+Several values of one lever (learning rates, augmentation sets, backbones, loss weights, prompts) are one
+experiment: run them as one sweep, not one experiment each, so the full run that wins is judged as the best of all.
+1. **Screen**: `kgkit screen list`; if none fits, `kgkit screen new s30 --frac 0.3 --folds 0` (whole groups as
+   `kgkit folds` used; `--time-col` takes the latest window; `--ids FILE:COL` draws units). The pipeline must
+   honour `KG_SCREEN`: the templates do; a custom one follows `/kg-experiment`'s training contract.
+2. **Define**: `kgkit sweep new <name> --cmd "<pipeline> --parent {base} --name {sweep}_{variant} {rung_args} {args}"
+   --grid --lr=1e-3,3e-4,1e-4 --rung screen=s30,epochs=3 [--rung screen=s60] [--check 2]` (`--variant NAME=ARGS`
+   for values that are not a grid; `--base-args` when the baseline's own run needs arguments). Show the user
+   `kgkit sweep run <name> --dry-run`: it is what will run.
+3. **Run**: `kgkit grind note --session ${CLAUDE_SESSION_ID} --started <name> --cmd "kgkit sweep run <name>"`, then
+   `kgkit sweep run <name> [--parallel N]` (it asks: it runs the command). A stopped sweep resumes with that call.
+4. **Decide**: `kgkit sweep decide <name>`, then the finalist's `exp finish` call it prints (several finalists:
+   keep only the best). A screen is never kept. On a fidelity WARNING, raise the screen's fidelity before the next
+   sweep relies on it.
 
 ## Final report
 Table of experiments (id, hypothesis, paired Δ, folds improved, decision), the new accepted baseline and

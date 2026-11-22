@@ -119,6 +119,66 @@ def survivors(runs: dict, eta: int = 3) -> list[str]:
     return [name for name, _ in sorted(done, key=lambda t: -t[1])[:k]]
 
 
+def random_checks(runs: dict, keep: list[str], n: int, seed: str) -> list[str]:
+    """``n`` of a rung's pruned variants drawn at random (seeded by the sweep and the rung): promoted too, they show
+    how the next rung ranks variants this rung's own pruning would have dropped."""
+    import random
+
+    pool = sorted(v for v, r in runs.items() if v not in keep and r.get("status") == "done"
+                  and isinstance(r.get("gain"), (int, float)))
+    if n <= 0 or not pool:
+        return []
+    return sorted(random.Random(seed).sample(pool, min(int(n), len(pool))))
+
+
+MIN_PAIRS = 4  # fewer variants scored at two rungs say nothing about how a screen ranks
+FAITHFUL_SPEARMAN, FAITHFUL_SIGN = 0.5, 0.7
+
+
+def fidelity(st: dict) -> list[dict]:
+    """Per pair of consecutive rungs: how the gains of the variants that ran at both agree (Spearman rank
+    correlation, share of equal signs), and how many of them were random checks rather than survivors."""
+    from .backlog import _spearman
+
+    out = []
+    for r in range(len(st["rungs"]) - 1):
+        pairs = []
+        for v, runs in st["runs"].items():
+            a, b = (runs.get(str(r)) or {}).get("gain"), (runs.get(str(r + 1)) or {}).get("gain")
+            if isinstance(a, (int, float)) and isinstance(b, (int, float)):
+                pairs.append((v, a, b))
+        names = {v for v, _, _ in pairs}
+        f = {"from": r, "to": r + 1, "n": len(pairs),
+             "checks": sum(1 for v in (st.get("checks") or {}).get(str(r + 1)) or () if v in names)}
+        if len(pairs) >= 2:
+            f["sign_agreement"] = sum(1 for _, a, b in pairs if (a > 0) == (b > 0)) / len(pairs)
+            f["spearman"] = _spearman([a for _, a, _ in pairs], [b for _, _, b in pairs])
+        out.append(f)
+    return out
+
+
+def fidelity_lines(st: dict) -> list[str]:
+    """``fidelity`` in words, with a warning when a rung ranks variants unlike the next one."""
+    out = []
+    for f in fidelity(st):
+        head = (f"rung {f['from']} -> rung {f['to']} ({describe_rung(st, f['from'])} -> "
+                f"{describe_rung(st, f['to'])})")
+        if f["n"] < MIN_PAIRS:
+            out.append(f"{head}: {f['n']} variant(s) scored at both, too few to measure how the cheap rung ranks "
+                       f"(at least {MIN_PAIRS}; `--check 2` on `sweep new` promotes random pruned ones too)")
+            continue
+        rho = f["spearman"]
+        out.append(f"{head}: {f['n']} variants, Spearman {rho:.2f}, sign agreement {f['sign_agreement']:.0%}"
+                   + (f" ({f['checks']} random checks among them)" if f["checks"] else
+                      " (survivors only: their range is cut, so this is biased low; `--check 2` measures it on "
+                      "random pruned ones too)"))
+        if not (rho == rho and rho >= FAITHFUL_SPEARMAN) or f["sign_agreement"] < FAITHFUL_SIGN:
+            out.append(f"  WARNING: rung {f['from']} ({describe_rung(st, f['from'])}) ranks variants unlike rung "
+                       f"{f['to']}: its pruning may drop the best one. Raise its fidelity (more rows or folds, fewer "
+                       "cheap settings) before the next sweep relies on it")
+    return out
+
+
 # ---------------------------------------------------------------------------- state
 def path(root, name: str) -> Path:
     return Path(root) / S.STATE_DIR / DIR / f"{name}.json"
@@ -150,7 +210,9 @@ def listed(root) -> list[dict]:
 
 
 def new(root, name: str, base: str, cmd: str, variant_list: list[dict], rung_list: list[dict], eta: int = 3,
-        base_args: str = "") -> dict:
+        base_args: str = "", check: int = 0) -> dict:
+    """Define a sweep (see the module docstring). ``check``: at each rung, promote that many pruned variants at
+    random too, so that ``fidelity`` measures the screen on a sample its own pruning did not choose."""
     if not name or _clean(name) != name:
         raise ValueError(f"a sweep name is one word of letters, digits, '.', '_' or '-', not {name!r}")
     if "{args}" not in cmd:
@@ -164,9 +226,9 @@ def new(root, name: str, base: str, cmd: str, variant_list: list[dict], rung_lis
         raise ValueError("a sweep needs variants: --variant NAME=ARGS or --grid --flag=v1,v2")
     if path(root, name).is_file():
         raise ValueError(f"a sweep {name!r} exists already (`kgkit sweep status {name}`): name the new one otherwise")
-    st = {"name": name, "base": base, "cmd": cmd, "base_args": base_args, "eta": int(eta),
+    st = {"name": name, "base": base, "cmd": cmd, "base_args": base_args, "eta": int(eta), "check": int(check),
           "variants": variant_list, "rungs": rung_list, "runs": {v["name"]: {} for v in variant_list},
-          "controls": {}, "survivors": {"0": [v["name"] for v in variant_list]}, "state": "rung 0"}
+          "controls": {}, "survivors": {"0": [v["name"] for v in variant_list]}, "checks": {}, "state": "rung 0"}
     save(root, st)
     return st
 
@@ -206,7 +268,7 @@ def environment(st: dict, variant: str, rung: int) -> dict:
     return env
 
 
-def fidelity(root, st: dict, rung: int) -> dict | None:
+def rung_fidelity(root, st: dict, rung: int) -> dict | None:
     """The fidelity a run at ``rung`` is recorded with (what ``Ledger.log`` writes): None for the full run."""
     from . import screen as SC
 
@@ -337,7 +399,7 @@ def _control(root, led, st: dict, rung: int, new_control: bool) -> str | None:
     if st["controls"].get(str(rung)):
         return st["controls"][str(rung)]
     mine = _tagged(led, st["name"], CONTROL, rung)
-    have = mine or (None if new_control else led.control(st["base"], {"fidelity": fidelity(root, st, rung)}))
+    have = mine or (None if new_control else led.control(st["base"], {"fidelity": rung_fidelity(root, st, rung)}))
     if have is None:
         return None
     st["controls"][str(rung)] = have["id"]
@@ -361,6 +423,8 @@ def _dry_run(st: dict, rung: int, jobs: list[str]) -> None:
 def _print_rung(led, st: dict, rung: int, ref: str, runs: dict, keep: list[str]) -> None:
     from .compare import fmt_gain
 
+    checks = set((st.get("checks") or {}).get(str(rung + 1)) or ())
+
     ctl = led.get(ref)
     print(f"[sweep {st['name']}] rung {rung} ({describe_rung(st, rung)}): {len(runs)} run(s) vs control {ref}"
           + (f" (CV {ctl['cv']:.5f})" if isinstance(ctl.get("cv"), (int, float)) else ""))
@@ -377,7 +441,7 @@ def _print_rung(led, st: dict, rung: int, ref: str, runs: dict, keep: list[str])
         z = r.get("z")
         print(f"  {v:<16} {r['record']:<28} gain {fmt_gain(r['gain'])}"
               + (f" (z {z:.2f})" if isinstance(z, (int, float)) and z == z else "")
-              + (f"  -> rung {rung + 1}" if v in keep else "  pruned"))
+              + ((f"  -> rung {rung + 1}" + (" (check)" if v in checks else "")) if v in keep else "  pruned"))
 
 
 def run(root, name: str, parallel: int = 1, one: bool = False, dry_run: bool = False, new_control: bool = False,
@@ -470,8 +534,13 @@ def run(root, name: str, parallel: int = 1, one: bool = False, dry_run: bool = F
             print(f"\n[sweep {name}] done. `kgkit sweep decide {name}` records the screens (pruned: discard, "
                   "promoted: inconclusive); decide the finalist with its `exp finish` call above"
                   + (f".\n{note}" if note else ""))
+            if any(f["n"] >= MIN_PAIRS for f in fidelity(st)):
+                print("\n" + "\n".join(fidelity_lines(st)))
             return st
         keep = survivors(runs, st["eta"])
+        extra = random_checks(runs, keep, int(st.get("check") or 0), f"{name}:{rung}")
+        st.setdefault("checks", {})[str(rung + 1)] = extra
+        keep = keep + extra
         st["survivors"][str(rung + 1)] = keep
         _print_rung(led, st, rung, ref, runs, keep)
         if not keep:

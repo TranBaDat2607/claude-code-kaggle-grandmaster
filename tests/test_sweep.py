@@ -220,3 +220,44 @@ def test_sweep_run_is_never_pre_approved():
     rules = PM.rules()
     assert "sweep run" in PM.NEVER and "Bash(kgkit sweep status *)" in rules
     assert not any(r.startswith("Bash(kgkit sweep run") or r == "Bash(kgkit sweep *)" for r in rules)
+
+
+# ---------------------------------------------------------------------------- fidelity
+def _st(gains0, gains1, checks=()):
+    names = [f"v{i}" for i in range(len(gains0))]
+    runs = {n: {"0": {"status": "done", "record": f"r0{n}", "gain": g}} for n, g in zip(names, gains0)}
+    for n, g in zip(names, gains1):
+        if g is not None:
+            runs[n]["1"] = {"status": "done", "record": f"r1{n}", "gain": g}
+    return {"name": "s", "base": "b", "eta": 3, "variants": [{"name": n, "args": ""} for n in names],
+            "rungs": [{"screen": "f0", "settings": {}}, {"screen": None, "settings": {}}], "runs": runs,
+            "controls": {}, "survivors": {"0": names, "1": [n for n, g in zip(names, gains1) if g is not None]},
+            "checks": {"1": list(checks)}, "state": "done"}
+
+
+def test_fidelity_is_the_rank_agreement_of_the_gains_between_rungs():
+    good = SW.fidelity(_st([0.1, 0.3, 0.2, -0.1, 0.0], [0.08, 0.25, 0.22, -0.05, 0.01], checks=["v3", "v4"]))
+    assert good[0]["n"] == 5 and good[0]["spearman"] > 0.8 and good[0]["sign_agreement"] == 0.8
+    assert good[0]["checks"] == 2
+    assert "WARNING" not in "\n".join(SW.fidelity_lines(_st([0.1, 0.3, 0.2, -0.1, 0.0],
+                                                             [0.08, 0.25, 0.22, -0.05, 0.01])))
+    bad = SW.fidelity_lines(_st([0.1, 0.3, 0.2, -0.1, 0.0], [0.2, -0.1, 0.05, 0.3, -0.2], checks=["v3", "v4"]))
+    assert any("WARNING" in line and "rung 0" in line for line in bad)
+    few = SW.fidelity_lines(_st([0.1, 0.3, 0.2], [0.2, None, None]))
+    assert any("too few" in line for line in few)  # one pair: nothing to measure
+    assert any("biased" in line for line in SW.fidelity_lines(_st([0.1, 0.3, 0.2, 0.0], [0.1, 0.2, 0.3, 0.0])))
+
+
+def test_check_promotes_random_pruned_variants_for_an_unbiased_fidelity(ws, capsys):
+    _sweep(ws, "--check", "2")
+    cli.main(["sweep", "run", "nz", "--one", "--parallel", "3"])
+    out = capsys.readouterr().out
+    st = json.loads((ws / ".kaggle-gm" / "sweeps" / "nz.json").read_text())
+    assert st["survivors"]["1"][:3] == ["noise0.2", "noise0.3", "noise0.4"] and len(st["survivors"]["1"]) == 5
+    assert len(st["checks"]["1"]) == 2 and not set(st["checks"]["1"]) & {"noise0.2", "noise0.3", "noise0.4"}
+    assert out.count("(check)") == 2
+    cli.main(["sweep", "run", "nz", "--one", "--parallel", "3"])
+    capsys.readouterr()
+    cli.main(["sweep", "fidelity", "nz"])
+    out = capsys.readouterr().out
+    assert "rung 0 -> rung 1" in out and "5 variants" in out and "2 random checks" in out and "Spearman" in out
