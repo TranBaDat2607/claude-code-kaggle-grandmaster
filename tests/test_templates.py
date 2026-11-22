@@ -317,6 +317,8 @@ def _tiny_image_ws(tmp_path, plugin_root):
             "--lr", "3e-3"]
 
 
+@pytest.mark.skipif(any(importlib.util.find_spec(m) is None for m in ("torch", "timm", "PIL")),
+                    reason="needs torch + timm + Pillow")
 def test_image_template_heartbeat_and_checkpoint_every(tmp_path, plugin_root):
     """#125: a local run says which process runs it (run_<pid>.json, a heartbeat each epoch), so a new session can
     tell a live run from a dead one; --checkpoint-every N lets a killed fold resume mid-schedule."""
