@@ -157,3 +157,11 @@ linear + shallow-GBDT meta-models, then hill climbing; compare the honest score 
 `--method residual --base <id>` (stage 2 learns one strong model's errors). See `ensembling`.
 Distillation also scales here: train a single model on the ensemble's OOF/test predictions as soft
 targets (`leaderboard-boosters`).
+
+## 9. Cheap screens (sweeps)
+Many values of one lever are one sweep (`/kg-grind --sweep`): screened cheap against a control at the same fidelity, the best confirmed by a full run judged as the best of all of them.
+
+`kgkit screen new s30 --frac 0.3 --folds 0 1` (a share of each class, or whole groups as the folds keep them). For
+GBDTs a higher learning rate (0.1) usually keeps the ranking of feature and parameter choices. Not a screen
+question: the learning rate and tree count themselves, high-cardinality encodings and other gains that need all the
+rows, effects smaller than the screen's noise (the control comparison's SE).

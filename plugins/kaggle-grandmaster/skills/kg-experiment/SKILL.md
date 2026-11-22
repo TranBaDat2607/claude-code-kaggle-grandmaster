@@ -50,7 +50,10 @@ verdict, the bookkeeping is two kgkit calls: mark the idea running, then `kgkit 
    `--parent <baseline id>`. When they log, they print the paired comparison with it (per-fold deltas, folds
    improved, the paired SE, a row-level test on the target) and end with the `kgkit exp finish` call that records
    it: no separate comparison call. A script of your own does the same with
-   `kgkit.experiment.report_comparison(rec, truth="data/train.csv:<target>")` after `Ledger().log`. Nothing about
+   `kgkit.experiment.report_comparison(rec, truth="data/train.csv:<target>")` after `Ledger().log`, and follows the
+   [training contract](training-contract.md): frozen folds, `--folds`/`--assemble`, a unit table for a metric that
+   is not one array of row predictions (segmentation, detection, 3D, problem sets, matches), `KG_SCREEN`. Many values
+   of one lever are one sweep (`/kg-grind --sweep`), not one experiment each. Nothing about
    the model (stopping round, epoch, checkpoint) may be chosen on the fold it predicts: the templates early-stop on
    an inner slice / keep the last epoch and log `oof_selection`. When the comparison says the baseline was selected
    otherwise, re-run the baseline before deciding a small gain. In a `holdout+lb` workspace log the run with its

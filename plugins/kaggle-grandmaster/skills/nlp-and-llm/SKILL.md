@@ -91,3 +91,13 @@ Full checklist with winners' settings: `compute-efficiency` (`references/inferen
 - Average fold LoRA adapters into one model instead of K inference passes (LMSYS 1st); share tokenisation
   across models.
 - Measure the whole pipeline on a hidden-test-sized dummy input before the deadline.
+
+## 8. Cheap screens (sweeps)
+Many values of one lever are one sweep (`/kg-grind --sweep`): screened cheap against a control at the same fidelity, the best confirmed by a full run judged as the best of all of them.
+
+| Screen on | Cheap settings that usually keep the ranking | Not a screen question |
+|---|---|---|
+| rows stratified by the target; whole prompts, essay sets or topics as groups | one epoch, a `max_len` that still fits most texts, the small model of the family (deberta-v3-small for -large) for data, loss and format choices | `max_len`, model size, long-context effects |
+| LLM problem sets: problems as units (`--ids problems.csv:id`), whole sources as groups | fewer problems, one sample each, a short generation budget | sampling settings and the number of samples (self-consistency gains need many) |
+
+An LLM solver logs one row per problem (`mean` of correct, grouped by source): the comparison is paired per problem.

@@ -56,7 +56,8 @@ kgkit gpu wait me/cnx384-train --collect     # background
 
 Custom scripts work if they follow the contract: accept `--folds <k>` and `--assemble`, write
 `artifacts/<name>/fold<k>_oof.npy` (+ `_idx.npy`, `_test.npy`), and use `kgkit.budget.TrainBudget`
-for deadline, resume and pruning. The image and transformer templates already do all of this.
+for deadline, resume and pruning. The image and transformer templates already do all of this. The whole contract
+(logging, unit tables, screens) is `/kg-experiment`'s training contract, `skills/kg-experiment/training-contract.md`.
 
 A kernel of your own (`gpu push <dir> --hours H`) has no runner and no deadline: Kaggle kills it at H h (see
 section 1). So size H from a measured runtime with a margin, and write the kernel so that a kill costs one phase,

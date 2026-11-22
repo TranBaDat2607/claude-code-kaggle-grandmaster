@@ -85,3 +85,14 @@ smaller ones; TTA only where OOF shows gain (batched with the originals); FP16; 
 models; one process per GPU on both T4s. Exports with a measured gain: `torch.compile` (~2x in SenNet 1st),
 TensorRT engines built on a T4 (~2x over `torch.jit` in CryoET 1st). See `code-competitions` and
 `compute-efficiency` (`references/inference.md`).
+
+## 6. Cheap screens (sweeps)
+Many values of one lever are one sweep (`/kg-grind --sweep`): screened cheap against a control at the same fidelity, the best confirmed by a full run judged as the best of all of them.
+
+| Screen on | Cheap settings that usually keep the ranking | Not a screen question |
+|---|---|---|
+| whole patients / studies / series, as the folds keep them (`kgkit screen new s30 --frac 0.3 --folds 0`) | half the resolution, a third of the epochs (the schedule compressed), the small backbone of the family | resolution, backbone size, TTA, EMA and long-schedule gains: there the lever is the fidelity |
+| segmentation / detection / 3D units (`--ids images.csv:image_id`, whole sites or scanners as `--group`) | fewer slices or patches per volume, one crop scale | thresholds and post-processing: tune them once, on the full OOF |
+
+Segmentation, detection and 3D runs log a unit table per image, study or tomogram (Dice / IoU / F-beta counts:
+`/kg-experiment`'s training contract), so screens and their control compare paired, unit by unit.
