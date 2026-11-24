@@ -23,6 +23,17 @@ def _skills(commands: bool) -> int:
     return sum(p.parent.name.startswith("kg-") == commands for p in (PLUGIN / "skills").glob("*/SKILL.md"))
 
 
+def _mod_commands() -> int:
+    """The kg-* slash commands the hooks module declares (`/kg-update`): commands the person types like the skills."""
+    src = "\n".join(p.read_text(encoding="utf-8") for p in (PLUGIN / "hooks" / "monitor").glob("*.ts*")
+                    if ".test." not in p.name)
+    return len(set(re.findall(r"name: '(kg-[a-z-]+)'", src)))
+
+
+def _commands() -> int:
+    return _skills(commands=True) + _mod_commands()
+
+
 def _agents() -> int:
     return len(list((PLUGIN / "agents").glob("*.md")))
 
@@ -61,7 +72,7 @@ def _tagged(tag: str) -> int:
 # (doc, pattern with one number group, actual count)
 CLAIMS = [
     (REFERENCE, r"\| \*\*Knowledge skills\*\* \| (\d+) \|", lambda: _skills(commands=False)),
-    (REFERENCE, r"\| \*\*Slash commands\*\* \| (\d+) \|", lambda: _skills(commands=True)),
+    (REFERENCE, r"\| \*\*Slash commands\*\* \| (\d+) \|", _commands),
     (REFERENCE, r"\| \*\*Specialist agents\*\* \| (\d+) \|", _agents),
     (REFERENCE, r"\| \*\*Hooks\*\* \| (\d+) \|", _hooks),
     (REFERENCE, r"\| \*\*`kgkit` toolkit\*\* \| (\d+) modules \|", _modules),
@@ -70,7 +81,7 @@ CLAIMS = [
     (REFERENCE, r"\d+ knowledge skills \+ (\d+) kg-\* commands", lambda: _skills(commands=True)),
     (REFERENCE, r"agents/\*\.md\s+(\d+) subagents", _agents),
     (README, r"\*\*(\d+) playbook skills\*\*", lambda: _skills(commands=False)),
-    (README, r"\*\*(\d+) slash commands\*\*", lambda: _skills(commands=True)),
+    (README, r"\*\*(\d+) slash commands\*\*", _commands),
     (README, r"\*\*(\d+) specialist agents\*\*", _agents),
     (README, r"\*\*(\d+) safety hooks\*\*", _hooks),
     (PLUGIN_README, r"`claude plugin eval` suite \((\d+) cases\)", _cases),

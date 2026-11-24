@@ -141,8 +141,9 @@ HINTS: list[tuple[str, str, str]] = [
      r"\b(kaggle[- ]?grandmaster|kgkit|(this|the) plugin)\b.{0,30}\b(update|upgrade)|"
      r"\b(newer|latest|new) (version|release) of (kaggle[- ]?grandmaster|kgkit|(this|the) plugin)\b",
      "To update the kaggle-grandmaster plugin to its latest release without leaving the conversation, suggest the "
-     "user run `/kg-update`, a slash command: it checks the latest release, shows what changed, runs "
-     "`claude plugin update` (the user approves it), and then the user types /reload-plugins. "
+     "user type `/kg-update`, a slash command that runs without you: it checks the latest release, runs "
+     "`claude plugin update` and shows what changed (`/kg-update check` only looks); then the user types "
+     "/reload-plugins. "
      "`kgkit update-check` answers whether a newer release exists."),
     ("kaggle-monitor",
      r"\b(gpu|tpu) (quota|hours)\b|how many (gpu|tpu) hours|quota (left|remaining)|"

@@ -49,6 +49,7 @@ import { lastLine } from './describe'
 import { LiveTracker, spark } from './live'
 import { type Platform, type Prev, machine as machineOf, nextPrev, platformOf, readGpus, readRaw, readTails, rows } from './probe'
 import { LOOK, RUNNING_BLUE, age, clockOf, endNotes, limitText, phaseToast, runOf } from './session'
+import { UPDATE_COMMAND, kgUpdate } from './update'
 
 const PANE = 'kaggle-monitor'
 const COMMAND: CommandSpec = {
@@ -835,6 +836,7 @@ function restart($: EngineInterface, dir: string): Promise<void> {
   prev = undefined
   restarting = (async () => {
     await $.command.register(COMMAND).catch(() => undefined)
+    await $.command.register(UPDATE_COMMAND).catch(() => undefined)
     await init($, dir || cwd)
   })()
     .catch(async err => {
@@ -854,6 +856,7 @@ export const register: Register = on => {
     const started = await next(e)
     // The command first: nothing below may keep it from being declared.
     await $.command.register(COMMAND)
+    await $.command.register(UPDATE_COMMAND).catch(err => $.ui.log(`kg-update: not declared: ${String(err)}`, { to: 'debug' }))
     void init($, e.cwd).catch(async err => {
       $.ui.log(`kaggle-monitor: start failed: ${String(err)}`, { to: 'debug' })
       await say($, `The monitor could not start: ${String(err)}`, true)
@@ -894,6 +897,9 @@ export const register: Register = on => {
     void tick($)
     return { text: isPlaced ? `Kaggle pane open (${tab}).` : 'Kaggle pane opened; it shows once the window is wide enough.' }
   })
+
+  // /kg-update: the update in code, from the prompt, with no turn of the model.
+  on('command.run', { command: 'kg-update' }, async ($, e) => ({ text: await kgUpdate($, e.args) }))
 
   on('prompt.compose', async ($, e, next) => {
     if (isStale) void restart($, cwd)

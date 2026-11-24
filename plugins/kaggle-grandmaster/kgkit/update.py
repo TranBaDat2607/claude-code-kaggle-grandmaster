@@ -2,8 +2,9 @@
 
 It compares the running version with the latest GitHub release of the plugin, finds this session's install in
 `claude plugin list --json` (the one whose folder kgkit runs from, or, after an update, the same plugin's install for
-this project in a newer version folder), and says what to do: the exact `claude plugin update` command (which the
-slash command runs, the user approving it), then /reload-plugins, which loads the new version into the running
+this project in a newer version folder), and says what to do: the exact `claude plugin update` command (which
+`/kg-update` runs: a command of the plugin's hooks module that runs `python -m kgkit.update --apply`, see `main`), then
+/reload-plugins, which loads the new version into the running
 session and keeps the conversation. After the update it says the new version waits for that reload and which folder
 kgkit runs from after it (the paths earlier in the conversation are the old version's), and lists the copies made by
 `kgkit vendor` in the workspace that are older.
@@ -20,6 +21,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import urllib.request
 from pathlib import Path
 
@@ -31,6 +33,8 @@ PLUGIN_ROOT = Path(__file__).resolve().parent.parent
 RELEASES_URL = f"https://api.github.com/repos/{REPO}/releases?per_page=30"
 USER_AGENT = "kgkit-update-check"
 MAX_CHANGES = 10
+UPDATE_TIMEOUT = 300  # seconds `claude plugin update` may take (it fetches the marketplace)
+TAIL_LINES = 8
 SKIP_DIRS = {".git", ".venv", "venv", "env", "node_modules", "site-packages", "__pycache__", ".kaggle-gm"}
 
 
@@ -149,9 +153,10 @@ def check(root: str | Path | None = None, cwd: str | Path | None = None, running
         kind = "no-cli" if installs is None else "unknown"
     mine_v = parse_version(mine.get("version")) if mine else None
     pending = mine if mine_v and mine_v > run_v else None
-    command = run_from = None
+    command = run_from = args = None
     if mine is not None and pending is None and (latest_v is None or latest_v > run_v):
-        command = f"claude plugin update {mine['id']} --scope {mine.get('scope') or 'user'}"
+        args = ["plugin", "update", str(mine["id"]), "--scope", str(mine.get("scope") or "user")]
+        command = "claude " + " ".join(args)
         if mine.get("scope") in ("project", "local") and not _inside(cwd, mine.get("projectPath")):
             run_from = mine.get("projectPath")
     target = mine_v if pending else latest_v
@@ -164,8 +169,8 @@ def check(root: str | Path | None = None, cwd: str | Path | None = None, running
     vendored = [(p, v) for p, v in _vendored(Path(workspace) if workspace else None, root)
                 if (parse_version(v) or (0,)) < floor]
     return {"running": running, "latest": _fmt(latest_v) if latest_v else None, "kind": kind, "install": mine,
-            "pending": pending, "command": command, "run_from": run_from, "changes": changes, "root": str(root),
-            "workspace": str(workspace) if workspace else None, "vendored": vendored}
+            "pending": pending, "command": command, "args": args, "run_from": run_from, "changes": changes,
+            "root": str(root), "workspace": str(workspace) if workspace else None, "vendored": vendored}
 
 
 def report(info: dict) -> str:
@@ -218,3 +223,47 @@ def report(info: dict) -> str:
         else:
             lines.append("  refresh them after the update: update-check then prints the commands.")
     return "\n".join(lines).encode("ascii", "replace").decode("ascii")
+
+
+def apply(info: dict) -> tuple[bool, str]:
+    """Runs the `claude plugin update` that `check` found (from the project folder it names): whether it succeeded,
+    and the last lines it printed."""
+    exe = shutil.which("claude")
+    if exe is None or not info.get("args"):
+        return False, "the claude CLI was not found"
+    try:
+        r = subprocess.run([exe, *info["args"]], capture_output=True, encoding="utf-8", errors="replace",
+                           timeout=UPDATE_TIMEOUT, cwd=info.get("run_from") or None)
+    except (OSError, subprocess.SubprocessError) as e:
+        return False, str(e)
+    lines = [ln.rstrip() for ln in f"{r.stdout}\n{r.stderr}".splitlines() if ln.strip()]
+    tail = "\n".join("  " + ln for ln in lines[-TAIL_LINES:])
+    return r.returncode == 0, (tail or f"  (exit code {r.returncode}, nothing printed)")
+
+
+def run(do_apply: bool) -> dict:
+    """What /kg-update shows: the check, and with `do_apply` the update it then runs and the check after it.
+    `{"text", "updated"}`; the text is ASCII."""
+    info = check()
+    if not (do_apply and info["command"]):
+        text = report(info)
+        if info["command"]:
+            text += "\n/kg-update runs that command for you."
+        return {"text": text, "updated": False}
+    ok, out = apply(info)
+    if not ok:
+        text = report(info) + f"\nThe update failed ({info['command']}):\n{out}"
+        return {"text": text.encode("ascii", "replace").decode("ascii"), "updated": False}
+    return {"text": f"Updated: ran {info['command']}\n" + report(check()), "updated": True}
+
+
+def main(argv: list[str] | None = None) -> int:
+    """`python -m kgkit.update [--apply]`, what the /kg-update command of the plugin's hooks module runs: one JSON line,
+    `run`'s answer. Without --apply it only checks."""
+    args = sys.argv[1:] if argv is None else argv
+    print(json.dumps(run("--apply" in args)))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
