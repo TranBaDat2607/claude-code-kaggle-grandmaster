@@ -27,8 +27,8 @@ This repo is a Claude Code marketplace (`.claude-plugin/marketplace.json`) conta
   user-facing template stays in `templates/` and is found with `cli._plugin_file` (beside kgkit, else the plugin at
   `$KGKIT_HOME`), and the command says what it skipped when neither has it.
 - `hooks/monitor/` is the exception to the standard-library rule: a TypeScript hooks module (a mod, listed under
-  `modules` in `hooks.json`) for the `/kaggle-monitor` pane. It may pass `$` only to functions declared at the top of
-  a file, writes `$.state` only under the plugin's own name (`kaggle-grandmaster`), and never reads a token's value:
+  `modules` in `hooks.json`) for the `/kaggle-monitor` pane and the `/kg-update` command. It may pass `$` only to
+  functions declared at the top of a file, writes `$.state` only under the plugin's own name (`kaggle-grandmaster`), and never reads a token's value:
   accounts are token files, given to the CLI as `KAGGLE_API_TOKEN=<path>`. Check it with
   `claude plugin validate plugins/kaggle-grandmaster` and `claude plugin test plugins/kaggle-grandmaster`
   (`tests/test_monitor_mod.py` runs the latter when `claude` is on PATH). The `[kgmon]` line the runner and
@@ -44,7 +44,9 @@ This repo is a Claude Code marketplace (`.claude-plugin/marketplace.json`) conta
   `tests/test_skill_standard.py` in the `skill-standard` CI job): description says what and when, trigger words first,
   body under 500 lines, supporting files one link from `SKILL.md`, and a listing budget that only goes down.
 - Skills: knowledge skills are model-invoked; `kg-*` skills are slash commands. Side-effectful commands
-  (`kg-submit`, `kg-grind`, `kg-kernel`, `kg-gpu`, `kg-showcase`, `kg-update`) set `disable-model-invocation: true`.
+  (`kg-submit`, `kg-grind`, `kg-kernel`, `kg-gpu`, `kg-showcase`) set `disable-model-invocation: true`.
+  `/kg-update` is not a skill: the hooks module declares it and runs `python -m kgkit.update --apply` (no model turn).
+  Claude Code refuses a mod command named like one of the plugin's skills, so the two never share a name.
 - Claude runs kgkit as `kgkit <cmd>`: `bin/kgkit` is on the Bash tool's PATH while the plugin is enabled (it runs
   the plugin's own kgkit with the first real Python), in subagents too. Skills, agents and hook messages never put a
   path in the command (`PYTHONPATH=`, `$KGKIT_HOME`: `tests/test_skills.py` checks). `bin/kgkit` is committed

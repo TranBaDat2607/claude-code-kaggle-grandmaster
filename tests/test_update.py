@@ -1,8 +1,9 @@
 """/kg-update: update the plugin to the latest release without leaving the conversation. `kgkit update-check` compares
 the running version with the latest GitHub release, finds this session's install in `claude plugin list --json`, and
-prints the exact `claude plugin update` command; the slash command runs it (the user approves), and the user types
-/reload-plugins. After the update, update-check says the new version waits for /reload-plugins and where it runs
-from, and which `kgkit vendor` copies in the workspace are older."""
+prints the exact `claude plugin update` command; /kg-update (a command of the hooks module, no model turn) runs it
+through `python -m kgkit.update --apply`, and the user types /reload-plugins. After the update, update-check says the
+new version waits for /reload-plugins and where it runs from, and which `kgkit vendor` copies in the workspace are
+older."""
 
 import json
 import re
@@ -172,15 +173,99 @@ def test_plugin_list_reads_the_claude_cli(monkeypatch):
 PLUGIN = Path(__file__).resolve().parents[1] / "plugins" / "kaggle-grandmaster"
 
 
-def test_kg_update_is_a_slash_command_that_asks_before_it_updates():
-    text = (PLUGIN / "skills" / "kg-update" / "SKILL.md").read_text(encoding="utf-8")
-    front = text.split("---")[1]
-    assert "disable-model-invocation: true" in front
-    rules = re.findall(r"^  - '?(.+?)'?$", front, re.M)
-    assert [r for r in rules if "claude plugin" in r] == []  # the update itself is approved by the user each time
-    assert "Bash(kgkit update-check *)" in rules
-    body = text.split("---", 2)[2]
-    assert "update-check" in body and "claude plugin update" in body and "/reload-plugins" in body
+# ---- /kg-update in code: the mod command runs `python -m kgkit.update --apply`
+def _fake_claude(monkeypatch, code=0, out="Plugin updated\n"):
+    """`claude plugin update` as the test sets it: what it was run with, and the install it leaves behind."""
+    calls = []
+
+    def run(argv, **kw):
+        calls.append((argv, kw.get("cwd")))
+        return subprocess.CompletedProcess(argv, code, out, "")
+
+    monkeypatch.setattr(U.shutil, "which", lambda name: "/usr/bin/claude")
+    monkeypatch.setattr(U.subprocess, "run", run)
+    return calls
+
+
+def _pin(monkeypatch, **kw):
+    """U.check as `run` calls it (no arguments), with this test's root, project, version and workspace."""
+    real = U.check
+    args = {"root": Path(ROOT_OLD), "cwd": Path("/work/comp"), "running": "1.24.0", "workspace": None, **kw}
+    monkeypatch.setattr(U, "check", lambda: real(**args))
+
+
+def test_apply_runs_the_update_from_the_project_folder(fake, monkeypatch):
+    calls = _fake_claude(monkeypatch)
+    info = check(cwd=Path("/elsewhere"))
+    assert info["args"] == ["plugin", "update", ID, "--scope", "project"]
+    ok, out = U.apply(info)
+    assert ok and "Plugin updated" in out
+    assert calls == [(["/usr/bin/claude", "plugin", "update", ID, "--scope", "project"], "/work/comp")]
+
+
+def test_run_updates_then_says_to_reload(fake, monkeypatch):
+    """What the /kg-update mod command shows: the update it ran, then the check after it (waiting for the reload)."""
+    calls = _fake_claude(monkeypatch)
+    real = U.check
+
+    def checked():
+        if calls:  # after `claude plugin update`, the new version is installed for this project
+            fake["installs"] = [_install("1.26.0", ROOT_NEW)]
+        return real(root=Path(ROOT_OLD), cwd=Path("/work/comp"), running="1.24.0", workspace=None)
+
+    monkeypatch.setattr(U, "check", checked)
+    r = U.run(True)
+    assert r["updated"] and len(calls) == 1
+    assert r["text"].startswith(f"Updated: ran claude plugin update {ID} --scope project")
+    assert "1.26.0 is installed" in r["text"] and "type /reload-plugins" in r["text"]
+    assert U.run(True)["updated"] is False and len(calls) == 1  # already installed: nothing runs again
+
+
+def test_run_check_only_and_a_failed_update(fake, monkeypatch):
+    calls = _fake_claude(monkeypatch, code=1, out="Error: marketplace not found\n")
+    _pin(monkeypatch)
+    looked = U.run(False)
+    assert not looked["updated"] and not calls
+    assert "1.24.0 -> 1.26.0" in looked["text"] and "/kg-update runs that command" in looked["text"]
+    failed = U.run(True)
+    assert not failed["updated"] and len(calls) == 1
+    assert "The update failed" in failed["text"] and "marketplace not found" in failed["text"]
+
+
+def test_up_to_date_runs_nothing(fake, monkeypatch):
+    calls = _fake_claude(monkeypatch)
+    fake["installs"] = [_install("1.26.0", ROOT_NEW)]
+    _pin(monkeypatch, running="1.26.0", root=Path(ROOT_NEW))
+    r = U.run(True)
+    assert not r["updated"] and not calls and "up to date" in r["text"]
+
+
+def test_module_main_prints_one_json_line(fake, monkeypatch, capsys):
+    """`python -m kgkit.update [--apply]`: the mod reads its last stdout line."""
+    calls = _fake_claude(monkeypatch)
+    _pin(monkeypatch)
+    assert U.main([]) == 0
+    answer = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+    assert answer["updated"] is False and "1.24.0 -> 1.26.0" in answer["text"] and not calls
+    U.main(["--apply"])
+    assert len(calls) == 1
+
+
+def test_the_mod_runs_the_module_kgkit_ships():
+    """hooks/monitor/update.ts runs `python -m kgkit.update` with PYTHONPATH at the plugin: the module and its entry
+    point stay where it looks."""
+    src = (PLUGIN / "hooks" / "monitor" / "update.ts").read_text(encoding="utf-8")
+    assert "'kgkit.update'" in src and "'--apply'" in src and "name: 'kg-update'" in src
+    assert 'if __name__ == "__main__":' in (PLUGIN / "kgkit" / "update.py").read_text(encoding="utf-8")
+
+
+
+def test_kg_update_is_the_hooks_modules_command_not_a_skill():
+    """Claude Code refuses a mod command named like one of the plugin's skills: /kg-update stays the mod's alone, and
+    it pre-approves nothing (the person typing it is the approval)."""
+    assert not (PLUGIN / "skills" / "kg-update").exists()
+    src = (PLUGIN / "hooks" / "monitor" / "register.tsx").read_text(encoding="utf-8")
+    assert "register(UPDATE_COMMAND)" in src and "command: 'kg-update'" in src
 
 
 def test_the_router_suggests_kg_update(plugin_root, tmp_path_factory):

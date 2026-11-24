@@ -76,7 +76,7 @@ test('the pane draws its tabs and switches to Accounts, on every surface', async
   }
 })
 
-test('session start declares /kaggle-monitor before anything else can fail', async ($, on) => {
+test('session start declares /kaggle-monitor, then /kg-update, before anything else can fail', async ($, on) => {
   const registered: string[] = []
   on('command.register', (_, e) => {
     registered.push(e.name)
@@ -84,7 +84,49 @@ test('session start declares /kaggle-monitor before anything else can fail', asy
   })
   on('session.start', (_, e) => ({ cwd: e.cwd }))
   await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
-  expect(registered).toEqual(['kaggle-monitor'])
+  expect(registered).toEqual(['kaggle-monitor', 'kg-update'])
+})
+
+test('/kg-update runs kgkit.update with the first Python that answers, and shows its text', async ($, on) => {
+  const ran: { argv: readonly string[]; env?: Record<string, string> }[] = []
+  on('env.get', () => ({ value: undefined }))
+  on('ui.toast', () => ({ value: undefined }))
+  on('process.run', (_, e) => {
+    const done = (exitCode: number, stdout: string, stderr = '') => ({
+      value: { exitCode, stdout, stderr, isStdoutTruncated: false, isStderrTruncated: false },
+    })
+    if (e.argv[0] === 'uname') return done(0, 'Linux\n')
+    ran.push({ argv: e.argv, env: e.init?.env })
+    if (e.argv[0] === 'python3') return done(1, '', 'No module named kgkit.update\n')
+    const apply = e.argv.includes('--apply')
+    const text = apply ? 'Updated: ran claude plugin update x --scope user\nNext: type /reload-plugins' : 'kaggle-grandmaster: Run: claude plugin update x'
+    return done(0, `noise\n${JSON.stringify({ text, updated: apply })}\n`)
+  })
+  const updated = await $.command.run({ command: 'kg-update', args: '', origin: { kind: 'composer' }, presentation: { isFullscreen: false, columns: 100 } })
+  expect(updated.text).toContain('type /reload-plugins')
+  expect(ran.map(r => r.argv.join(' '))).toEqual(['python3 -m kgkit.update --apply', 'python -m kgkit.update --apply'])
+  expect(ran[1]?.env?.PYTHONPATH).toBeTruthy() // the plugin's folder: kgkit is imported from there
+  ran.length = 0
+  const checked = await $.command.run({ command: 'kg-update', args: 'check', origin: { kind: 'composer' }, presentation: { isFullscreen: false, columns: 100 } })
+  expect(checked.text).toBe('Run: claude plugin update x') // the engine heads it with the plugin's name
+  expect(ran.map(r => r.argv.join(' '))).toEqual(['python3 -m kgkit.update', 'python -m kgkit.update'])
+  const usage = await $.command.run({ command: 'kg-update', args: 'now please', origin: { kind: 'composer' }, presentation: { isFullscreen: false, columns: 100 } })
+  expect(usage.text).toContain('Usage: /kg-update')
+})
+
+test('/kg-update says what it tried when no Python runs kgkit', async ($, on) => {
+  on('env.get', (_, e) => ({ value: e.name === 'KGKIT_PYTHON' ? '/opt/py' : undefined }))
+  on('ui.toast', () => ({ value: undefined }))
+  // No Python here: only uname answers, every other process.run rejects.
+  on('process.run', (_, e, next) =>
+    e.argv[0] === 'uname'
+      ? { value: { exitCode: 0, stdout: 'Linux\n', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+      : next(e))
+  const r = await $.command.run({ command: 'kg-update', args: '', origin: { kind: 'composer' }, presentation: { isFullscreen: false, columns: 100 } })
+  expect(r.text).toContain('Could not update')
+  expect(r.text).toContain('(/opt/py: ')
+  expect(r.text).toContain('; python3: ')
+  expect(r.text).toContain('KGKIT_PYTHON')
 })
 
 test('session start in a competition workspace does not open the pane by itself', async ($, on) => {
@@ -365,7 +407,7 @@ for (const source of ['clear', 'resume'] as const) {
     await $.classic.SessionStart({ source, cwd: '/ws' })
     await nextTick
     expect(await accountShown()).toBe('main')
-    expect(registered).toBe(2)
+    expect(registered).toBe(4) // /kaggle-monitor and /kg-update, at the start and again after the change
     expect(polls).toBe(2)
   })
 }

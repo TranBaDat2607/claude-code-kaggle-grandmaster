@@ -40,7 +40,7 @@ Kaggle submissions and GPU pushes still go through the plugin's hooks, which che
 | Layer | Count | What it does |
 |---|---|---|
 | **Knowledge skills** | 22 | Playbooks Claude loads when relevant: master playbook, recon, validation, tabular, CV, NLP/LLM, time series, audio, simulation/optimisation, recsys, ensembling, metrics, tuning, DL training, boosters, code competitions, Kaggle CLI, Kaggle GPUs, compute efficiency (speed defaults by domain, from winning solutions), CV-LB debugging, final selection, and competition strategy (choosing competitions, solo gold, teaming and merging) |
-| **Slash commands** | 19 | `kg-start`, `kg-adopt`, `kg-recon`, `kg-eda`, `kg-cv`, `kg-baseline`, `kg-experiment`, `kg-grind`, `kg-gpu`, `kg-ensemble`, `kg-submit`, `kg-status`, `kg-kernel`, `kg-final`, `kg-debug`, `kg-ideas`, `kg-postmortem`, `kg-showcase`, `kg-update` |
+| **Slash commands** | 19 | `kg-start`, `kg-adopt`, `kg-recon`, `kg-eda`, `kg-cv`, `kg-baseline`, `kg-experiment`, `kg-grind`, `kg-gpu`, `kg-ensemble`, `kg-submit`, `kg-status`, `kg-kernel`, `kg-final`, `kg-debug`, `kg-ideas`, `kg-postmortem`, `kg-showcase`, `kg-update` (a command of the hooks module: the update runs in code, with no turn of the model) |
 | **Specialist agents** | 9 | competition-analyst, solution-researcher, data-detective, validation-auditor, feature-engineer, experiment-runner, error-analyst, ensemble-architect, kernel-packager |
 | **Hooks** | 6 | session brief (incl. GPU quota), Kaggle-prompt → skill router, submission + GPU-push + upload guard (validation, repeated files, daily budget, weekly GPU quota, credential protection), sealed-vault guard (no tool reads the vault's labels), submission / GPU-run logger, compute defaults when model code is written |
 | **Kaggle pane** | 1 mod | `/kaggle-monitor`: running kernels with live CPU / GPU / RAM / disk and what each GPU is doing, recent kernels and submissions, GPU/TPU quota for every account, multi-account token management ([below](#kaggle-pane-kaggle-monitor)) |
@@ -367,10 +367,10 @@ Repository layout:
 .claude-plugin/marketplace.json        marketplace manifest (this repo is installable)
 plugins/kaggle-grandmaster/
   .claude-plugin/plugin.json
-  skills/<name>/SKILL.md               22 knowledge skills + 19 kg-* commands
+  skills/<name>/SKILL.md               22 knowledge skills + 18 kg-* commands
   agents/*.md                          9 subagents
   hooks/                               hooks.json, run.sh launcher, stdlib-only Python hooks
-  hooks/monitor/                       the Kaggle pane mod (TypeScript hooks module) and its tests
+  hooks/monitor/                       the mod (TypeScript hooks module): the Kaggle pane, /kg-update, their tests
   types/index.d.ts                     the pane's state types
   kgkit/                               the toolkit (python -m kgkit) and the remote GPU kernel runner
   templates/                           training / inference templates, CLAUDE.md template
