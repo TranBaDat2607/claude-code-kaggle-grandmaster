@@ -915,7 +915,8 @@ export const register: Register = on => {
           text:
             `Kaggle account for this session: "${a.alias}"${a.user ? ` (Kaggle user ${a.user})` : ''}. ` +
             'The kaggle-monitor mod set KAGGLE_API_TOKEN to that account\'s token file, so Kaggle CLI and kgkit calls run as it. ' +
-            'The person switches accounts in the Kaggle pane (/kaggle-monitor accounts); do not change KAGGLE_API_TOKEN or KAGGLE_USERNAME yourself.',
+            'The person switches accounts in the Kaggle pane (/kaggle-monitor accounts); do not change KAGGLE_API_TOKEN or KAGGLE_USERNAME yourself. ' +
+            '`kgkit gpu push` runs a kernel as another registered account without switching (`--account <alias>`, the best fit for a `gpu build` run).',
         },
       ],
     }

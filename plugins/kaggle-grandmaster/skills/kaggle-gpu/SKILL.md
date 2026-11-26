@@ -35,8 +35,8 @@ Re-check the regime whenever an account is added, the quota resets, or the deadl
   runs logged since against it (it cannot see sessions started elsewhere, such as the website or another machine:
   run `gpu quota` again before committing hours on a cached figure). With several accounts registered in the Kaggle
   pane (`~/.kaggle/kg_accounts.json`), `kgkit gpu quota --all` reads each one's hours (as that account, never
-  printing a token) and the session brief lists them; runs still go to the active account, which the person switches
-  in the pane.
+  printing a token) and the session brief lists them; a `gpu build` run goes to the account whose hours fit it best
+  ([references/plan-and-diagnose.md](references/plan-and-diagnose.md#several-accounts)).
 - Per-session limit 12 h (GPU/CPU), 9 h (TPU). The push timeout `-t` (`--hours`) caps a run below that, and a
   capped run never burns more than its cap. A push without `-t` reserves the full session limit until the run is
   seen finished.

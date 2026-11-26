@@ -577,7 +577,7 @@ export function accountsBrief(
     .join('; ')
   const text =
     `Registered Kaggle accounts (the Kaggle pane), GPU hours left${when ? ` (${when})` : ''}: ${parts.join(' · ')}; ` +
-    `${hoursText(total)}h in total. Runs go to the active account; the person switches it in the pane (/kaggle-monitor use <alias>). ` +
+    `${hoursText(total)}h in total. \`kgkit gpu push\` sends a \`gpu build\` run to the account whose hours fit it best; other pushes and submissions go to the active account, which the person switches in the pane (/kaggle-monitor use <alias>). ` +
     '`python -m kgkit gpu quota --all` reads them again.'
   return { key: `${activeAlias}|${keys.join(',')}|${reset ?? ''}`, text }
 }
