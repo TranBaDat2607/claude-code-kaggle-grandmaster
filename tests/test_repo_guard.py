@@ -74,3 +74,98 @@ def test_ensure_gitignore_reports_what_it_added(repo):
     assert "/data/" not in added and "*.log" not in added and "kaggle.json" in added
     assert RG.ensure_gitignore(repo) == []
 
+
+# ------------------------------------------------------------------------------------------------ the guard
+TRAIN = "id,text,label\n" + "".join(f"{i},report {i} shows a tear,{i % 2}\n" for i in range(50))
+SAMPLE = "id,label\n" + "".join(f"t{i},0.5\n" for i in range(10))
+KEY = "0123456789abcdef0123456789abcdef"
+
+
+@pytest.fixture
+def ws(repo):
+    """A workspace after `kgkit init`, with the competition's files in data/ and one clean commit."""
+    _init(repo)
+    (repo / "data" / "train.csv").write_text(TRAIN)
+    (repo / "data" / "sample_submission.csv").write_text(SAMPLE)
+    (repo / "src" / "train.py").write_text("print('train')\n")
+    git(repo, "add", "-A")
+    git(repo, "commit", "-qm", "init")
+    return repo
+
+
+def _paths(lines):
+    return {x.split(": ", 1)[0] for x in lines}
+
+
+def test_guard_refuses_credentials_and_competition_data(ws):
+    (ws / "kaggle.json").write_text('{"username": "me", "key": "%s"}' % KEY)
+    (ws / "src" / "util.py").write_text(f"import os\nos.environ['KAGGLE_KEY'] = '{KEY}'\n")
+    (ws / "src" / "copy.csv").write_text(TRAIN)  # an exact copy under another name
+    (ws / "src" / "train.py").write_text("print('train v2')\n")
+    git(ws, "add", "-f", "kaggle.json", "data/train.csv", "src/util.py", "src/copy.csv", "src/train.py")
+    refused, asked = RG.check(ws, RG.staged(ws))
+    assert _paths(refused) == {"kaggle.json", "data/train.csv", "src/util.py", "src/copy.csv"}
+    why = dict(x.split(": ", 1) for x in refused)
+    assert "credentials" in why["kaggle.json"] and "Kaggle API key" in why["src/util.py"] and "line 2" in why["src/util.py"]
+    assert "an exact copy of data/train.csv" in why["src/copy.csv"] and "competition" in why["data/train.csv"]
+    assert KEY not in "\n".join(refused)  # never the secret itself
+    assert asked == []
+
+
+def test_guard_asks_about_other_never_public_files_and_passes_cleanup_files(ws):
+    for rel, text in {"artifacts/oof.npy": "x", "models/fold0.pt": "x", "train.log": "epoch 1",
+                      "data/ext/kout-a/notes.txt": "mine", "submission.csv": SAMPLE.replace("0.5", "0.7"),
+                      ".kaggle-gm/remote/k/out.txt": "x"}.items():
+        (ws / rel).parent.mkdir(parents=True, exist_ok=True)
+        (ws / rel).write_text(text)
+    for rel in ("src/train_v2.py", "notebooks/scratch.ipynb", "probe_lr.py", ".env.example"):
+        (ws / rel).write_text("KAGGLE_KEY=\n")
+    git(ws, "add", "-A")
+    git(ws, "add", "-f", "artifacts/oof.npy", "models/fold0.pt", "train.log", "data/ext/kout-a/notes.txt",
+        ".kaggle-gm/remote/k/out.txt")
+    refused, asked = RG.check(ws, RG.staged(ws))
+    assert refused == []
+    assert _paths(asked) == {"artifacts/oof.npy", "models/fold0.pt", "train.log", "data/ext/kout-a/notes.txt",
+                             "submission.csv", ".kaggle-gm/remote/k/out.txt"}
+    why = dict(x.split(": ", 1) for x in asked)
+    assert "sample_submission.csv" in why["submission.csv"] and "*.pt" in why["models/fold0.pt"]
+
+
+def test_guard_sees_what_git_add_would_stage(ws):
+    (ws / "src" / "copy.csv").write_text(TRAIN)
+    (ws / "src" / "ok.py").write_text("x = 1\n")
+    items = RG.would_add(ws, ["-A"])
+    assert {i.path for i in items} == {"src/copy.csv", "src/ok.py"}
+    assert _paths(RG.check(ws, items)[0]) == {"src/copy.csv"}
+    assert {i.path for i in RG.would_add(ws, ["-f", "data/train.csv"])} == {"data/train.csv"}
+    assert RG.would_add(ws, ["data/train.csv"]) == []  # ignored, and git would refuse it
+
+
+def test_a_push_checks_every_file_its_commits_send(ws, tmp_path):
+    remote = tmp_path / "remote.git"
+    git(tmp_path, "init", "-q", "--bare", str(remote))
+    git(ws, "remote", "add", "origin", str(remote))
+    git(ws, "push", "-q", "origin", "HEAD:refs/heads/main")
+    assert RG.check(ws, RG.pushed(ws, ["HEAD"], "origin")) == ([], [])  # all of it is on the remote already
+    (ws / "src" / "tok.txt").write_text(f'{{"key": "{KEY}"}}\n')
+    git(ws, "add", "src/tok.txt")
+    git(ws, "commit", "-qm", "oops")
+    git(ws, "rm", "-q", "src/tok.txt")
+    git(ws, "commit", "-qm", "remove it")  # gone from the tip, still in a commit the push sends
+    refused, _ = RG.check(ws, RG.pushed(ws, ["HEAD"], "origin"))
+    assert _paths(refused) == {"src/tok.txt"}
+
+
+def test_repo_guard_check_exits_1_on_a_refusal_and_0_with_warnings(ws, capsys):
+    (ws / "train.log").write_text("epoch 1\n")
+    git(ws, "add", "-f", "train.log")
+    cli.main(["repo-guard", "check", "--staged"])
+    out = capsys.readouterr()
+    assert "train.log" in out.err and "never-public" in out.err
+    (ws / "kaggle.json").write_text("{}")
+    git(ws, "add", "-f", "kaggle.json")
+    with pytest.raises(SystemExit) as e:
+        cli.main(["repo-guard", "check", "--staged"])
+    assert e.value.code == 1
+    err = capsys.readouterr().err
+    assert "kaggle.json" in err and "git rm --cached kaggle.json" in err

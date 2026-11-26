@@ -324,6 +324,29 @@ def _progress(line: str) -> None:
     print(line, file=sys.stderr, flush=True)
 
 
+def cmd_repo_guard(a):
+    """Never-public files in what git would commit or push (kgkit/repoguard.py). Exit 1 when credentials or
+    competition data would go; warnings only for other never-public files."""
+    from . import repoguard as RG
+
+    root = RG.toplevel(a.dir)
+    if root is None:
+        raise SystemExit(f"{Path(a.dir).resolve()} is not in a git repository")
+    if a.action == "install":
+        added = RG.ensure_gitignore(root)
+        print(f"added {len(added)} pattern(s) to .gitignore" if added else ".gitignore already names them all")
+        return
+    if a.push is not None:
+        items, staged_files = RG.pushed(root, a.push or ["HEAD"], a.remote), False
+    else:
+        items, staged_files = RG.staged(root) + (RG.modified(root) if a.all else []), True
+    refused, asked = RG.check(root, items)
+    if refused or asked:
+        sys.stderr.write(RG.report(refused, asked, staged_files) + "\n")
+    if refused:
+        sys.exit(1)
+
+
 def cmd_audit_repo(a):
     """Is competition data in git (files, history, what `git add -A` would commit), and is the repository public?
     Exit status 1 when a leak is found."""
@@ -3516,6 +3539,24 @@ def build_parser() -> argparse.ArgumentParser:
                    help="time budget for the whole audit; reading the competition's files gets at most half")
     s.add_argument("--max-blob-mb", type=float, default=50, help="larger blobs are only checked for exact copies")
     s.set_defaults(fn=cmd_audit_repo)
+
+    s = sub.add_parser("repo-guard", help="never-public files (credentials, competition data, outputs) in what git "
+                                         "would commit or push",
+                       description="`check` lists the files a commit (the staged ones; --all adds changed tracked "
+                                   "files) or a push (--push [REF...]: every file version in commits the remote does "
+                                   "not have) would send that must never be public: credentials (by name, or a token "
+                                   "inside) and the competition's data (data/, input/, exact copies) exit 1; other "
+                                   "never-public files (submissions, predictions, weights, logs, kernel outputs) are "
+                                   "warnings. `install` completes .gitignore. The git hooks and the PreToolUse hook "
+                                   "run the same checks.")
+    s.add_argument("action", choices=["check", "install"])
+    s.add_argument("--dir", default=".")
+    s.add_argument("--staged", action="store_true", help="check what `git commit` would record (the default)")
+    s.add_argument("--all", action="store_true", help="also the changed tracked files, as `git commit -a`")
+    s.add_argument("--push", nargs="*", metavar="REF", default=None,
+                   help="check what pushing REF (default HEAD) would send")
+    s.add_argument("--remote", default=None, help="the remote of --push (default: what no remote has)")
+    s.set_defaults(fn=cmd_repo_guard)
 
     s = sub.add_parser("config", help="show or set competition.json fields, e.g. validation=holdout+lb holdout_n=58")
     s.add_argument("set", nargs="*", metavar="KEY=VALUE")

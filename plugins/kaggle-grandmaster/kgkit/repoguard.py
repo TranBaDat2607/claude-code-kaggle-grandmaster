@@ -20,7 +20,11 @@ Standard library only (the hooks import it, and the git hooks run it); nothing h
 
 from __future__ import annotations
 
+import fnmatch
+import os
+import re
 import subprocess
+from dataclasses import dataclass
 from pathlib import Path
 
 # (comment, [(pattern, a path the pattern ignores)]): the probe paths let `git check-ignore` tell whether a
@@ -113,3 +117,319 @@ def ensure_gitignore(root: str | Path) -> list[str]:
     except OSError:
         return []
 
+
+# ---------------------------------------------------------------------------------------------------- the guard
+REFUSE_GROUPS = ("# Competition data", "# Credentials")  # the rest of GITIGNORE is asked about
+DATA_DIRS = ("data", "input")  # as kgkit.audit.DATA_DIRS: where a workspace keeps the competition's files
+NOT_THE_COMPETITION = ("ext",)  # data/ext/: collected kernel outputs, public libraries (kgkit.audit, #150)
+STATE_GENERATED = (".kaggle-gm/remote/", ".kaggle-gm/build/", ".kaggle-gm/local/")  # kgkit.state.STATE_IGNORES
+BIG = 50 * 1024 * 1024  # GitHub warns above 50 MB and refuses a file above 100 MB
+READ_MAX = 1_000_000  # bytes read from a file for its credentials scan
+SCAN_MAX = 20_000  # files read per check: a first push of a long history is only partly scanned
+SECRET_NAMES = (".env", ".env.*", "*.env", "kaggle.json", "access_token", "access_token.txt", "credentials.json",
+                ".netrc", ".pypirc", "id_rsa", "id_ed25519", "id_ecdsa", "*.pem", "*.p12", "*.pfx")  # kgkit.safety
+NOT_SECRET = (".env.example", ".env.sample", ".env.template")
+# (what it is, pattern): values, never the names alone (`KAGGLE_KEY=` with nothing after it is a template)
+SECRET_VALUES = (
+    ("Kaggle API key", re.compile(r"""(?:["']key["']\s*:|KAGGLE_KEY["']?\]?\s*[=:,])\s*["']?[0-9a-f]{32}\b""",
+                                  re.IGNORECASE)),
+    ("Kaggle API token", re.compile(r"\bKGAT_[A-Za-z0-9]{20,}")),
+    ("GitHub token", re.compile(r"\b(?:gh[pousr]_[A-Za-z0-9]{36}|github_pat_[A-Za-z0-9_]{40,})")),
+    ("Hugging Face token", re.compile(r"\bhf_[A-Za-z0-9]{34}\b")),
+    ("Weights & Biases key", re.compile(r"WANDB_API_KEY[\"']?\]?\s*[=:,]\s*[\"']?[0-9a-f]{40}\b")),
+    ("AWS access key", re.compile(r"\bAKIA[0-9A-Z]{16}\b")),
+    ("API key", re.compile(r"\bsk-(?:ant-|proj-)?[A-Za-z0-9_-]{32,}")),
+    ("private key", re.compile(r"-----BEGIN (?:[A-Z]+ )?PRIVATE KEY-----")),
+)
+
+
+@dataclass
+class Item:
+    """A file a git command would send: its path, its blob id when git has one, its size, and how to read it."""
+    path: str
+    size: int
+    oid: str | None = None
+    worktree: Path | None = None
+
+    def read(self, root: Path, n: int = READ_MAX) -> bytes:
+        try:
+            if self.worktree is not None:
+                with open(self.worktree, "rb") as f:
+                    return f.read(n)
+            r = subprocess.run(["git", "cat-file", "blob", self.oid], cwd=str(root), capture_output=True, timeout=20)
+            return r.stdout[:n] if r.returncode == 0 else b""
+        except (OSError, subprocess.SubprocessError, TypeError):
+            return b""
+
+
+def _z(r: subprocess.CompletedProcess | None) -> list[str]:
+    return [x for x in r.stdout.split("\0") if x] if r is not None and r.returncode == 0 else []
+
+
+def _sizes(root: Path, oids: list[str]) -> dict[str, int]:
+    r = _git(root, "cat-file", "--batch-check=%(objectname) %(objecttype) %(objectsize)", data="\n".join(oids) + "\n",
+             timeout=60)
+    out = {}
+    for line in (r.stdout.splitlines() if r is not None and r.returncode == 0 else []):
+        parts = line.split()
+        if len(parts) == 3 and parts[1] == "blob":
+            out[parts[0]] = int(parts[2])
+    return out
+
+
+def _from_index(root: Path, entries: list[tuple[str, str]]) -> list[Item]:
+    """Items of (path, blob id) pairs; ids that are not blobs (submodules) are left out."""
+    sizes = _sizes(root, sorted({o for _, o in entries}))
+    return [Item(p, sizes[o], oid=o) for p, o in entries if o in sizes]
+
+
+def staged(root: str | Path) -> list[Item]:
+    """What a ``git commit`` would record: the files added or changed in the index (deletions send nothing)."""
+    root = Path(root)
+    changed = _z(_git(root, "diff", "--cached", "--name-only", "-z", "--no-renames", "--diff-filter=ACMRT"))
+    if not changed:
+        return []
+    r = _git(root, "ls-files", "-s", "-z", "--", *[f":(literal){p}" for p in changed])
+    entries = []
+    for rec in _z(r):
+        meta, _, path = rec.partition("\t")
+        parts = meta.split()
+        if len(parts) >= 2:
+            entries.append((path, parts[1]))
+    return _from_index(root, entries)
+
+
+def _worktree(root: Path, paths: list[str]) -> list[Item]:
+    out = []
+    for p in dict.fromkeys(paths):
+        f = root / p
+        try:
+            if f.is_file():
+                out.append(Item(p, f.stat().st_size, worktree=f))
+        except OSError:
+            continue
+    return out
+
+
+def would_add(root: str | Path, args: list[str]) -> list[Item]:
+    """What ``git add <args>`` would stage, from ``git add --dry-run`` (so ignore rules and ``-f`` apply as git
+    applies them), read from the working tree."""
+    root = Path(root)
+    args = [a for a in args if a not in ("-n", "--dry-run", "-v", "--verbose", "-q", "--quiet")]
+    r = _git(root, "add", "--dry-run", *args, timeout=60)
+    if r is None or r.returncode != 0:
+        return []
+    paths = []
+    for line in r.stdout.splitlines():
+        if line.startswith("add '") and line.endswith("'"):
+            paths.append(line[5:-1])
+    return _worktree(root, paths)
+
+
+def modified(root: str | Path, paths: list[str] | None = None) -> list[Item]:
+    """What ``git commit -a`` (or ``git commit <paths>``) adds to the staged files: tracked files changed in the
+    working tree."""
+    root = Path(root)
+    spec = ["--", *paths] if paths else []
+    return _worktree(root, _z(_git(root, "diff", "--name-only", "-z", "--no-renames", "--diff-filter=ACMRT", *spec)))
+
+
+def pushed(root: str | Path, tips: list[str], remote: str | None = None) -> list[Item]:
+    """Every file version that pushing ``tips`` would send: the blobs of their commits that no ref of ``remote``
+    (all remotes when None) already has. A file removed by a later commit is in the push too."""
+    root = Path(root)
+    tips = [t for t in tips if t] or ["HEAD"]
+    have = f"--remotes={remote}" if remote else "--remotes"
+    r = _git(root, "rev-list", "--objects", *tips, "--not", have, timeout=120)
+    entries = []
+    for line in (r.stdout.splitlines() if r is not None and r.returncode == 0 else []):
+        oid, _, path = line.partition(" ")
+        if path:
+            entries.append((path, oid))
+    return _from_index(root, entries)
+
+
+def _match(pattern: str, path: str) -> bool:
+    """Whether a .gitignore ``pattern`` of :data:`GITIGNORE` (``/dir/``, ``dir/``, ``*.ext``, ``name``,
+    ``/dir/*.csv``) names ``path``, a file."""
+    anchored, is_dir, p = pattern.startswith("/"), pattern.endswith("/"), pattern.strip("/")
+    parts = path.split("/")
+    if is_dir:
+        dirs = parts[:-1]
+        if "/" in p or anchored:
+            return path.startswith(p + "/")
+        return any(fnmatch.fnmatchcase(d, p) for d in dirs)
+    if "/" in p or anchored:
+        return fnmatch.fnmatchcase(path, p)
+    return fnmatch.fnmatchcase(parts[-1], p)
+
+
+def _secret_name(name: str) -> bool:
+    low = name.lower()
+    return low not in NOT_SECRET and any(fnmatch.fnmatchcase(low, p) for p in SECRET_NAMES)
+
+
+def _secret_value(data: bytes) -> tuple[str, int] | None:
+    """(what, line number) of the first credential value in ``data``; None when there is none."""
+    if b"\0" in data[:8000]:
+        return None  # binary
+    text = data.decode("utf-8", "replace")
+    for what, rx in SECRET_VALUES:
+        m = rx.search(text)
+        if m:
+            return what, text.count("\n", 0, m.start()) + 1
+    return None
+
+
+class _Competition:
+    """The competition's files on this machine (the files of data/ and input/ outside ext/), by size, for the
+    exact-copy check. Their blob ids are computed only for a size some item has."""
+
+    def __init__(self, root: Path):
+        self.root, self.by_size, self.sample_header = root, {}, None
+        for d in DATA_DIRS:
+            base = root / d
+            if not base.is_dir():
+                continue
+            stack = [base]
+            while stack and sum(len(v) for v in self.by_size.values()) < 5000:
+                here = stack.pop()
+                try:
+                    entries = list(os.scandir(here))
+                except OSError:
+                    continue
+                for e in entries:
+                    rel = Path(e.path).relative_to(root).as_posix()
+                    try:
+                        if e.is_dir(follow_symlinks=False):
+                            if rel.split("/")[1] not in NOT_THE_COMPETITION:
+                                stack.append(Path(e.path))
+                        elif e.is_file():
+                            self.by_size.setdefault(e.stat().st_size, []).append(rel)
+                            if e.name.lower().startswith("sample_submission") and self.sample_header is None:
+                                self.sample_header = (rel, _header(Path(e.path).read_bytes()[:65536]))
+                    except (OSError, IndexError):
+                        continue
+        self._oids: dict[str, str] = {}
+
+    def copy_of(self, item: Item) -> str | None:
+        for rel in self.by_size.get(item.size, []):
+            if rel == item.path:
+                continue
+            if rel not in self._oids:
+                r = _git(self.root, "hash-object", "--no-filters", "--", rel, timeout=120)
+                self._oids[rel] = r.stdout.strip() if r is not None and r.returncode == 0 else ""
+            oid = item.oid
+            if oid is None and item.worktree is not None:
+                r = _git(self.root, "hash-object", "--no-filters", "--", item.path, timeout=120)
+                oid = r.stdout.strip() if r is not None and r.returncode == 0 else None
+            if oid and oid == self._oids[rel]:
+                return rel
+        return None
+
+
+def _header(data: bytes) -> str | None:
+    line = data.split(b"\n", 1)[0].strip().decode("utf-8", "replace").lstrip("﻿")
+    return line.lower() if "," in line else None
+
+
+def _data_file(path: str) -> str | None:
+    """The data folder a path is in ("data"), or None; ext/ under it is not the competition's."""
+    parts = path.split("/")
+    if len(parts) > 1 and parts[0] in DATA_DIRS:
+        return None if len(parts) > 2 and parts[1] in NOT_THE_COMPETITION else parts[0]
+    return None
+
+
+def check(root: str | Path, items: list[Item]) -> tuple[list[str], list[str]]:
+    """(refused, asked): one ``"<path>: <why>"`` per file of ``items`` that must not go to GitHub (credentials,
+    competition data) and per file that should not (other never-public files). Never the secret's value."""
+    root = Path(root)
+    refused, asked = [], []
+    comp = None
+    seen = 0
+    for it in items:
+        path = it.path
+        name = path.rsplit("/", 1)[-1]
+        if _secret_name(name):
+            refused.append(f"{path}: a credentials file")
+            continue
+        d = _data_file(path)
+        if d:
+            refused.append(f"{path}: in {d}/, where the competition's files are (Kaggle's rules forbid publishing "
+                           "them, copies and subsets too)")
+            continue
+        if seen < SCAN_MAX and it.size <= 4 * READ_MAX:
+            seen += 1
+            hit = _secret_value(it.read(root))
+            if hit:
+                refused.append(f"{path}: holds what looks like a {hit[0]} (line {hit[1]})")
+                continue
+        comp = comp or _Competition(root)
+        src = comp.copy_of(it)
+        if src:
+            refused.append(f"{path}: an exact copy of {src}, a competition file")
+            continue
+        why = _never_public(path)
+        if why is None and comp.sample_header and path.lower().endswith(".csv") and it.size < BIG:
+            rel, head = comp.sample_header
+            if head and _header(it.read(root, 65536)) == head:
+                why = f"a submission file (the columns of {rel})"
+        if why is None and path.split("/")[0] in DATA_DIRS:
+            why = "a file in the data folders that is not the competition's (a kernel output or a public library)"
+        if why is None and it.size > BIG:
+            why = f"{it.size / 2**20:.0f} MB: GitHub warns above 50 MB and refuses a file above 100 MB"
+        if why:
+            asked.append(f"{path}: {why}")
+    return refused, asked
+
+
+def _never_public(path: str) -> str | None:
+    for prefix in STATE_GENERATED:
+        if path.startswith(prefix):
+            return f"generated by kgkit in {prefix} (remote-run downloads, built kernels)"
+    for comment, group in GITIGNORE:
+        if comment.startswith(REFUSE_GROUPS):
+            continue
+        for p, _ in group:
+            if not p.startswith("!") and _match(p, path):
+                kind = comment.lstrip("# ").split(":")[0].lower()
+                return f"{kind} (kgkit's .gitignore names `{p}`)"
+    return None
+
+
+def fix_steps(refused: list[str], asked: list[str], staged_files: bool = True) -> list[str]:
+    """What to do about a check's findings, as lines."""
+    paths = [x.split(": ", 1)[0] for x in refused + asked]
+    shown = " ".join(_quote(p) for p in paths[:6]) + (" ..." if len(paths) > 6 else "")
+    out = []
+    if staged_files:
+        out.append(f"unstage: `git rm --cached {shown}` (the files stay on disk)")
+    else:
+        out.append("the files are in commits that are not on the remote yet: drop them from those commits "
+                   "(`git reset --soft <commit>` and commit again, or `git rebase -i`) before pushing")
+    out.append("keep them out: `kgkit repo-guard install` completes .gitignore")
+    return out
+
+
+def _quote(p: str) -> str:
+    return p if all(c.isalnum() or c in "/._-" for c in p) else "'" + p.replace("'", "'\\''") + "'"
+
+
+def report(refused: list[str], asked: list[str], staged_files: bool = True, limit: int = 12) -> str:
+    """The guard's message: what was found, and what to do."""
+    out = []
+    if refused:
+        out.append("kaggle-grandmaster: these must never be public (credentials, the competition's data):")
+        out += [f"  - {x}" for x in refused[:limit]] + ([f"  - ... {len(refused) - limit} more"] if len(refused) > limit else [])
+    if asked:
+        out.append("kaggle-grandmaster: never-public files (outputs, logs, kernel outputs) that .gitignore keeps out:")
+        out += [f"  - {x}" for x in asked[:limit]] + ([f"  - ... {len(asked) - limit} more"] if len(asked) > limit else [])
+    out += [f"  {x}" for x in fix_steps(refused, asked, staged_files)]
+    return "\n".join(out)
+
+
+def toplevel(start: str | Path = ".") -> Path | None:
+    """The repository's top folder, None outside one."""
+    r = _git(Path(start), "rev-parse", "--show-toplevel", timeout=10)
+    return Path(r.stdout.strip()) if r is not None and r.returncode == 0 and r.stdout.strip() else None
