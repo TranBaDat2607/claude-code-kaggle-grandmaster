@@ -261,9 +261,9 @@ def test_init_adds_data_to_an_existing_gitignore(tmp_path, capsys):
     gi.write_text("data/train.csv")  # names the download only, no final newline
     cli.main(["init", "knee", "--dir", str(tmp_path)])
     out = capsys.readouterr().out
-    assert "added /data/ to .gitignore" in out and "added /work/ to .gitignore" in out
+    assert "pattern(s) to .gitignore (/data/," in out and "competition data" in out
     text = gi.read_text()
-    assert text.splitlines()[0] == "data/train.csv" and "\n/data/\n" in text and text.endswith("/work/\n")
+    assert text.splitlines()[0] == "data/train.csv" and "\n/data/\n" in text and "\n/work/\n" in text
     cli.main(["init", "knee", "--dir", str(tmp_path), "--force"])
     assert "added" not in capsys.readouterr().out and gi.read_text().count("/data/") == 1
     assert gi.read_text().count("/work/") == 1

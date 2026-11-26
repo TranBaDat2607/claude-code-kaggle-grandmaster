@@ -225,19 +225,15 @@ def cmd_init(a):
     st.save(root)
     for d in WORKSPACE_DIRS:
         (root / d).mkdir(exist_ok=True)
-    gi = root / ".gitignore"
-    if not gi.exists():
-        gi.write_text("data/\nartifacts/\nsubs/*.csv\nwork/\n*.npy\n*.pkl\n*.pt\n*.pth\n*.ckpt\n*.safetensors\n"
-                      "kaggle.json\n__pycache__/\n.ipynb_checkpoints/\nwandb/\n", encoding="utf-8")
-    else:  # a repo's own .gitignore often names the downloaded files only; a file made from them would be committed
-        from . import audit as AU
+    # A repo's own .gitignore often names the downloaded files only, and a file made from them would be committed.
+    # Only never-code files are named: what /kg-showcase removes at cleanup stays tracked (kgkit/repoguard.py).
+    from . import repoguard as RG
 
-        added = AU.ensure_ignored(root, ["data"])
-        if added:
-            print(f"added {', '.join(added)} to .gitignore: competition data (copies and subsets too) stays out of git")
-        added = AU.ensure_ignored(root, ["work"], comment="# Scratch: probes, logs, downloads (kgkit init)")
-        if added:
-            print(f"added {', '.join(added)} to .gitignore: scratch work (probes, logs, downloads) stays out of git")
+    existed = (root / ".gitignore").is_file()
+    added = RG.ensure_gitignore(root)
+    if added and existed:
+        print(f"added {len(added)} pattern(s) to .gitignore ({', '.join(added[:6])}{' ...' if len(added) > 6 else ''}): "
+              "competition data, outputs, logs and credentials stay out of git")
     tmpl = _plugin_file("templates/CLAUDE.competition.md")
     cm = root / "CLAUDE.md"
     if not cm.exists() and tmpl is None:
