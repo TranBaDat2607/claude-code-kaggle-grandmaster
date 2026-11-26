@@ -385,6 +385,7 @@ def _log_submission(payload: dict, root: Path, sub: dict, status: str, left: int
         "sha256": sha,
         "size": size,
         "remaining_today": left,
+        "account": C.G.active_user(),  # the account it was submitted as (the Kaggle pane's active one)
     }
     log = C.submissions_log(root)
     log.parent.mkdir(parents=True, exist_ok=True)

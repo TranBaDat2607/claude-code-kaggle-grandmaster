@@ -4,6 +4,7 @@ account's token, whichever account the session has active."""
 
 import datetime as dt
 import json
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -492,3 +493,56 @@ def test_a_failed_copy_stops_the_push(ws, accounts, monkeypatch):
         G.push(ws, k, account="main")
     assert not any(a[:2] == ["kernels", "push"] for _, a, *_ in fake.calls)
     assert json.loads((k / "kernel-metadata.json").read_text())["dataset_sources"] == ["accb/feats"]
+
+
+# ----------------------------------------------------------------------------- the account a submission comes from
+def _hook(plugin_root, script, cmd, cwd):
+    """Run a hook as Claude Code does (JSON on stdin through hooks/run.sh), in this test's environment."""
+    sh = shutil.which("sh")
+    if sh is None:
+        pytest.skip("needs a POSIX sh")
+    payload = {"hook_event_name": "PostToolUse" if script == "post_tool.py" else "PreToolUse", "tool_name": "Bash",
+               "tool_input": {"command": cmd}, "cwd": str(cwd)}
+    if script == "post_tool.py":
+        payload["tool_response"] = {"stdout": "Successfully submitted to Demo"}
+    r = subprocess.run([sh, str(plugin_root / "hooks" / "run.sh"), script], input=json.dumps(payload),
+                       capture_output=True, text=True, timeout=60)
+    assert r.returncode == 0, r.stderr
+    out = r.stdout.strip()
+    return json.loads(out)["hookSpecificOutput"] if out else None
+
+
+@pytest.fixture
+def subws(ws):
+    (ws / "data").mkdir()
+    (ws / "data" / "sample_submission.csv").write_text("id,target\n1,0.5\n2,0.5\n")
+    (ws / "subs").mkdir()
+    for i in (1, 2):
+        (ws / "subs" / f"s{i}.csv").write_text(f"id,target\n1,0.{i}\n2,0.9\n")
+    return ws
+
+
+def test_a_submission_records_the_account_it_came_from(plugin_root, subws, accounts):
+    cmd = 'kaggle competitions submit demo -f subs/s1.csv -m "0001_x | CV 0.8"'
+    _hook(plugin_root, "post_tool.py", cmd, subws)
+    assert S.submission_records(subws)[-1]["account"] == "accb"
+
+
+def test_submitting_from_another_account_than_before_asks(plugin_root, subws, accounts, monkeypatch):
+    first = 'kaggle competitions submit demo -f subs/s1.csv -m "0001_x | CV 0.8"'
+    _hook(plugin_root, "post_tool.py", first, subws)  # submitted as accb
+    cmd = 'kaggle competitions submit demo -f subs/s2.csv -m "0002_y | CV 0.81"'
+    assert _hook(plugin_root, "pre_tool.py", cmd, subws) is None  # the same account again: nothing to say
+    monkeypatch.setenv("KAGGLE_USERNAME", "acca")  # the pane switched to main
+    out = _hook(plugin_root, "pre_tool.py", cmd, subws)
+    assert out["permissionDecision"] == "ask"
+    why = out["permissionDecisionReason"]
+    assert "submits as acca" in why and "earlier submissions to demo came from accb" in why
+    assert "Kaggle pane" in why
+
+
+def test_a_notebook_of_another_account_cannot_be_submitted_from_this_one(plugin_root, subws, accounts):
+    cmd = 'kaggle competitions submit demo -k acca/infer-a -v 2 -f submission.csv -m "0003_z"'
+    out = _hook(plugin_root, "pre_tool.py", cmd, subws)
+    assert out["permissionDecision"] == "ask"
+    assert "acca/infer-a belongs to acca" in out["permissionDecisionReason"]

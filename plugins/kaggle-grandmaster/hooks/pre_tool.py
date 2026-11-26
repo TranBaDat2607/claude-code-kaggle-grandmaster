@@ -218,6 +218,30 @@ def submit_checks(payload: dict, root, records: list[dict], sub: dict) -> tuple[
     return problems, notes, asks
 
 
+def account_asks(root, records: list[dict], subs: list[dict]) -> list[str]:
+    """Asks for a submit from an account other than the one the competition's earlier submissions came from (a
+    compute account outside the team, say), and for a notebook of another account than the submitting one."""
+    me = C.G.active_user()
+    if not me:
+        return []
+    asks = []
+    before = sorted({str(r["account"]).lower() for r in records if r.get("account") and r.get("status") != "failed"})
+    if root is not None and before and me not in before:
+        st = C.S.load(root)
+        slug = (st.slug if st else None) or next((s.get("competition") for s in subs if s.get("competition")), "it")
+        asks.append(f"this submits as {me}, but the earlier submissions to {slug} came from {', '.join(before)}: "
+                    "Kaggle counts a submission for the team of the account that makes it, and an account outside "
+                    f"the team cannot submit for it. If {me} is not meant to submit here, switch accounts in the "
+                    "Kaggle pane (/kaggle-monitor use <alias>) first")
+    for sub in subs:
+        owner = C.G.kernel_owner(sub.get("kernel"))
+        if owner and owner != me:
+            asks.append(f"the notebook {sub['kernel']} belongs to {owner}, not {me}, the account this submits as: "
+                        "Kaggle scores a notebook of the submitting account's own (push it as that account, "
+                        "`kgkit gpu push <dir> --account <alias>`, or switch accounts in the Kaggle pane)")
+    return asks
+
+
 def main() -> None:
     payload = C.read_input()
     cmd = C.command_of(payload)
@@ -271,6 +295,7 @@ def checks(payload: dict, cmd: str) -> None:
                                         + "\n- ".join(problems + notes))
         return
 
+    asks += account_asks(root, records, [] if from_script else subs)
     if root is not None:
         st = C.S.load(root)
         limit = st.daily_submissions if st else 5
