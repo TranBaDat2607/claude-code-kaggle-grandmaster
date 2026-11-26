@@ -295,6 +295,77 @@ def kaggle_username(probe: bool = True) -> str | None:
     return _USERNAME["probe"]
 
 
+# ----------------------------------------------------------------------------- whose kernel
+# A run belongs to the account that owns its kernel, `<owner>/<slug>`: Kaggle gives each account its own weekly
+# quota, and a private kernel is readable by its owner alone. The session's active account is the one the Kaggle pane
+# switched to (it sets KAGGLE_USERNAME); the others registered there are reached with their own token files.
+ACTIVE_USER = "<active>"  # `user` default of the quota sums: the active account
+
+
+def active_user() -> str | None:
+    """The active account's username, lower-cased, without asking the CLI; None when it cannot be told."""
+    u = kaggle_username(probe=False)
+    return u.lower() if u else None
+
+
+def kernel_owner(kernel: str | None) -> str | None:
+    """The account that owns ``kernel`` (`<owner>/<slug>`), lower-cased; None for a local run or a bare name."""
+    k = str(kernel or "")
+    if "/" not in k or is_local(k):
+        return None
+    return k.split("/", 1)[0].lower() or None
+
+
+def _counts_for(r: dict, user: str | None) -> bool:
+    """Whether run ``r`` spends ``user``'s quota (None: anyone's, when the account is not known)."""
+    if user is None:
+        return True
+    owner = kernel_owner(r.get("kernel"))
+    return owner is None or owner == user
+
+
+def _whose(user: str | None) -> str | None:
+    return active_user() if user == ACTIVE_USER else (user.lower() if user else None)
+
+
+def account_of(user: str | None) -> tuple[str, dict] | None:
+    """(alias, entry) of the registered account of ``user``."""
+    for alias, entry in registry().items():
+        if user and str(entry.get("user") or "").lower() == user.lower():
+            return alias, entry
+    return None
+
+
+def owner_access(kernel: str | None) -> tuple[dict[str, str] | None, str | None]:
+    """(env, None) to run the Kaggle CLI on ``kernel`` as its owner: None for the session's own login (the owner is
+    the active account, or unknown), else the owner's registered token (`account_env`). (None, why) when the owner is
+    another account that is not registered: its private kernel is not readable with the active one's token."""
+    owner, me = kernel_owner(kernel), active_user()
+    if owner is None or owner == me:
+        return None, None
+    hit = account_of(owner)
+    if hit is not None:
+        return account_env(hit[1]), None
+    if me is None:
+        return None, None
+    return None, (f"{kernel} is owned by {owner}, an account not registered in the Kaggle pane (the active one is "
+                  f"{me}), so it cannot be read from here: register {owner} there (/kaggle-monitor accounts) or switch "
+                  "to it to check this run. Kaggle stops it at its cap anyway, and its reservation lapses then.")
+
+
+def _env_kw(env: dict[str, str] | None) -> dict:
+    return {"env": env} if env is not None else {}
+
+
+def kaggle_for_kernel(kernel: str, args: list[str], timeout: float = 600) -> subprocess.CompletedProcess:
+    """`run_kaggle` ``args`` about ``kernel`` as the account that owns it (`owner_access`); SystemExit when that
+    account cannot be reached."""
+    env, why = owner_access(kernel)
+    if why:
+        raise SystemExit(why)
+    return run_kaggle(args, timeout=timeout, **_env_kw(env))
+
+
 # ----------------------------------------------------------------------------- quota
 def _hours(v) -> float:
     if isinstance(v, (int, float)):
@@ -355,6 +426,8 @@ def live_quota(root: str | Path | None = None) -> tuple[dict | None, str | None]
             return None, f"could not run the Kaggle CLI ({type(e).__name__}: {e})"
         q = parse_quota(r.stdout) if r.returncode == 0 else None
         if q is not None:
+            if active_user():
+                q["user"] = active_user()  # whose quota: the pane may switch accounts before the next read
             p = quota_path(root)
             try:
                 p.parent.mkdir(parents=True, exist_ok=True)
@@ -388,12 +461,26 @@ def _as_of(q: dict) -> dt.datetime:
     return _parse_time(q.get("as_of")) or _parse_time(q.get("fetched_at")) or _now()
 
 
-def cached_quota(root: str | Path, resource: str = "GPU") -> dict | None:
-    p = quota_path(Path(root))
+def _read_json(p: Path):
     try:
-        q = json.loads(p.read_text(encoding="utf-8"))
+        return json.loads(p.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
+
+
+def cached_quota(root: str | Path, resource: str = "GPU") -> dict | None:
+    """The active account's last quota reading, as of now: .kaggle-gm/gpu_quota.json unless it was read for another
+    account (before the Kaggle pane switched), or that account's line of `gpu quota --all`, whichever is newer."""
+    me = active_user()
+    q = _read_json(quota_path(Path(root)))
+    cands = [q] if isinstance(q, dict) and (me is None or str(q.get("user") or me).lower() == me) else []
+    accs = _read_json(accounts_quota_path(Path(root))) if me else None
+    for rec in ((accs or {}).get("accounts") or {}).values() if isinstance(accs, dict) else []:
+        if isinstance(rec, dict) and str(rec.get("user") or "").lower() == me and isinstance(rec.get("quota"), dict):
+            cands.append(rec["quota"])
+    if not cands:
+        return None
+    q = max(cands, key=lambda c: _parse_time(c.get("fetched_at")) or dt.datetime.min.replace(tzinfo=dt.timezone.utc))
     if resource == "TPU":
         q = q.get("tpu") if isinstance(q.get("tpu"), dict) else None
         if q is None:
@@ -441,10 +528,12 @@ def reserved_hours(r: dict, fetched: dt.datetime | None = None) -> float:
     return max(0.0, cap - used)
 
 
-def in_flight_hours(root: str | Path, quota: dict | None = None, resource: str = "GPU") -> float:
-    """Upper bound of quota that kernels still running will consume after the quota snapshot."""
-    fetched = _as_of(quota or {})
-    return sum(reserved_hours(r, fetched) for r in active_runs(root, resource))
+def in_flight_hours(root: str | Path, quota: dict | None = None, resource: str = "GPU",
+                    user: str | None = ACTIVE_USER) -> float:
+    """Upper bound of quota that kernels still running will consume after the quota snapshot: those of ``user``
+    (default the active account; None: every account's, when it is not known)."""
+    fetched, who = _as_of(quota or {}), _whose(user)
+    return sum(reserved_hours(r, fetched) for r in active_runs(root, resource) if _counts_for(r, who))
 
 
 def hours_key(resource: str) -> str:
@@ -500,14 +589,15 @@ def spent_since(r: dict, t: dt.datetime) -> float:
     return min(window, max(0.0, total - before))
 
 
-def unseen_spend(root: str | Path, quota: dict, resource: str = "GPU") -> list[tuple[dict, float]]:
+def unseen_spend(root: str | Path, quota: dict, resource: str = "GPU",
+                 user: str | None = ACTIVE_USER) -> list[tuple[dict, float]]:
     """(run, hours) for runs of ``resource`` that are no longer in flight but may have spent quota after ``quota``
-    was taken, so its figure is too high by that much. Nothing for a quota fetched live just now: every run it
-    could not see had ended before it."""
-    t, now = _as_of(quota), _now()
+    was taken, so its figure is too high by that much: ``user``'s runs (as `in_flight_hours`). Nothing for a quota
+    fetched live just now: every run it could not see had ended before it."""
+    t, now, who = _as_of(quota), _now(), _whose(user)
     out = []
     for r in runs(root):
-        if r.get("status") == PENDING or run_resource(r) != resource:
+        if r.get("status") == PENDING or run_resource(r) != resource or not _counts_for(r, who):
             continue
         if r.get("status") in ACTIVE and not _stale(r, now):  # still in flight: `in_flight_hours`
             continue
@@ -517,13 +607,15 @@ def unseen_spend(root: str | Path, quota: dict, resource: str = "GPU") -> list[t
     return out
 
 
-def available_hours(root: str | Path, quota: dict | None = None, resource: str = "GPU") -> float | None:
-    """Quota hours left to plan with: what ``quota`` says, less what running kernels may still spend and what runs
-    logged since the snapshot spent."""
+def available_hours(root: str | Path, quota: dict | None = None, resource: str = "GPU",
+                    user: str | None = ACTIVE_USER) -> float | None:
+    """Quota hours left to plan with: what ``quota`` (``user``'s, default the active account's) says, less what its
+    running kernels may still spend and what its runs logged since the snapshot spent."""
     q = quota or cached_quota(root, resource)
     if q is None:
         return None
-    return q["remaining_h"] - in_flight_hours(root, q, resource) - sum(h for _, h in unseen_spend(root, q, resource))
+    return (q["remaining_h"] - in_flight_hours(root, q, resource, user)
+            - sum(h for _, h in unseen_spend(root, q, resource, user)))
 
 
 def _when(q: dict) -> tuple[str, str]:
@@ -625,13 +717,14 @@ def accounts_line(root: str | Path) -> str:
         if not q:
             unread.append(alias)
             continue
-        parts.append(f"{alias} {q['remaining_h']:.1f}h")
-        total += q["remaining_h"]
+        h = account_hours(root, accs[alias])[2]
+        parts.append(f"{alias} {h:.1f}h")
+        total += h
         t = _parse_time(q.get("fetched_at"))
         oldest = t if oldest is None or (t and t < oldest) else oldest
         r = _parse_time(q.get("refresh_at"))
         reset = r if reset is None or (r and r < reset) else reset
-    s = (f"Registered Kaggle accounts, GPU hours left (`gpu quota --all`, read "
+    s = (f"Registered Kaggle accounts, GPU hours left after their runs in flight (`gpu quota --all`, read "
          f"{oldest.strftime('%Y-%m-%d %H:%M UTC') if oldest else 'at an unknown time'}): " + " · ".join(parts)
          + (f"; not read: {', '.join(unread)}" if unread else "") + f" = {total:.1f}h in total")
     if reset is not None:
@@ -737,9 +830,11 @@ def resets_before(q: dict, deadline: str | None) -> int:
 
 
 def _reservation_lines(root: Path, q: dict, resource: str) -> list[str]:
-    fetched = _as_of(q)
+    fetched, me = _as_of(q), active_user()
     out = []
     for r in active_runs(root, resource):
+        if not _counts_for(r, me):
+            continue
         out.append(f"    - {run_label(r)} [{r.get('status')}, cap {float(r.get('hours') or 0):g}h"
                    + (", via kaggle CLI" if r.get("via") == "kaggle-cli" else "")
                    + f"]: ~{reserved_hours(r, fetched):.2f}h reserved")
@@ -747,6 +842,13 @@ def _reservation_lines(root: Path, q: dict, resource: str) -> list[str]:
         out.append("    finished early or never ran? `kgkit gpu status` re-checks them; "
                    "`kgkit gpu release <kernel>` drops a reservation by hand")
     return out
+
+
+def _others_line(root: Path, resource: str) -> list[str]:
+    """The other accounts' runs in flight: they spend their own quota, not the active account's."""
+    me = active_user()
+    others = [run_label(r) for r in active_runs(root, resource) if not _counts_for(r, me)]
+    return [f"  other accounts' runs in flight (their own quota): {', '.join(others)}"] if others else []
 
 
 def _quota_lines(root: Path, q: dict, note: str = "", label: str = "cached") -> list[str]:
@@ -767,6 +869,7 @@ def _quota_lines(root: Path, q: dict, note: str = "", label: str = "cached") -> 
         lines += _reservation_lines(root, q, "GPU")
     elif unseen:
         lines.append(f"  -> {left:.2f}h plannable")
+    lines += _others_line(root, "GPU")
     refresh_at = _parse_time(q.get("refresh_at"))
     if refresh_at:
         h = (refresh_at - _now()).total_seconds() / 3600
@@ -784,6 +887,7 @@ def _quota_lines(root: Path, q: dict, note: str = "", label: str = "cached") -> 
                      + " (separate quota; 9h sessions, one batch TPU session at a time, queued 10-24h)")
         if tin:
             lines += _reservation_lines(root, tq, "TPU")
+        lines += _others_line(root, "TPU")
     return lines
 
 
@@ -1024,7 +1128,11 @@ def confirm_pending(root: str | Path, kernels: list[str] | None = None) -> list[
     pend = [r for r in recs if r.get("status") == PENDING and (kernels is None or r.get("kernel") in kernels)]
     if not pend:
         return []
-    ran = {ref.lower(): t for ref, t in recent_kernels(20) or [] if t is not None}
+    ran = {}
+    for owner in dict.fromkeys(kernel_owner(r.get("kernel")) for r in pend):  # each owner's own listing
+        env, why = owner_access(f"{owner}/-") if owner else (None, None)
+        if not why:
+            ran.update({ref.lower(): t for ref, t in recent_kernels(20, env) or [] if t is not None})
     done = []
     for r in pend:
         t, since = ran.get(str(r.get("kernel")).lower()), _parse_time(r.get("pushed_at"))
@@ -1629,12 +1737,14 @@ def pending_sources(kdir: Path) -> list[tuple[str, str]]:
     return out
 
 
-def recent_kernels(max_kernels: int = 8) -> list[tuple[str, dt.datetime | None]] | None:
-    """(ref, lastRunTime) of the account's own ``max_kernels`` most recently run kernels, latest first;
-    lastRunTime is when Kaggle ran a kernel's latest version (UTC). None when the listing fails."""
+def recent_kernels(max_kernels: int = 8, env: dict[str, str] | None = None
+                   ) -> list[tuple[str, dt.datetime | None]] | None:
+    """(ref, lastRunTime) of the account's own ``max_kernels`` most recently run kernels, latest first (the account
+    ``env`` runs the CLI as, default the active one); lastRunTime is when Kaggle ran a kernel's latest version (UTC).
+    None when the listing fails."""
     try:
         r = run_kaggle(["kernels", "list", "-m", "--sort-by", "dateRun", "--page-size", str(max_kernels),
-                        "--format", "json"], timeout=120)
+                        "--format", "json"], timeout=120, **_env_kw(env))
     except (OSError, subprocess.SubprocessError):
         return None
     text = r.stdout or ""
@@ -1918,7 +2028,7 @@ def repush(root: str | Path | None, kernel: str, kdir: str | Path | None = None,
               f"irreversible: ask the user, then run `python -m kgkit gpu repush {kernel}"
               + ("" if kdir is None else f" {folder.as_posix()}") + " --yes`.")
         raise SystemExit(2)
-    r = run_kaggle(["kernels", "delete", kernel, "-y"], timeout=300)
+    r = kaggle_for_kernel(kernel, ["kernels", "delete", kernel, "-y"], timeout=300)
     out = (r.stdout or "") + (r.stderr or "")
     if r.returncode != 0 or not DELETED_RE.search(out):
         raise SystemExit(f"deleting {kernel} failed; nothing was pushed: {_one_line(out)[:500]}")
@@ -1940,7 +2050,10 @@ def kernel_status(kernel: str) -> tuple[str, str]:
     if is_local(kernel):  # a run on this machine (`gpu push --backend local`): its process and its report
         s = LR.status(latest_run(_root(None), kernel))
         return s, f"{kernel}: {s} (local run)"
-    r = run_kaggle(["kernels", "status", kernel], timeout=120)
+    env, why = owner_access(kernel)
+    if why:
+        return "unknown", why
+    r = run_kaggle(["kernels", "status", kernel], timeout=120, **_env_kw(env))
     text = (r.stdout or "") + (r.stderr or "")
     return (normalize_status(text) if r.returncode == 0 else "unknown"), text.strip()
 
@@ -2034,11 +2147,14 @@ def session_output(kernel: str, timeout: float = OUTPUT_TIMEOUT) -> tuple[list[s
     """(file names, more files than listed, log text, None) of the last session of ``kernel``, without downloading
     anything (`kgkit.kaggle_outputs`, in a child process); (None, False, '', why) when Kaggle could not be asked.
     Never raises."""
+    env, why = owner_access(kernel)
+    if why:
+        return None, False, "", why
     try:
         r = subprocess.run([kaggle_python() or sys.executable, "-m", "kgkit.kaggle_outputs"],
                            input=json.dumps({"kernel": kernel, "max_pages": 5}), capture_output=True,
                            encoding="utf-8", errors="replace", timeout=timeout, cwd=str(KGKIT_DIR.parent),
-                           env=safety.kaggle_env())
+                           env=env or safety.kaggle_env())
     except subprocess.TimeoutExpired:
         return None, False, "", "the request to Kaggle timed out"
     except OSError as e:
@@ -2118,7 +2234,7 @@ def report_stop(root: str | Path, kernel: str, status: str, text: str = "", watc
     files, more, log, why = session_output(kernel)
     if not log:
         try:
-            log = run_kaggle(["kernels", "logs", kernel], timeout=300).stdout or ""
+            log = kaggle_for_kernel(kernel, ["kernels", "logs", kernel], timeout=300).stdout or ""
         except (OSError, subprocess.SubprocessError):
             pass
     entries = log_entries(log)
@@ -2159,7 +2275,7 @@ def _check_machine(root: Path, kernel: str, state: dict) -> None:
         return
     state["last"] = now
     try:
-        log = run_kaggle(["kernels", "logs", kernel], timeout=120).stdout or ""
+        log = kaggle_for_kernel(kernel, ["kernels", "logs", kernel], timeout=120).stdout or ""
     except (OSError, subprocess.SubprocessError):
         return
     verdict, what = _machine_verdict(log, run.get("accelerator"))
@@ -2543,7 +2659,7 @@ def collect(root: str | Path | None, kernel: str, from_dir: str | Path | None = 
         args = ["kernels", "output", kernel, "-p", str(out), "-o", "-q", "--page-size", "200"]
         if not weights:
             args += ["--file-pattern", r"^(?!.*" + WEIGHT_RE + ")"]
-        r = run_kaggle(args, timeout=3600)
+        r = kaggle_for_kernel(kernel, args, timeout=3600)
         if r.returncode != 0:
             raise SystemExit(f"kaggle kernels output failed:\n{r.stdout}{r.stderr}")
     else:
@@ -2739,16 +2855,28 @@ def fetch_account_quotas(root: str | Path | None = None) -> dict[str, dict]:
     return {a: {**v, "quota": _rolled(v["quota"]) if v.get("quota") else None} for a, v in out.items()}
 
 
+def account_hours(root: str | Path, rec: dict) -> tuple[float, float, float]:
+    """(left, in flight, plannable) GPU hours of a registered account's reading ``rec`` (`cached_account_quotas`):
+    its quota less what its own runs still in flight may spend and what its runs logged since the reading spent."""
+    q, user = rec["quota"], rec.get("user")
+    if not user:  # whose runs are its own cannot be told
+        return q["remaining_h"], 0.0, q["remaining_h"]
+    inflight = in_flight_hours(root, q, "GPU", user)
+    return q["remaining_h"], inflight, available_hours(root, q, "GPU", user)
+
+
 def accounts_report(root: str | Path | None = None, refresh: bool = True) -> str:
     """`gpu quota --all`: GPU and TPU hours left on every registered account, the total and the next reset."""
     root = _root(root)
     if not registry():
         return (f"No accounts registered ({accounts_file().name} not found in ~/.kaggle): register them in the Kaggle "
                 "pane (/kaggle-monitor accounts). `python -m kgkit gpu quota` shows the active account.")
+    if refresh:
+        refresh_runs(root)  # each account's runs, asked with its own token
     accs = fetch_account_quotas(root) if refresh else cached_account_quotas(root)
     me = kaggle_username(probe=False)
     lines = [f"Registered Kaggle accounts ({len(accs)}), hours left this week:"]
-    gpu = tpu = 0.0
+    gpu = tpu = plannable = 0.0
     resets = []
     for alias, rec in accs.items():
         q = rec.get("quota")
@@ -2757,17 +2885,22 @@ def accounts_report(root: str | Path | None = None, refresh: bool = True) -> str
             lines.append(f"  {alias}{mark}: unknown ({rec.get('error') or 'never read'})")
             continue
         t = tpu_of(q)
+        _, inflight, avail = account_hours(root, rec)
         gpu += q["remaining_h"]
+        plannable += avail
         tpu += t["remaining_h"] if t else 0.0
         if _parse_time(q.get("refresh_at")):
             resets.append(_parse_time(q.get("refresh_at")))
         when, age = _when(q)
         lines.append(f"  {alias}{mark}: GPU {q['remaining_h']:.1f}h of {q['total_h']:.0f}h"
+                     + (f", up to {inflight:.1f}h in flight" if inflight >= 0.05 else "")
+                     + (f" -> {avail:.1f}h plannable" if abs(avail - q["remaining_h"]) >= 0.05 else "")
                      + (f", TPU {t['remaining_h']:.1f}h" if t else "")
                      + (f" (cached {when}, {age} old" + (f"; read failed: {rec['error']}" if rec.get("error") else "")
                         + ")" if not refresh or rec.get("error") else "")
                      + (" - reset passed since, full week counted" if q.get("stale_reset") else ""))
-    lines.append(f"Total: GPU {gpu:.1f}h, TPU {tpu:.1f}h left across accounts"
+    lines.append(f"Total: GPU {gpu:.1f}h" + (f" left, {plannable:.1f}h plannable" if abs(plannable - gpu) >= 0.05 else "")
+                 + f", TPU {tpu:.1f}h left across accounts"
                  + (f"; next reset {_iso(min(resets))}" if resets else "") + ".")
     lines.append("Runs go to the active account; switch in the Kaggle pane (/kaggle-monitor use <alias>), never by "
                  "changing KAGGLE_API_TOKEN yourself.")
@@ -2855,7 +2988,7 @@ def _other_hours(root: Path, refresh: bool, deadline: str) -> dict[str, float | 
     out: dict[str, float | None] = {}
     for a in others:
         q = (accs.get(a) or {}).get("quota")
-        out[a] = (q["remaining_h"] + resets_before(q, deadline) * (q.get("total_h") or 30.0)) if q else None
+        out[a] = (account_hours(root, accs[a])[2] + resets_before(q, deadline) * (q.get("total_h") or 30.0)) if q else None
     return out
 
 

@@ -11,6 +11,10 @@ sys.path.insert(0, str(PLUGIN_ROOT))
 os.environ.setdefault("KGKIT_OFFLINE", "1")  # no test asks Kaggle (kgkit status / adopt sync)
 # never the developer's own Kaggle pane registry (~/.kaggle/kg_accounts.json): a test that needs one writes its own
 os.environ["KGKIT_ACCOUNTS_FILE"] = str(Path(__file__).resolve().parent / "no-such-dir" / "kg_accounts.json")
+# nor the developer's own Kaggle login: the active username decides whose runs count against the quota, so a test
+# that needs one sets KAGGLE_USERNAME (or a kaggle.json under its own KAGGLE_CONFIG_DIR)
+os.environ.pop("KAGGLE_USERNAME", None)
+os.environ["KAGGLE_CONFIG_DIR"] = str(Path(__file__).resolve().parent / "no-such-dir" / "kaggle-config")
 
 
 @pytest.fixture
