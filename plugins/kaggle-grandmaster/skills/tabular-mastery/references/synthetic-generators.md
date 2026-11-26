@@ -2,7 +2,7 @@
 
 Evidence from one competition, Playground Series S6E10 (binary target, AUC, synthetic rows made by a
 GReaT-style GPT-2 model fine-tuned on an original dataset). Treat it as an example of the idea in
-`tabular-mastery` section 7, not as a recipe for every Playground: other months use other generators.
+[playground.md](playground.md), not as a recipe for every Playground: other months use other generators.
 
 ## What the top places did
 - 1st: a GPT-2 replica of the generator, trained on the original data, then fine-tuned on the labelled
