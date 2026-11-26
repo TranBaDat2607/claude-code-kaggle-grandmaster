@@ -124,7 +124,7 @@ def test_copies_in_other_shapes(comp):
     (root / "README.md").write_text(f"Most reports say: {BOILER}\nIDs look like {rows[0][0]}\n")
     commit(root)
     found = {x["path"]: x for x in AU.run(root, online=False)["findings"]}
-    assert found["backup/sub.csv"]["why"][0] == "an exact copy of data/sample_submission.csv"
+    assert found["backup/sub.csv"]["why"][0] == "an exact copy of data/sample_submission.csv, a competition file"
     assert any("5 row(s) of data/train.csv" in w for w in found["backup/rows.csv"]["why"])
     assert found["notes.txt"]["severity"] == "leak"
     assert "README.md" not in found  # a template sentence and an ID are not competition text
@@ -324,7 +324,8 @@ def test_derived_files_in_data_are_not_the_reference(comp):
     roles = {x["path"]: x["role"] for x in res["references"]}
     assert roles["data/train.csv"] == "competition" and roles["data/ext/lib/oof_lgbm.csv"] == "other"
     assert not any(x["path"] == "mine.csv" for x in res["findings"])
-    assert "an exact copy of data/ext/lib/oof_lgbm.csv" in _finding(res, "copy_of_oof.csv")["why"]
+    copy = _finding(res, "copy_of_oof.csv")  # a copy of a public file, not of the competition's: a judgment call
+    assert copy["why"][0].startswith("an exact copy of data/ext/lib/oof_lgbm.csv,") and copy["severity"] == "check"
     out = "\n".join(AU.report(res))
     assert "1 other file(s) in the data folders" in out and "data/ext/lib" in out and "--data <files>" in out
     assert "compared with 3 competition file(s)" in out
@@ -380,3 +381,43 @@ def test_reading_the_reference_stops_at_its_time_budget(comp):
     (root / "train_copy.csv").write_bytes((root / "data" / "train.csv").read_bytes())
     size = (root / "train_copy.csv").stat().st_size
     assert ref.copy_of(size, AU.blob_id(root / "train_copy.csv"), "sha1") == "data/train.csv"
+
+
+def test_own_code_collected_back_from_a_kernel_is_not_a_leak(comp):
+    """#150: `gpu collect` downloads a kernel's /kaggle/working into data/ext/kout-<slug>/, and a kernel that saves the
+    sources it runs leaves byte-identical copies of the repository's own scripts there. The repository had them
+    first: not competition data, and no history rewrite."""
+    root, rows = comp
+    (root / ".gitignore").write_text("data/\n.kaggle-gm/audit.json\n")
+    kout = root / "data" / "ext" / "kout-train-a" / "code" / "src"
+    kout.mkdir(parents=True)
+    shutil.copy(root / "src" / "train.py", kout / "train.py")
+    (root / "data" / "ext" / "kout-train-a" / "meta.json").write_text('{"fold": 0, "auc": 0.91, "seed": 7}\n')
+    (root / "studies").mkdir()
+    shutil.copy(root / "data" / "ext" / "kout-train-a" / "meta.json", root / "studies" / "meta_0.json")
+    commit(root)
+    res = AU.run(root, online=False)
+    for path in ("src/train.py", "studies/meta_0.json"):
+        f = _finding(res, path)
+        assert f["severity"] == "check", f
+        assert any("data/ext/kout-train-a/" in w and "collected back from a kernel" in w for w in f["why"])
+    out = "\n".join(AU.report(res))
+    assert "LEAK" not in out and "filter-repo" not in out and "git rm --cached" not in out
+    AU.save_cache(root, res)
+    assert not any(l.startswith("WARNING") for l in AU.brief_lines(root))
+
+
+def test_an_exact_copy_says_whether_it_copies_a_competition_file(comp):
+    root, rows = comp
+    (root / ".gitignore").write_text("data/\n.kaggle-gm/audit.json\n")
+    ext = root / "data" / "ext" / "lib"
+    ext.mkdir(parents=True)
+    _csv(ext / "oof.csv", ["row", "pred"], [[str(i), f"0.{i:03d}"] for i in range(100)])
+    (root / "oof_copy.csv").write_bytes((ext / "oof.csv").read_bytes())
+    (root / "sub.csv").write_bytes((root / "data" / "sample_submission.csv").read_bytes())
+    commit(root)
+    res = AU.run(root, online=False)
+    other, comp_copy = _finding(res, "oof_copy.csv"), _finding(res, "sub.csv")
+    assert other["severity"] == "check" and "not one of the competition's files" in other["why"][0]
+    assert comp_copy["severity"] == "leak"
+    assert comp_copy["why"][0] == "an exact copy of data/sample_submission.csv, a competition file"
