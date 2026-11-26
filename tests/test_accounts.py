@@ -5,6 +5,7 @@ account's token, whichever account the session has active."""
 import datetime as dt
 import json
 import subprocess
+from pathlib import Path
 
 import pytest
 
@@ -180,3 +181,146 @@ def test_a_quota_cached_for_another_account_is_not_the_active_accounts(ws, accou
     assert json.loads(G.quota_path(ws).read_text())["user"] == "accb" and G.cached_quota(ws)["remaining_h"] == 27.0
     _quota(ws, 8.0, user=None, fetched=G._iso(G._now() + dt.timedelta(minutes=1)))  # a cache from before kgkit
     assert G.cached_quota(ws)["remaining_h"] == 8.0  # recorded the user is still read: the newest reading wins
+
+
+# ----------------------------------------------------------------------------- gpu push --account
+def _kernel(ws, owner="accb", comp="demo", sources=()):
+    k = ws / "kernels" / "train-a"
+    k.mkdir(parents=True, exist_ok=True)
+    meta = {"id": f"{owner}/train-a", "code_file": "run.py", "kernel_type": "script", "enable_gpu": True,
+            "machine_shape": "NvidiaTeslaT4", "competition_sources": [comp] if comp else [],
+            "kernel_sources": list(sources)}
+    (k / "kernel-metadata.json").write_text(json.dumps(meta))
+    (k / "kg-train.json").write_text(json.dumps({"kernel": meta["id"], "name": "train-a", "jobs": ["train"],
+                                                 "hours": 4.0, "accelerator": "NvidiaTeslaT4", "folds": None,
+                                                 "cmd": "python train.py"}))
+    (k / "run.py").write_text("print('hi')\n")
+    return k
+
+
+class AsAccount:
+    """A fake Kaggle CLI that answers as the account whose token the call carries (None: the active one, accb)."""
+
+    def __init__(self, tokens, left=None, entered=("demo",), busy=None):
+        self.by_token = {str(tokens / "access_token_main"): "acca", str(tokens / "access_token_second"): "accb"}
+        self.left = left or {"acca": 20.0, "accb": 30.0}
+        self.entered, self.busy, self.calls = set(entered), busy or {}, []
+
+    def __call__(self, args, timeout=600, env=None):
+        who = self.by_token.get((env or {}).get("KAGGLE_API_TOKEN"), "accb")
+        self.calls.append((who, list(args)))
+        if args[:1] == ["quota"]:
+            return _cp(_quota_json(self.left[who]))
+        if args[:2] == ["competitions", "list"]:
+            slug = args[args.index("--search") + 1]
+            return _cp(f"ref,deadline\nhttps://www.kaggle.com/competitions/{slug},2099-01-01\n"
+                       if slug in self.entered else "No competitions found\n")
+        if args[:2] == ["kernels", "list"]:
+            rows = [{"ref": k, "lastRunTime": G._now().strftime("%Y-%m-%dT%H:%M:%S")} for k in self.busy.get(who, [])]
+            return _cp(json.dumps(rows))
+        if args[:2] == ["kernels", "status"]:
+            return _cp(f'{args[2]} has status "KernelWorkerStatus.RUNNING"')
+        if args[:2] == ["kernels", "push"]:
+            kid = json.loads((Path(args[args.index("-p") + 1]) / "kernel-metadata.json").read_text())["id"]
+            return _cp(f"Kernel version 3 successfully pushed.  Please check progress at https://www.kaggle.com/code/{kid}")
+        return _cp("", 1, "not faked")
+
+
+def test_push_to_another_account_runs_there_and_checks_its_quota(ws, accounts, monkeypatch):
+    k = _kernel(ws)
+    fake = AsAccount(accounts)
+    monkeypatch.setattr(G, "run_kaggle", fake)
+    rec = G.push(ws, k, account="main")
+    # the folder is pushed as main's kernel, with main's token
+    assert rec["kernel"] == "acca/train-a" and G.runs(ws)[-1]["kernel"] == "acca/train-a"
+    assert json.loads((k / "kernel-metadata.json").read_text())["id"] == "acca/train-a"
+    assert json.loads((k / "kg-train.json").read_text())["kernel"] == "acca/train-a"
+    assert [who for who, a in fake.calls if a[:2] == ["kernels", "push"]] == ["acca"]
+    assert ("acca", ["quota", "--format", "json"]) in fake.calls  # its own quota, not the active account's
+    assert any(who == "acca" and a[:2] == ["kernels", "list"] for who, a in fake.calls)  # its own sessions
+    assert G.cached_account_quotas(ws)["main"]["quota"]["remaining_h"] == 20.0
+    # the active account's cached quota is not overwritten by main's reading
+    assert not G.quota_path(ws).is_file() or json.loads(G.quota_path(ws).read_text()).get("user") != "acca"
+
+
+def test_push_to_another_account_refuses_what_that_account_cannot_cover(ws, accounts, monkeypatch):
+    k = _kernel(ws)
+    monkeypatch.setattr(G, "run_kaggle", AsAccount(accounts, left={"acca": 3.0, "accb": 30.0}))
+    with pytest.raises(SystemExit, match=r"capped at 4.00h but only 3.00h of GPU quota is plannable on main \(acca\)"):
+        G.push(ws, k, account="main")
+    G.log_run(ws, {"kernel": "acca/other", "hours": 9.0, "status": "running", "pushed_at": _ago(minutes=1),
+                   "started_at": _ago(minutes=1)})
+    monkeypatch.setattr(G, "run_kaggle", AsAccount(accounts, left={"acca": 12.0, "accb": 30.0}))
+    with pytest.raises(SystemExit, match="only 3.0"):  # its own run in flight counts against it
+        G.push(ws, k, account="main")
+
+
+def test_push_refuses_an_account_that_has_not_joined_the_competition(ws, accounts, monkeypatch):
+    k = _kernel(ws)
+    fake = AsAccount(accounts, entered=())
+    monkeypatch.setattr(G, "run_kaggle", fake)
+    with pytest.raises(SystemExit, match=r"main \(acca\) has not joined demo.*kaggle.com/competitions/demo/rules"):
+        G.push(ws, k, account="main")
+    assert not any(a[:2] == ["kernels", "push"] for _, a in fake.calls)
+    assert json.loads((k / "kernel-metadata.json").read_text())["id"] == "accb/train-a"  # left as it was
+
+
+def test_push_refuses_another_accounts_private_kernel_as_an_input(ws, accounts, monkeypatch):
+    k = _kernel(ws, sources=["accb/prep-features", "someone/public-notebook"])
+    fake = AsAccount(accounts)
+    monkeypatch.setattr(G, "run_kaggle", fake)
+    with pytest.raises(SystemExit, match="accb/prep-features.*second"):
+        G.push(ws, k, account="main")
+    assert not any(a[:2] == ["kernels", "push"] for _, a in fake.calls)
+
+
+def test_push_names_the_registered_accounts_when_the_alias_is_unknown(ws, accounts):
+    with pytest.raises(SystemExit, match="--account nope: not registered.*main, second"):
+        G.push(ws, _kernel(ws), account="nope")
+
+
+def test_push_to_the_active_account_by_name_uses_the_sessions_login(ws, accounts, monkeypatch):
+    k = _kernel(ws, owner="acca")  # built while main was active
+    fake = AsAccount(accounts)
+    monkeypatch.setattr(G, "run_kaggle", fake)
+    rec = G.push(ws, k, account="accb")  # a username works as well as an alias
+    assert rec["kernel"] == "accb/train-a"
+    assert [who for who, a in fake.calls if a[:2] == ["kernels", "push"]] == ["accb"]
+
+
+def test_repush_deletes_and_pushes_again_as_the_kernels_owner(ws, accounts, monkeypatch):
+    k = _kernel(ws, owner="acca")
+    G.log_run(ws, {"kernel": "acca/train-a", "version": 2, "hours": 4.0, "status": "queued",
+                   "pushed_at": _ago(minutes=50), "dir": "kernels/train-a"})
+    fake = AsAccount(accounts)
+    base = fake.__call__
+
+    def calls(args, timeout=600, env=None):
+        if args[:2] == ["kernels", "status"]:
+            fake.calls.append(("?", list(args)))
+            return _cp(f'{args[2]} has status "KernelWorkerStatus.QUEUED"')
+        if args[:2] == ["kernels", "delete"]:
+            fake.calls.append((fake.by_token.get((env or {}).get("KAGGLE_API_TOKEN"), "accb"), list(args)))
+            return _cp("Kernel deleted successfully.")
+        return base(args, timeout, env)
+
+    monkeypatch.setattr(G, "run_kaggle", calls)
+    monkeypatch.setattr(G, "DELETED_RE", __import__("re").compile("deleted", __import__("re").I))
+    rec = G.repush(ws, "acca/train-a", yes=True)
+    assert rec["kernel"] == "acca/train-a"  # still main's kernel, though accb is active
+    assert [w for w, a in fake.calls if a[:2] in (["kernels", "delete"], ["kernels", "push"])] == ["acca", "acca"]
+
+
+def test_cli_push_takes_an_account(ws, accounts, monkeypatch, capsys):
+    from kgkit import cli
+    seen = {}
+
+    def push(root, kdir, **kw):
+        seen.update(kw)
+        return {"kernel": "acca/train-a", "version": 1, "accelerator": "NvidiaTeslaT4", "hours": 4.0, "jobs": ["train"]}
+
+    monkeypatch.setattr(G, "push", push)
+    monkeypatch.chdir(ws)
+    cli.main(["gpu", "push", str(_kernel(ws)), "--account", "main"])
+    assert seen["account"] == "main" and "pushed acca/train-a v1" in capsys.readouterr().out
+

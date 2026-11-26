@@ -40,6 +40,7 @@ import sys
 import time
 import zipfile
 import zlib
+from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
 from . import bench as B
@@ -300,6 +301,9 @@ def kaggle_username(probe: bool = True) -> str | None:
 # quota, and a private kernel is readable by its owner alone. The session's active account is the one the Kaggle pane
 # switched to (it sets KAGGLE_USERNAME); the others registered there are reached with their own token files.
 ACTIVE_USER = "<active>"  # `user` default of the quota sums: the active account
+ACCOUNTS_HOWTO = ("A push goes to the active account unless `kgkit gpu push <dir> --account <alias>` sends it to another "
+                  "registered one, as that account, without switching; never change KAGGLE_API_TOKEN or "
+                  "KAGGLE_USERNAME yourself.")
 
 
 def active_user() -> str | None:
@@ -732,7 +736,7 @@ def accounts_line(root: str | Path) -> str:
         s += f", next reset in {h:.0f}h"
         if 0 < h <= 36 and total >= 1:
             s += " - USE IT OR LOSE IT across the accounts"
-    return s + ". Runs go to the active account; the person switches it in the Kaggle pane."
+    return f"{s}. {ACCOUNTS_HOWTO}"
 
 
 TORCH_VERSION_RE = re.compile(r"""^__version__\s*=\s*["']([^"']+)["']""", re.M)
@@ -1758,10 +1762,12 @@ def recent_kernels(max_kernels: int = 8, env: dict[str, str] | None = None
             if isinstance(row, dict) and row.get("ref")]
 
 
-def busy_sessions(max_kernels: int = 8, within_h: float = 48.0) -> list[tuple[str, str]] | None:
-    """(kernel, status) of the account's own kernels queued or running now, in any competition: the
-    most recently run ``max_kernels`` are checked. None when the listing fails."""
-    recent = recent_kernels(max_kernels)
+def busy_sessions(max_kernels: int = 8, within_h: float = 48.0, env: dict[str, str] | None = None
+                  ) -> list[tuple[str, str]] | None:
+    """(kernel, status) of the account's own kernels queued or running now, in any competition (the account ``env``
+    runs the CLI as, default the active one): the most recently run ``max_kernels`` are checked. None when the
+    listing fails."""
+    recent = recent_kernels(max_kernels, env)
     if recent is None:
         return None
     out = []
@@ -1777,14 +1783,15 @@ def busy_sessions(max_kernels: int = 8, within_h: float = 48.0) -> list[tuple[st
     return out
 
 
-def _session_preflight(root: Path, resource: str, force: bool) -> None:
-    busy = busy_sessions()
+def _session_preflight(root: Path, resource: str, force: bool, env: dict[str, str] | None = None,
+                       label: str = "your account") -> None:
+    busy = busy_sessions(env=env)
     if not busy:
         return
     known = {r.get("kernel"): run_resource(r) for r in runs(root)}
     same = [k for k, _ in busy if known.get(k) == resource]
     slots = SESSION_SLOTS.get(resource, 2)
-    print(f"busy sessions on your account: " + ", ".join(f"{k} ({s})" for k, s in busy))
+    print(f"busy sessions on {label}: " + ", ".join(f"{k} ({s})" for k, s in busy))
     if len(same) >= slots and not force:
         raise SystemExit(f"refusing to push: Kaggle allows {slots} batch {resource} session(s) at a time and "
                          f"{', '.join(same)} hold them. Wait for one to finish (`kgkit gpu wait <kernel>`), "
@@ -1872,11 +1879,151 @@ def dropped_sources_warning(output: str) -> str:
             f"this version (`python -m kgkit gpu cancel {kernel}` says how).")
 
 
+# ----------------------------------------------------------------------------- the account a push goes to
+@dataclass
+class PushTarget:
+    """The account a push runs as: ``user`` its username (None: the active one, when it cannot be told), ``env`` the
+    CLI environment for it (None: the session's own login), ``alias``/``entry`` its registry entry, if any."""
+    user: str | None
+    env: dict[str, str] | None = None
+    alias: str | None = None
+    entry: dict | None = None
+
+    @property
+    def label(self) -> str:
+        return f"{self.alias} ({self.user})" if self.alias else ""
+
+
+def resolve_account(name: str) -> tuple[str, dict]:
+    """(alias, entry) of the registered account named ``name`` (an alias, or a username)."""
+    reg = registry()
+    if name in reg:
+        return name, reg[name]
+    hit = account_of(name)
+    if hit is None:
+        raise SystemExit(f"--account {name}: not registered in the Kaggle pane (registered: {', '.join(reg) or 'none'}"
+                         "; /kaggle-monitor accounts adds one)")
+    return hit
+
+
+def push_target(account: str | None) -> PushTarget:
+    """Where a push goes: ``account`` (alias or username), else the active account."""
+    me = active_user()
+    if account is None:
+        hit = account_of(me) if me else None
+        return PushTarget(me, None, *(hit or (None, None)))
+    alias, entry = resolve_account(account)
+    user = str(entry.get("user") or "").lower()
+    if not user:
+        raise SystemExit(f"--account {alias}: the Kaggle pane has no username for it; add its token again there")
+    return PushTarget(user, None if user == me else account_env(entry), alias, entry)
+
+
+def account_quota(root: Path, alias: str | None, entry: dict | None, resource: str = "GPU"
+                  ) -> tuple[dict | None, str]:
+    """(quota, note) of ``resource`` for a registered account, read live as that account (its line of
+    .kaggle-gm/gpu_quota_accounts.json is updated); its cached line, with a note, when the read fails."""
+    why = "it is not registered"
+    if entry is not None:
+        try:
+            r = run_kaggle(["quota", "--format", "json"], timeout=60, env=account_env(entry))
+            q = parse_quota(r.stdout) if r.returncode == 0 else None
+            why = "" if q else (_cli_failure(r) if r.returncode else "no GPU row in its output")
+        except (OSError, subprocess.SubprocessError) as e:
+            q, why = None, f"could not run the Kaggle CLI ({type(e).__name__})"
+        if q is not None:
+            path = accounts_quota_path(root)
+            data = _read_json(path)
+            data = data if isinstance(data, dict) else {}
+            data.setdefault("accounts", {})[alias] = {"user": entry.get("user"), "quota": q, "error": None}
+            try:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(json.dumps(data, indent=1), encoding="utf-8")
+            except OSError:
+                pass
+            q = _rolled(q)
+            return (q.get("tpu") if resource == "TPU" else q), ""
+    cached = (cached_account_quotas(root).get(alias) or {}).get("quota") if alias else None
+    if cached is None:
+        return None, f"`kaggle quota` as {alias}: {why}, and nothing is cached"
+    return (cached.get("tpu") if resource == "TPU" else cached), f"`kaggle quota` as {alias}: {why}; using its cached line"
+
+
+def entered_competition(slug: str, env: dict[str, str] | None) -> bool | None:
+    """Whether the account ``env`` runs as has joined competition ``slug`` (accepted its rules): a kernel of an
+    account that has not runs without the competition's data. None when the CLI cannot tell."""
+    try:
+        r = run_kaggle(["competitions", "list", "--group", "entered", "--search", slug], timeout=120, **_env_kw(env))
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if r.returncode != 0:
+        return None
+    return re.search(rf"(?<![\w-]){re.escape(slug)}(?![\w-])", r.stdout or "") is not None
+
+
+def readable_inputs(kdir: Path, target: PushTarget, force: bool = False) -> None:
+    """Refuse a push whose inputs ``target`` cannot read: the private output of a kernel of another registered
+    account, or a competition the account has not joined (checked for an account other than the active one)."""
+    try:
+        meta = json.loads((kdir / "kernel-metadata.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return
+    if target.user is None:
+        return
+    for src in meta.get("kernel_sources") or []:
+        owner = kernel_owner(src)
+        hit = account_of(owner) if owner and owner != target.user else None
+        if hit is not None and not force:
+            raise SystemExit(f"refusing to push {kdir}: it reads the output of {src}, a kernel of {hit[0]} ({owner}), "
+                             f"which {target.label or target.user} cannot read if it is private. Push it as {hit[0]} "
+                             f"(--account {hit[0]}), or pass --force if that kernel is public.")
+    if target.env is None:
+        return
+    for slug in meta.get("competition_sources") or []:
+        joined = entered_competition(str(slug), target.env)
+        if joined is None:
+            print(f"warning: could not tell whether {target.label} has joined {slug}; if it has not, the run starts "
+                  "without the competition's data")
+        elif not joined and not force:
+            raise SystemExit(f"refusing to push {kdir}: {target.label} has not joined {slug}, so its kernel would run "
+                             f"without the competition's data. Sign in to Kaggle as {target.user} and accept the rules "
+                             f"at https://www.kaggle.com/competitions/{slug}/rules, or push it to another account.")
+
+
+def retarget(kdir: Path, kernel: str):
+    """Make ``kdir``'s kernel-metadata.json (and kg-train.json) name ``kernel``, the pushing account's; returns the
+    function that puts the files back as they were."""
+    saved = {}
+    for name, key in (("kernel-metadata.json", "id"), ("kg-train.json", "kernel")):
+        p = kdir / name
+        try:
+            text = p.read_text(encoding="utf-8")
+            data = json.loads(text)
+        except (OSError, ValueError):
+            continue
+        if data.get(key) and data[key] != kernel:
+            saved[p] = text
+            data[key] = kernel
+            p.write_text(json.dumps(data, indent=1), encoding="utf-8")
+    if saved:
+        print(f"kernel id set to {kernel} in {kdir.as_posix()} (the account it is pushed as)")
+
+    def undo():
+        for p, text in saved.items():
+            p.write_text(text, encoding="utf-8")
+    return undo
+
+
 def push(root: str | Path | None, kdir: str | Path, force: bool = False, hours: float | None = None,
-         check_sources: bool = True, check_sessions: bool = True) -> dict:
+         check_sources: bool = True, check_sessions: bool = True, account: str | None = None) -> dict:
+    """Push the kernel folder ``kdir`` to Kaggle as ``account`` (a registered alias or username; default the active
+    account): the kernel becomes that account's (`<user>/<slug>`), and its quota, sessions and inputs are checked."""
     root = _root(root)
     kdir = Path(kdir)
     tm = push_spec(kdir, hours)
+    target = push_target(account)
+    if target.user:
+        tm["kernel"] = f"{target.user}/{str(tm['kernel']).split('/')[-1]}"
     hours, acc = float(tm["hours"]), tm["accelerator"]
     res = resource_of(acc)
     problem = machine_shape_problem(acc)  # before any Kaggle call: Kaggle would answer a bare 400
@@ -1900,6 +2047,7 @@ def push(root: str | Path | None, kdir: str | Path, force: bool = False, hours: 
     limit = session_limit(res)
     if not 0 < hours <= limit:
         raise SystemExit(f"--hours must be in (0, {limit:g}] (Kaggle {res} session limit)")
+    readable_inputs(kdir, target, force)
     if check_sources:
         pend = pending_sources(kdir)
         if pend and not force:
@@ -1909,15 +2057,17 @@ def push(root: str | Path | None, kdir: str | Path, force: bool = False, hours: 
                              "or pass --force.")
     if res != "CPU":
         if check_sessions:
-            _session_preflight(root, res, force)
+            _session_preflight(root, res, force, target.env, target.label or "your account")
         refresh_runs(root)
-        q, note = current_quota(root, True, res)
-        avail = available_hours(root, q, res) if q else None
+        q, note = (current_quota(root, True, res) if target.env is None else
+                   account_quota(root, target.alias, target.entry, res))
+        avail = available_hours(root, q, res, target.user or ACTIVE_USER) if q else None
+        on = f" on {target.label}" if target.label else ""
         if avail is None:
-            print(f"warning: {res} quota unknown - {note}; pushing without a budget check")
+            print(f"warning: {res} quota{on} unknown - {note}; pushing without a budget check")
         elif avail < hours and not force:
             raise SystemExit(f"refusing to push: run is capped at {hours:.2f}h but only {avail:.2f}h of {res} quota "
-                             f"is plannable before {q.get('refresh_at')}"
+                             f"is plannable{on} before {q.get('refresh_at')}"
                              + (f" (a cached quota: {note})" if note else "")
                              + ". Lower --hours, wait for the reset, check the reservations (`kgkit gpu quota`), "
                              "or pass --force.")
@@ -1940,12 +2090,14 @@ def push(root: str | Path | None, kdir: str | Path, force: bool = False, hours: 
     args = ["kernels", "push", "-p", str(kdir), "-t", str(int(hours * 3600))]
     if acc != "none":
         args += ["--accelerator", acc]
-    r = run_kaggle(args, timeout=900)
+    undo = retarget(kdir, tm["kernel"])
+    r = run_kaggle(args, timeout=900, **_env_kw(target.env))
     out = (r.stdout or "") + (r.stderr or "")
     print(out.strip())
     m = re.search(r"version\s+(\d+)\s+successfully pushed", out, re.IGNORECASE)
     ok = r.returncode == 0 and m is not None
     if not ok:
+        undo()
         hint = push_failure_hint(out, acc, kdir)
         raise SystemExit("kernel push failed (see output above); nothing was started." + (f" {hint}" if hint else ""))
     rec = {"kernel": tm["kernel"], "version": int(m.group(1)), "name": tm["name"],
@@ -2034,7 +2186,8 @@ def repush(root: str | Path | None, kernel: str, kdir: str | Path | None = None,
         raise SystemExit(f"deleting {kernel} failed; nothing was pushed: {_one_line(out)[:500]}")
     n = note_deleted(root, kernel)
     print(f"deleted {kernel} on Kaggle ({lost}); {n} run(s) of it marked deleted in the GPU log")
-    return push(root, folder, hours=float(hours))
+    owner = account_of(kernel_owner(kernel))  # back on the account it ran on, whichever one is active
+    return push(root, folder, hours=float(hours), account=owner[0] if owner else None)
 
 
 def _one_line(text: str) -> str:
@@ -2902,8 +3055,7 @@ def accounts_report(root: str | Path | None = None, refresh: bool = True) -> str
     lines.append(f"Total: GPU {gpu:.1f}h" + (f" left, {plannable:.1f}h plannable" if abs(plannable - gpu) >= 0.05 else "")
                  + f", TPU {tpu:.1f}h left across accounts"
                  + (f"; next reset {_iso(min(resets))}" if resets else "") + ".")
-    lines.append("Runs go to the active account; switch in the Kaggle pane (/kaggle-monitor use <alias>), never by "
-                 "changing KAGGLE_API_TOKEN yourself.")
+    lines.append(ACCOUNTS_HOWTO)
     return "\n".join(lines)
 
 

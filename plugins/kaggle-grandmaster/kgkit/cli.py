@@ -3090,7 +3090,7 @@ def cmd_gpu(a):
               "the background)")
     elif a.gpu_cmd == "push":
         rec = G.push(None, a.dir, force=a.force, hours=a.hours, check_sources=not a.no_source_check,
-                     check_sessions=not a.no_session_check)
+                     check_sessions=not a.no_session_check, account=a.account)
         built = rec.get("jobs") != ["notebook"]
         print(f"pushed {rec['kernel']} v{rec['version']} ({rec['accelerator']}, cap {rec['hours']}h). "
               + ("It runs without some of its inputs: see the WARNING above." if rec.get("dropped_sources") else
@@ -3927,6 +3927,9 @@ def build_parser() -> argparse.ArgumentParser:
                         "the session slots look full, or the machine shape is not one Kaggle is known to accept")
     s.add_argument("--no-source-check", action="store_true", help="skip the check that input kernels have finished")
     s.add_argument("--no-session-check", action="store_true", help="skip the busy-session preflight")
+    s.add_argument("--account", help="push as this account registered in the Kaggle pane (alias or username), not the "
+                                     "active one: the kernel becomes its (<user>/<slug>), its quota, sessions and "
+                                     "competition entry are checked, and its token is used; the active account stays")
     s.add_argument("--backend", choices=["kaggle", "local"], default="kaggle",
                    help="local: run the `gpu build` folder on this machine's GPU(s) as a background process (no "
                         "quota; kernel id local/<slug>; --hours up to 168, default the build's cap)")
