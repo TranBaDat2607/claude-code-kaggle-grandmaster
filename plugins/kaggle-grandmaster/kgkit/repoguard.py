@@ -68,11 +68,16 @@ GITIGNORE = (
 
 
 def _git(root: Path, *args: str, data: str | None = None, timeout: float = 20) -> subprocess.CompletedProcess | None:
+    """git's result with text stdout/stderr. ``data`` goes to stdin as UTF-8 bytes: in text mode Python on Windows
+    would write each newline as CRLF, and `--stdin` readers take the CR as part of the path."""
     try:
-        return subprocess.run(["git", "-c", "core.quotepath=off", *args], cwd=str(root), input=data,
-                              capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout)
+        r = subprocess.run(["git", "-c", "core.quotepath=off", *args], cwd=str(root),
+                           input=None if data is None else data.encode("utf-8"), capture_output=True, timeout=timeout)
     except (OSError, subprocess.SubprocessError):
         return None
+    r.stdout = r.stdout.decode("utf-8", "replace").replace("\r\n", "\n")
+    r.stderr = r.stderr.decode("utf-8", "replace")
+    return r
 
 
 def _covered(root: Path, text: str) -> set[str]:
@@ -326,7 +331,7 @@ class _Competition:
     exact-copy check. Their blob ids are computed only for a size some item has."""
 
     def __init__(self, root: Path):
-        self.root, self.by_size, self.sample_header = root, {}, None
+        self.root, self.by_size, self.lf_size, self.sample_header = root, {}, {}, None
         for d in DATA_DIRS:
             base = root / d
             if not base.is_dir():
@@ -345,25 +350,41 @@ class _Competition:
                             if rel.split("/")[1] not in NOT_THE_COMPETITION:
                                 stack.append(Path(e.path))
                         elif e.is_file():
-                            self.by_size.setdefault(e.stat().st_size, []).append(rel)
+                            size = e.stat().st_size
+                            self.by_size.setdefault(size, []).append(rel)
+                            if size <= 64 * 2**20:  # its size with CRLF turned into LF, as autocrlf stores it
+                                with open(e.path, "rb") as f:
+                                    crlf = f.read().count(b"\r\n")
+                                if crlf:
+                                    self.lf_size.setdefault(size - crlf, []).append(rel)
                             if e.name.lower().startswith("sample_submission") and self.sample_header is None:
                                 self.sample_header = (rel, _header(Path(e.path).read_bytes()[:65536]))
                     except (OSError, IndexError):
                         continue
         self._oids: dict[str, str] = {}
 
+    def _hashes(self, rel: str) -> set[str]:
+        """A file's blob ids as it is and as `git add` would store it (core.autocrlf, the default of Git for
+        Windows, turns CRLF into LF: the bytes in git then differ from the file's)."""
+        out = set()
+        for flags in (["--no-filters"], ["--path", rel]):
+            r = _git(self.root, "hash-object", *flags, "--", rel, timeout=120)
+            if r is not None and r.returncode == 0 and r.stdout.strip():
+                out.add(r.stdout.strip())
+        return out
+
     def copy_of(self, item: Item) -> str | None:
-        for rel in self.by_size.get(item.size, []):
+        # a blob's size is after the filters, so a CRLF file stored as LF is smaller than the file: by size, both
+        candidates = list(dict.fromkeys(self.by_size.get(item.size, []) + self.lf_size.get(item.size, [])))
+        mine = None
+        for rel in candidates:
             if rel == item.path:
                 continue
             if rel not in self._oids:
-                r = _git(self.root, "hash-object", "--no-filters", "--", rel, timeout=120)
-                self._oids[rel] = r.stdout.strip() if r is not None and r.returncode == 0 else ""
-            oid = item.oid
-            if oid is None and item.worktree is not None:
-                r = _git(self.root, "hash-object", "--no-filters", "--", item.path, timeout=120)
-                oid = r.stdout.strip() if r is not None and r.returncode == 0 else None
-            if oid and oid == self._oids[rel]:
+                self._oids[rel] = self._hashes(rel)
+            if mine is None:
+                mine = {item.oid} if item.oid else (self._hashes(item.path) if item.worktree is not None else set())
+            if mine & self._oids[rel]:
                 return rel
         return None
 

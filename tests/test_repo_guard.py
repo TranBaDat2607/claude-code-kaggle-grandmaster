@@ -30,9 +30,9 @@ def git(root, *args, check=True):
 
 
 def ignored(root, paths):
-    r = subprocess.run(["git", "check-ignore", "--no-index", "--stdin"], cwd=root, input="\n".join(paths) + "\n",
-                       capture_output=True, text=True)
-    return set(r.stdout.split())
+    r = subprocess.run(["git", "check-ignore", "--no-index", "--stdin"], cwd=root,
+                       input=("\n".join(paths) + "\n").encode(), capture_output=True)  # bytes: no CRLF on Windows
+    return set(r.stdout.decode().split())
 
 
 @pytest.fixture
@@ -288,3 +288,17 @@ def test_a_hook_that_cannot_find_kgkit_lets_the_commit_through_and_says_so(ws, m
     git(ws, "add", "-f", "data/train.csv")
     r = git(ws, "commit", "-qm", "data", check=False)
     assert r.returncode == 0 and "repo guard did not run" in r.stderr
+
+
+def test_an_exact_copy_is_found_when_git_stores_it_with_lf(ws):
+    """Git for Windows has core.autocrlf on: a CRLF copy of a CRLF competition file is stored with LF endings, so
+    its blob is neither the file's bytes nor its size."""
+    git(ws, "config", "core.autocrlf", "true")
+    crlf = TRAIN.replace("\n", "\r\n").encode()
+    (ws / "data" / "train.csv").write_bytes(crlf)
+    (ws / "src" / "copy.csv").write_bytes(crlf)
+    git(ws, "add", "src/copy.csv")
+    refused, _ = RG.check(ws, RG.staged(ws))
+    assert _paths(refused) == {"src/copy.csv"} and "an exact copy of data/train.csv" in refused[0]
+    git(ws, "reset", "-q")
+    assert _paths(RG.check(ws, RG.would_add(ws, ["src/copy.csv"]))[0]) == {"src/copy.csv"}
