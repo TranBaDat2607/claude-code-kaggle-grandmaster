@@ -3151,6 +3151,15 @@ def cmd_gpu(a):
         s = G.wait(None, a.kernel, interval=a.interval, max_hours=max_h)
         if s == "complete" and a.collect:
             G.collect(None, a.kernel)
+        elif a.collect and s in ("cancelled", "error") and not G.is_local(a.kernel):
+            saved = G.latest_run(G._root(None), a.kernel).get("saved_files")
+            if saved:  # a run its cap (or a cancel, or an error) stopped keeps the files it wrote before
+                print(f"collecting the {saved} file(s) {a.kernel} saved before it was stopped ({s})")
+                G.collect(None, a.kernel)
+                sys.exit(G.PARTIAL_EXIT)
+            print(f"not collected: {a.kernel} ended {s} and its session saved no files" if saved == 0 else
+                  f"not collected: could not tell whether {a.kernel} saved files (Kaggle did not list them); "
+                  f"`kgkit gpu collect {a.kernel}` gets whatever it saved")
         sys.exit(0 if s == "complete" else 1)
     elif a.gpu_cmd == "collect":
         G.collect(None, a.kernel, from_dir=a.from_dir, weights=a.weights)
@@ -3941,7 +3950,9 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("kernel")
     s.add_argument("--interval", type=float, default=90)
     s.add_argument("--max-hours", type=float, default=None, help="default 13 (a local run: its cap + 1)")
-    s.add_argument("--collect", action="store_true", help="collect the outputs when it completes")
+    s.add_argument("--collect", action="store_true",
+                   help="collect the outputs when it completes (exit 0), or what it saved when its cap, a cancel or an "
+                        "error stopped it first (exit 3)")
     s = gs.add_parser("collect", help="bring a finished kernel's outputs back and account its GPU hours: a `gpu "
                                       "build` kernel's results go into the ledger, any other kernel's files into "
                                       "data/ext/kout-<slug>/")

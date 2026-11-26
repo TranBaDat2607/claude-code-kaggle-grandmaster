@@ -300,6 +300,7 @@ def kaggle_username(probe: bool = True) -> str | None:
 # A run belongs to the account that owns its kernel, `<owner>/<slug>`: Kaggle gives each account its own weekly
 # quota, and a private kernel is readable by its owner alone. The session's active account is the one the Kaggle pane
 # switched to (it sets KAGGLE_USERNAME); the others registered there are reached with their own token files.
+PARTIAL_EXIT = 3  # `gpu wait --collect`: the run stopped before its end (cap, cancel, error), and what it saved is collected
 ACTIVE_USER = "<active>"  # `user` default of the quota sums: the active account
 ACCOUNTS_HOWTO = ("`kgkit gpu push` sends a `gpu build` run to the registered account whose plannable hours fit its cap "
                   "best, as that account, without switching; any other kernel folder goes to the active account unless "
@@ -2579,6 +2580,8 @@ def report_stop(root: str | Path, kernel: str, status: str, text: str = "", watc
     ran_s = max(known) if known else None
     run = latest_run(root, kernel)
     fields = {"stopped_by": "cap"} if stopped_by_cap(run, status, ran_s) else {}
+    if files is not None:
+        fields["saved_files"] = len(files) + (1 if more else 0)  # `gpu wait --collect` collects them
     key, h = hours_key(run_resource(run)), session_hours(run, ran_s)
     if run and h is not None and h > (run.get(key) or 0):  # the log can show a run lasted longer than it was watched
         fields[key] = h
