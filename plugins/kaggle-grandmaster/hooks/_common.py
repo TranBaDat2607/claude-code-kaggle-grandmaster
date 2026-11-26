@@ -20,6 +20,7 @@ from kgkit import evalset as EV  # noqa: E402  (stdlib-only module)
 from kgkit import finals as FN  # noqa: E402  (stdlib-only module)
 from kgkit import gpu as G  # noqa: E402  (stdlib-only module)
 from kgkit import progress as PG  # noqa: E402  (stdlib-only module)
+from kgkit import repoguard as RG  # noqa: E402  (stdlib-only module)
 from kgkit import safety as SF  # noqa: E402  (stdlib-only module)
 from kgkit import state as S  # noqa: E402  (stdlib-only module)
 from kgkit import vault as V  # noqa: E402  (stdlib-only module at import time)
@@ -480,6 +481,40 @@ def _written_files(cmd: list[str]) -> list[str]:
             i += 1
         if target and not target.startswith(("&", "/dev/")):
             out.append(target)
+    return out
+
+
+GIT_GLOBAL_VALUE = {"-c", "--git-dir", "--work-tree", "--namespace", "--exec-path", "--config-env"}
+
+
+def parse_gits(payload: dict) -> list[dict]:
+    """The git calls the payload's command makes, as ``{"sub", "args", "cwd"}``: ``cwd`` is the folder the call
+    runs in (its own ``-C`` and the command's ``cd`` steps followed), None when it cannot be told. Quoted text
+    (a commit message, an echo) and text heredocs are not calls."""
+    text = _shell_text(_text_heredocs_blanked(command_of(payload)))
+    words, _ = _shell_words(text)
+    cwd = Path(payload.get("cwd") or ".")
+    out, start = [], 0
+    for i, (is_op, _w) in enumerate(words + [(True, "")]):
+        if not is_op:
+            continue
+        cmd = _command_words(words[start:i])
+        if cmd and cmd[0].lower() in ("git", "git.exe"):
+            args, where, j = cmd[1:], ".", 0
+            while j < len(args) and args[j].startswith("-"):
+                if args[j] == "-C" and j + 1 < len(args):
+                    where = where.rstrip("/") + "/" + args[j + 1] if not Path(args[j + 1]).is_absolute() else args[j + 1]
+                    j += 2
+                elif args[j] in GIT_GLOBAL_VALUE:
+                    j += 2
+                else:
+                    j += 1
+            if j < len(args):
+                state = _walk(words[:start], START)
+                state = _join(state, where) if state is not None else None
+                rest = [a for a in args[j + 1:] if not REDIRECT_RE.match(a)]
+                out.append({"sub": args[j].lower(), "args": rest, "cwd": _place(state, cwd) if state else None})
+        start = i + 1
     return out
 
 

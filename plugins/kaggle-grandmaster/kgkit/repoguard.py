@@ -211,12 +211,12 @@ def _worktree(root: Path, paths: list[str]) -> list[Item]:
     return out
 
 
-def would_add(root: str | Path, args: list[str]) -> list[Item]:
-    """What ``git add <args>`` would stage, from ``git add --dry-run`` (so ignore rules and ``-f`` apply as git
-    applies them), read from the working tree."""
+def would_add(root: str | Path, args: list[str], cwd: str | Path | None = None) -> list[Item]:
+    """What ``git add <args>`` run in ``cwd`` (default ``root``, the top folder) would stage, from ``git add
+    --dry-run`` (so ignore rules and ``-f`` apply as git applies them), read from the working tree."""
     root = Path(root)
     args = [a for a in args if a not in ("-n", "--dry-run", "-v", "--verbose", "-q", "--quiet")]
-    r = _git(root, "add", "--dry-run", *args, timeout=60)
+    r = _git(Path(cwd or root), "add", "--dry-run", *args, timeout=60)
     if r is None or r.returncode != 0:
         return []
     paths = []
@@ -238,7 +238,9 @@ def pushed(root: str | Path, tips: list[str], remote: str | None = None) -> list
     """Every file version that pushing ``tips`` would send: the blobs of their commits that no ref of ``remote``
     (all remotes when None) already has. A file removed by a later commit is in the push too."""
     root = Path(root)
-    tips = [t for t in tips if t] or ["HEAD"]
+    tips = [t for t in tips if t and (t.startswith("--") or _resolves(root, t))]
+    if not tips:
+        return []  # nothing git could push
     have = f"--remotes={remote}" if remote else "--remotes"
     r = _git(root, "rev-list", "--objects", *tips, "--not", have, timeout=120)
     entries = []
@@ -247,6 +249,11 @@ def pushed(root: str | Path, tips: list[str], remote: str | None = None) -> list
         if path:
             entries.append((path, oid))
     return _from_index(root, entries)
+
+
+def _resolves(root: Path, ref: str) -> bool:
+    r = _git(root, "rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}", timeout=10)
+    return r is not None and r.returncode == 0
 
 
 def _match(pattern: str, path: str) -> bool:
@@ -433,3 +440,65 @@ def toplevel(start: str | Path = ".") -> Path | None:
     """The repository's top folder, None outside one."""
     r = _git(Path(start), "rev-parse", "--show-toplevel", timeout=10)
     return Path(r.stdout.strip()) if r is not None and r.returncode == 0 and r.stdout.strip() else None
+
+
+# What Claude's git commands would send (hooks/pre_tool.py): the arguments of `git add`, `git commit`, `git push`.
+COMMIT_VALUE_OPTS = {"-m", "--message", "-F", "--file", "-C", "--reuse-message", "-c", "--reedit-message", "-t",
+                     "--template", "--author", "--date", "--cleanup", "--fixup", "--squash", "--trailer",
+                     "--pathspec-from-file"}
+PUSH_VALUE_OPTS = {"--repo", "-o", "--push-option", "--receive-pack", "--exec", "--force-with-lease"}
+
+
+def commit_items(root: Path, args: list[str], cwd: Path | None = None) -> list[Item]:
+    """What ``git commit <args>`` would record: the staged files, plus the changed tracked files with ``-a``, or the
+    paths it names."""
+    every, paths, i = False, [], 0
+    while i < len(args):
+        a = args[i]
+        if a == "--":
+            paths += args[i + 1:]
+            break
+        if a in COMMIT_VALUE_OPTS:
+            i += 2
+            continue
+        if a in ("-a", "--all") or (a.startswith("-") and not a.startswith("--") and "a" in a[1:].split("m")[0]
+                                    and all(c.isalpha() for c in a[1:])):
+            every = True  # -a, -am "msg", -qa
+        elif not a.startswith("-"):
+            paths.append(a)
+        i += 1
+    out = staged(root)
+    if every:
+        out += modified(root)
+    elif paths:
+        base = Path(cwd or root)
+        rel = [os.path.relpath(base / p, root).replace(os.sep, "/") for p in paths]
+        out += modified(root, rel)
+    return out
+
+
+def push_items(root: Path, args: list[str]) -> list[Item]:
+    """What ``git push <args>`` would send (see :func:`pushed`)."""
+    pos, tips, i = [], [], 0
+    while i < len(args):
+        a = args[i]
+        if a in PUSH_VALUE_OPTS:
+            i += 2
+            continue
+        if a in ("--all", "--branches", "--mirror"):
+            tips.append("--branches" if a != "--mirror" else "--all")
+        elif a == "--tags":
+            tips.append("--tags")
+        elif not a.startswith("-"):
+            pos.append(a)
+        i += 1
+    remote = pos[0] if pos else None
+    for spec in pos[1:]:
+        src = spec.lstrip("+").split(":", 1)[0]
+        if not src:
+            continue  # `:branch` deletes a remote branch: nothing is sent
+        tips.append(f"--glob={src if src.startswith('refs/') else 'refs/heads/' + src}" if "*" in src else src)
+    if remote is not None:
+        r = _git(root, "remote", "get-url", remote, timeout=10)
+        remote = remote if r is not None and r.returncode == 0 else None  # a URL: whatever no remote has
+    return pushed(root, tips or ["HEAD"], remote)

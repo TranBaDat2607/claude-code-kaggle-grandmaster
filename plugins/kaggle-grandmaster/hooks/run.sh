@@ -4,7 +4,8 @@
 #   and post_write.py unless the written file is a .py file or a CLAUDE.md,
 #   so ordinary shell commands pay no measurable cost. A wrapper script that submits (`bash go.sh x.csv`) shows
 #   neither in its command, so a payload that mentions a submit, or Kaggle's "N submissions remaining today" reply,
-#   passes too. post_tool.py also starts for a command that writes a .log/.out file (to say logs go in work/).
+#   passes too. post_tool.py also starts for a command that writes a .log/.out file (to say logs go in work/);
+#   pre_tool.py for a git add, commit or push (the repo guard: what would go to GitHub, kgkit/repoguard.py).
 # - On Windows `python3` may be the Microsoft Store stub, so every candidate is test-run.
 # - Hooks fail open: any problem here exits 0 and never blocks the user.
 DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -15,6 +16,7 @@ case "$SCRIPT" in
   pre_tool.py)
     case "$INPUT" in
       *kaggle*|*KAGGLE*|*Kaggle*|*submit*|*Submit*|*SUBMIT*|*"remaining today"*) ;;
+      *git*add*|*git*commit*|*git*push*) ;;
       *) exit 0 ;;
     esac
     ;;

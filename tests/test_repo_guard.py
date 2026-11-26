@@ -3,6 +3,7 @@
 The .gitignore names only what is never code (data, outputs, weights, logs, credentials, caches). The files that
 /kg-showcase removes at cleanup (copies of scripts, probes, scratch notebooks) stay tracked: experiment snapshots
 (``refs/kg/*``) leave ignored files out, and the journey links to the code that ran."""
+import json
 import shutil
 import subprocess
 
@@ -169,3 +170,54 @@ def test_repo_guard_check_exits_1_on_a_refusal_and_0_with_warnings(ws, capsys):
     assert e.value.code == 1
     err = capsys.readouterr().err
     assert "kaggle.json" in err and "git rm --cached kaggle.json" in err
+
+
+# ------------------------------------------------------------------------------- the PreToolUse hook (Claude's git)
+def _hook(plugin_root, cmd, cwd):
+    sh = shutil.which("sh")
+    if sh is None:
+        pytest.skip("needs a POSIX sh")
+    payload = {"hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": {"command": cmd}, "cwd": str(cwd)}
+    r = subprocess.run([sh, str(plugin_root / "hooks" / "run.sh"), "pre_tool.py"], input=json.dumps(payload),
+                       capture_output=True, text=True, timeout=60)
+    assert r.returncode == 0, r.stderr
+    out = r.stdout.strip()
+    return json.loads(out)["hookSpecificOutput"] if out else None
+
+
+def test_hook_refuses_a_commit_that_would_send_a_token_or_the_data(ws, plugin_root):
+    (ws / "src" / "cfg.py").write_text(f'KAGGLE_KEY = "{KEY}"\n')
+    out = _hook(plugin_root, 'git add src/cfg.py && git commit -m "config"', ws)
+    assert out["permissionDecision"] == "deny"
+    assert "src/cfg.py" in out["permissionDecisionReason"] and KEY not in out["permissionDecisionReason"]
+    out = _hook(plugin_root, "cd src && git add -f ../data/train.csv", ws)  # the cd is followed
+    assert out["permissionDecision"] == "deny" and "data/train.csv" in out["permissionDecisionReason"]
+    (ws / "data" / "train.csv").rename(ws / "data" / "kept.csv")
+    git(ws, "add", "-f", "data/kept.csv")  # staged earlier, outside Claude Code
+    out = _hook(plugin_root, "git commit -qm wip", ws)
+    assert out["permissionDecision"] == "deny" and "data/kept.csv" in out["permissionDecisionReason"]
+
+
+def test_hook_asks_before_other_never_public_files_and_says_nothing_otherwise(ws, plugin_root):
+    (ws / "models").mkdir()
+    (ws / "models" / "best.pt").write_text("w")
+    out = _hook(plugin_root, "git add -f models/best.pt", ws)
+    assert out["permissionDecision"] == "ask" and "models/best.pt" in out["permissionDecisionReason"]
+    (ws / "src" / "train_v2.py").write_text("print(2)\n")  # a cleanup file: tracked until /kg-showcase
+    assert _hook(plugin_root, "git add -A && git commit -m v2", ws) is None
+    assert _hook(plugin_root, 'git log --oneline -3 && echo "git add -f data/train.csv"', ws) is None
+
+
+def test_hook_checks_what_a_push_sends(ws, plugin_root, tmp_path):
+    remote = tmp_path / "remote.git"
+    git(tmp_path, "init", "-q", "--bare", str(remote))
+    git(ws, "remote", "add", "origin", str(remote))
+    git(ws, "push", "-q", "origin", "HEAD:refs/heads/main")
+    (ws / "notes.md").write_text(f"token: {{'key': '{KEY}'}}\n")
+    git(ws, "add", "notes.md")
+    git(ws, "commit", "-qm", "notes")
+    for cmd in ("git push", "git push origin HEAD:main", "git push -u origin HEAD"):
+        out = _hook(plugin_root, cmd, ws)
+        assert out["permissionDecision"] == "deny" and "notes.md" in out["permissionDecisionReason"], cmd
+    git(ws, "reset", "-q", "--hard", "HEAD~1")
+    assert _hook(plugin_root, "git push origin HEAD:main", ws) is None
