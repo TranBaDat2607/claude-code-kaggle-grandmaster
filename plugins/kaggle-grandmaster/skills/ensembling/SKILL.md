@@ -104,8 +104,9 @@ score, you're overfitting the blend — use fewer models, simpler weights, or pl
 
 ## 6. Blending with public submission files (no OOF)
 
-Late in a Playground, the public-LB crowd is usually a blend of public submission files that come
-without OOF predictions. Such a blend cannot be cross-validated:
+When teams share their submission files (common late in a competition with a large public test), the
+public-LB crowd is often a blend of those files, which come without OOF predictions. Such a blend cannot be
+cross-validated:
 - Log it as **LB-only**: `kgkit ledger add <name> lb-only "<members and weights>" --sub <file>`, then
   `kgkit ledger lb <id> <score>`. The `--sub` file is what lets `ledger compare <id> <other> --public-n <rows>`
   estimate the noise of the LB gap to another candidate without OOF. Do not log it with its base stack's CV (or tag such a record

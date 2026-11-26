@@ -124,7 +124,8 @@ that do not help CV. Forward selection by feature *groups* is cheaper than per f
 ## 7. Playground Series
 
 Synthetic rows generated from an original dataset: read [references/playground.md](references/playground.md)
-before planning (the winning pattern, and the generator as a lever when the stack is saturated;
+before planning (the winning pattern, large multi-level stacks, and the generator as a lever when the stack is
+saturated;
 [references/synthetic-generators.md](references/synthetic-generators.md) is one competition's example).
 
 ## 8. Ensembling for tabular
@@ -133,15 +134,9 @@ LightGBM + CatBoost + XGBoost + NN + (optional) linear/kNN/SVR on different feat
 `kgkit blend --exp ... --method hill --folds data/folds.csv:fold`. Level-2 stacking
 with ridge/logistic on OOFs (+ a few raw features) can add more; validate with nested CV.
 
-Playground-scale ensembles are much bigger: the March 2026 churn winner was a 4-level stack of 150
-models selected from 850 experiments; the April 2025 winner stacked Lasso, SVR, kNN, RF, MLP, TabPFN,
-XGBoost and LightGBM under XGBoost + MLP meta-models and a final weighted average. That only pays when
-every experiment saved OOF + test predictions on the same folds (the ledger does this). Tooling:
-`kgkit blend --prune 40` (drop near-duplicate OOFs), `--method stack --levels 2` (layers of
-linear + shallow-GBDT meta-models, then hill climbing; compare the honest score with `--levels 1`), and
-`--method residual --base <id>` (stage 2 learns one strong model's errors). See `ensembling`.
-Distillation also scales here: train a single model on the ensemble's OOF/test predictions as soft
-targets (`leaderboard-boosters`).
+Distillation: train a single model on the ensemble's OOF/test predictions as soft targets
+(`leaderboard-boosters`). A library of 100+ models stacked in several levels is a Playground pattern:
+[references/playground.md](references/playground.md).
 
 ## 9. Cheap screens (sweeps)
 Many values of one lever are one sweep (`/kg-grind --sweep`): screened cheap against a control at the same fidelity, the best confirmed by a full run judged as the best of all of them.
