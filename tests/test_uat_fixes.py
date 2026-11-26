@@ -3563,3 +3563,40 @@ def test_ledger_baseline_with_only_members_kept_falls_back_to_the_highest_cv(ws,
     cli.main(["ledger", "baseline"])
     out = capsys.readouterr().out
     assert out.startswith(top["id"]) and "nothing accepted yet" in out
+
+
+# ----------------------------------------------------------------------------- #149 wait --collect after a stop
+def _wait_collect(ws, monkeypatch):
+    """`kgkit gpu wait me/k --collect`: (exit status, the kernels `collect` was called for)."""
+    from kgkit import cli
+    got = []
+    monkeypatch.setattr(G, "collect", lambda root, kernel, **kw: got.append(kernel))
+    monkeypatch.chdir(ws)
+    with pytest.raises(SystemExit) as e:
+        cli.main(["gpu", "wait", "me/k", "--collect"])
+    return e.value.code, got
+
+
+def test_wait_collect_collects_what_a_run_stopped_by_its_cap_saved(ws, monkeypatch, capsys):
+    _cap_run(ws, 3.99)
+    _ends_as(monkeypatch, "CANCEL_ACKNOWLEDGED")
+    code, got = _wait_collect(ws, monkeypatch)
+    assert got == ["me/k"] and code == G.PARTIAL_EXIT  # collected, but not a complete run: a script can tell
+    assert "collecting the 1 file(s) me/k saved before it was stopped (cancelled)" in capsys.readouterr().out
+
+
+def test_wait_collect_says_why_it_collects_nothing(ws, monkeypatch, capsys):
+    _cap_run(ws, 1.2)
+    _ends_as(monkeypatch, "ERROR", log=_kaggle_log((1.5, "start\n")), files=[])
+    code, got = _wait_collect(ws, monkeypatch)
+    assert got == [] and code == 1
+    assert "not collected: me/k ended error and its session saved no files" in capsys.readouterr().out
+
+
+def test_wait_collect_points_at_collect_when_kaggle_cannot_list_the_files(ws, monkeypatch, capsys):
+    _cap_run(ws, 3.99)
+    _ends_as(monkeypatch, "CANCEL_ACKNOWLEDGED", files=None, why="the request to Kaggle timed out")
+    code, got = _wait_collect(ws, monkeypatch)
+    assert got == [] and code == 1
+    out = capsys.readouterr().out
+    assert "could not tell whether me/k saved files" in out and "`kgkit gpu collect me/k`" in out

@@ -57,8 +57,7 @@ score, you're overfitting the blend — use fewer models, simpler weights, or pl
   `kgkit.ensemble.stack(..., X_extra=...)`, so the meta-model can learn *where* each model is right).
 - Level-2: Ridge / logistic regression (robust), or shallow GBDT / small MLP; use the
   **same folds** to produce level-2 OOF; never fit level-2 on test-time predictions.
-- **Large libraries.** Playground winners have stacked 100+ models in 3–4 levels (March 2026 churn:
-  150 of 850 experiments, 4 levels). Recipe:
+- **Large libraries.** With hundreds of experiments, 100+ models can be stacked in 3–4 levels. Recipe:
   1. `kgkit blend --exp <all> --prune 40` drops near-duplicates (OOF corr > 0.995 with a better
      model). Duplicates only add weight-fitting noise.
   2. `--method stack --levels 1`: a layer of [linear, shallow GBDT] meta-models on the same folds, then
@@ -104,8 +103,9 @@ score, you're overfitting the blend — use fewer models, simpler weights, or pl
 
 ## 6. Blending with public submission files (no OOF)
 
-Late in a Playground, the public-LB crowd is usually a blend of public submission files that come
-without OOF predictions. Such a blend cannot be cross-validated:
+When teams share their submission files (common late in a competition with a large public test), the
+public-LB crowd is often a blend of those files, which come without OOF predictions. Such a blend cannot be
+cross-validated:
 - Log it as **LB-only**: `kgkit ledger add <name> lb-only "<members and weights>" --sub <file>`, then
   `kgkit ledger lb <id> <score>`. The `--sub` file is what lets `ledger compare <id> <other> --public-n <rows>`
   estimate the noise of the LB gap to another candidate without OOF. Do not log it with its base stack's CV (or tag such a record

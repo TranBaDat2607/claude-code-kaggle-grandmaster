@@ -40,8 +40,8 @@ A shake-up-heavy competition is fine for a team medal hedge and wrong for a plan
 - Pick a competition with a trustworthy CV and a field where your edge is real; join early (first
   2-3 weeks) so the exploration phase is long.
 - Run the full loop yourself: frozen folds, ledger, accepted baseline, backlog, paired comparisons.
-  The plugin's agents raise throughput (the March 2026 Playground churn win used LLM agents to run
-  850 experiments); validation design and final selection remain your judgement.
+  The plugin's agents raise throughput (agents can run hundreds of experiments in a competition);
+  validation design and final selection remain your judgement.
 - Do not merge in that competition, even late: a team gold does not count as the solo gold.
 
 ## 4. Joining late (last 3-5 weeks)

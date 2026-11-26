@@ -44,8 +44,10 @@ Follow the `grandmaster-playbook` and `competition-recon` skills. Steps:
 4. **Data**: `kaggle competitions download <slug> -p data/` and extract. List files and sizes.
 5. **Init**: `kgkit init <slug> --metric <m> --task <t> --target <col> --id-col <id>
    [--code-competition --runtime-hours H --no-internet] --deadline <date>` using facts from recon
-   (ask the user only for facts you cannot determine, all in one message, so the bootstrap continues after one reply). It makes `.gitignore` cover `data/`, and adds it to a
-   `.gitignore` that exists. Then run `kgkit audit-repo`. It says whether the GitHub remote is public
+   (ask the user only for facts you cannot determine, all in one message, so the bootstrap continues after one reply). It writes or completes
+   `.gitignore` with what is never code (data, outputs and weights, logs, credentials, caches), and installs git
+   hooks that refuse a commit or push of credentials or competition data. Copies of scripts, probes and scratch
+   notebooks stay tracked: experiment snapshots need them, and `/kg-showcase` removes them. Then run `kgkit audit-repo`. It says whether the GitHub remote is public
    and checks that nothing from the competition's files is in git. Kaggle's rules forbid publishing them, and
    that covers copies and subsets too. Init also makes `work/` (scratch: probes, logs; ignored) and `studies/`
    (one folder per analysis that decides something). Name the first phase:

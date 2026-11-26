@@ -20,6 +20,7 @@ from kgkit import evalset as EV  # noqa: E402  (stdlib-only module)
 from kgkit import finals as FN  # noqa: E402  (stdlib-only module)
 from kgkit import gpu as G  # noqa: E402  (stdlib-only module)
 from kgkit import progress as PG  # noqa: E402  (stdlib-only module)
+from kgkit import repoguard as RG  # noqa: E402  (stdlib-only module)
 from kgkit import safety as SF  # noqa: E402  (stdlib-only module)
 from kgkit import state as S  # noqa: E402  (stdlib-only module)
 from kgkit import vault as V  # noqa: E402  (stdlib-only module at import time)
@@ -483,6 +484,41 @@ def _written_files(cmd: list[str]) -> list[str]:
     return out
 
 
+GIT_GLOBAL_VALUE = {"-c", "--git-dir", "--work-tree", "--namespace", "--exec-path", "--config-env"}
+
+
+def parse_gits(payload: dict) -> list[dict]:
+    """The git calls the payload's command makes, as ``{"sub", "args", "cwd"}``: ``cwd`` is the folder the call
+    runs in (its own ``-C`` and the command's ``cd`` steps followed), None when it cannot be told. Quoted text
+    (a commit message, an echo) and text heredocs are not calls."""
+    text = _shell_text(_text_heredocs_blanked(command_of(payload)))
+    words, _ = _shell_words(text)
+    cwd = Path(payload.get("cwd") or ".")
+    out, start = [], 0
+    for i, (is_op, _w) in enumerate(words + [(True, "")]):
+        if not is_op:
+            continue
+        cmd = _command_words(words[start:i])
+        if cmd and cmd[0].lower() in ("git", "git.exe"):
+            args, where, j = cmd[1:], ".", 0
+            while j < len(args) and args[j].startswith("-"):
+                if args[j] == "-C" and j + 1 < len(args):
+                    d = args[j + 1]
+                    where = d if Path(d).is_absolute() else where.rstrip("/") + "/" + d
+                    j += 2
+                elif args[j] in GIT_GLOBAL_VALUE:
+                    j += 2
+                else:
+                    j += 1
+            if j < len(args):
+                state = _walk(words[:start], START)
+                state = _join(state, where) if state is not None else None
+                rest = [a for a in args[j + 1:] if not REDIRECT_RE.match(a)]
+                out.append({"sub": args[j].lower(), "args": rest, "cwd": _place(state, cwd) if state else None})
+        start = i + 1
+    return out
+
+
 SUBMIT_FLAGS = {"-f": "file", "--file": "file", "-m": "message", "--message": "message", "-k": "kernel",
                 "--kernel": "kernel", "-v": "version", "--version": "version", "-c": "competition",
                 "--competition": "competition"}
@@ -561,6 +597,106 @@ def _fill_arguments(text: str, args: list[str]) -> str:
     return text
 
 
+SLUG_RE = re.compile(r"[a-z0-9][a-z0-9-]{1,99}")  # a competition slug; anything else is not one (#152: a backtick)
+SUBMIT_FILE_RE = re.compile(r"\.(?:csv|csv\.gz|zip|gz|parquet|json|txt)$", re.IGNORECASE)
+API_SUBMIT = {"competition_submit": ("file_name", "message", "competition"),
+              "competition_submit_cli": ("file_name", "message", "competition"),
+              "competition_submit_code": ("file_name", "message", "competition")}
+
+
+def _no_submit() -> dict:
+    return {"competition": None, "file": None, "message": None, "kernel": None, "version": None, "quiet": False}
+
+
+def python_submits(body: str, args: list[str]) -> list[dict] | None:
+    """The submits a Python script makes, read from its code (``ast``: docstrings and comments are not calls, #152):
+    Kaggle API calls (``api.competition_submit(file, message, competition)``, by position or keyword) and CLI calls
+    run with an argument list (``subprocess.run(["kaggle", "competitions", "submit", ...])``) or a command string.
+    ``sys.argv[N]``, names unpacked or assigned from it, and module-level string constants are filled in from
+    ``args`` (the script's command-line arguments); a value that cannot be told is None. None when the script does
+    not parse."""
+    import ast
+
+    try:
+        tree = ast.parse(body)
+    except (SyntaxError, ValueError):
+        return None
+    names: dict[str, str | None] = {}
+
+    def argv(node) -> str | None | bool:
+        """The argument a ``sys.argv[N]`` node is; False when the node is not one."""
+        if (isinstance(node, ast.Subscript) and isinstance(node.value, ast.Attribute) and node.value.attr == "argv"
+                and isinstance(node.slice, ast.Constant) and isinstance(node.slice.value, int)):
+            i = node.slice.value
+            return args[i - 1] if 1 <= i <= len(args) else None
+        return False
+
+    def value(node) -> str | None:
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            return node.value
+        if isinstance(node, ast.Name):
+            return names.get(node.id)
+        v = argv(node)
+        return v if v is not False else None
+
+    for node in ast.walk(tree):  # names set once from a constant or the arguments (a re-assignment: unknown)
+        if not isinstance(node, ast.Assign):
+            continue
+        for target in node.targets:
+            if isinstance(target, ast.Name):
+                v = value(node.value) if not isinstance(node.value, ast.Name) else names.get(node.value.id)
+                names[target.id] = v if target.id not in names else None
+            elif (isinstance(target, (ast.Tuple, ast.List)) and isinstance(node.value, ast.Attribute)
+                  and node.value.attr == "argv"):
+                for i, el in enumerate(target.elts):  # _, path, msg = sys.argv
+                    if isinstance(el, ast.Name) and i >= 1:
+                        names[el.id] = args[i - 1] if i <= len(args) else None
+    out = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        fn = node.func.attr if isinstance(node.func, ast.Attribute) else getattr(node.func, "id", "")
+        if fn in API_SUBMIT:
+            sub = _no_submit()
+            fields = dict(zip(API_SUBMIT[fn], node.args))
+            fields.update({k.arg: k.value for k in node.keywords if k.arg in API_SUBMIT[fn]})
+            sub.update(file=value(fields["file_name"]) if "file_name" in fields else None,
+                       message=value(fields["message"]) if "message" in fields else None,
+                       competition=value(fields["competition"]) if "competition" in fields else None)
+            if fn == "competition_submit_code":
+                sub.update(kernel=sub["file"], file=None)
+            out.append(sub)
+            continue
+        for arg in node.args[:1]:
+            if isinstance(arg, (ast.List, ast.Tuple)):  # subprocess.run(["kaggle", "competitions", "submit", ...])
+                words = [value(e) for e in arg.elts]
+                if "submit" in words and ("competitions" in words or "c" in words):
+                    found = parse_submits(" ".join(shlex.quote(w) if w is not None else "__unknown__" for w in words))
+                    out += [{k: (None if v == "__unknown__" else v) for k, v in s.items()} for s in found]
+            else:
+                text = value(arg)  # os.system("kaggle competitions submit ...")
+                if text and SUBMIT_RE.search(text):
+                    out += parse_submits(text)
+    return out
+
+
+def _from_command_line(sub: dict, args: list[str]) -> dict:
+    """A script's submit with what it left unknown taken from the script's own command line (#152): the first
+    argument that names a submission file, and the arguments' text for the experiment id. A competition that is
+    not a slug (a backtick, `$COMP`) is dropped, so the workspace's slug is used."""
+    sub = dict(sub)
+    if sub.get("competition") is not None and not SLUG_RE.fullmatch(sub["competition"]):
+        sub["competition"] = None
+    if not sub.get("file") and not sub.get("kernel"):
+        sub["file"] = next((a for a in args if not a.startswith("-") and SUBMIT_FILE_RE.search(a)), None)
+    for k in ("file", "message"):
+        if sub.get(k) and DYNAMIC & set(sub[k]) and "$" in sub[k]:
+            sub[k] = None  # a variable the script sets itself: not a file name or a message
+    if not sub.get("message"):
+        sub["args_text"] = " ".join(args)  # where the experiment id is, when the message is not known
+    return sub
+
+
 def script_submits(payload: dict, command: str, ran: bool = False) -> list[dict]:
     """The submits made by the scripts a command runs (`bash x.sh ARGS`, `./x.sh`, `python x.py`), as `parse_submits`
     gives them plus ``script`` (its path). ``at`` is where the invocation starts, so a -f file is read after the
@@ -585,12 +721,15 @@ def script_submits(payload: dict, command: str, ran: bool = False) -> list[dict]
             seen.add(script)
             body = script.read_text(encoding="utf-8", errors="replace")
             if script.suffix.lower() == ".py":
-                subs = parse_submits(body) or ([{"competition": None, "file": None, "message": None, "kernel": None,
-                                                 "version": None, "quiet": False}] if PY_SUBMIT_RE.search(body) else [])
+                subs = python_submits(body, toks[1:])
+                if subs is None:  # does not parse: a submit call it mentions is still a submit, fields unknown
+                    subs = [_no_submit()] if PY_SUBMIT_RE.search(body) or SUBMIT_RE.search(body) else []
+                elif not subs and PY_SUBMIT_RE.search(body):
+                    subs = [_no_submit()]
             else:
                 body = "\n".join(l for l in body.splitlines() if not l.lstrip().startswith("#"))
                 subs = parse_submits(_fill_arguments(_text_heredocs_blanked(body), toks[1:]))
-            out += [dict(s, script=str(script), at=at) for s in subs]
+            out += [dict(_from_command_line(s, toks[1:]), script=str(script), at=at) for s in subs]
     except Exception:
         return []
     return out

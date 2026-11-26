@@ -54,6 +54,9 @@ kgkit gpu push .kaggle-gm/build/cnx384-train # outward-facing: confirm with the 
 kgkit gpu wait me/cnx384-train --collect     # background
 ```
 
+`wait --collect` exits 0 when the run completed and was collected, 3 when its cap (or a cancel, or an error) stopped
+it first and the files it had saved were collected, and 1 when nothing was collected (it says why).
+
 Custom scripts work if they follow the contract: accept `--folds <k>` and `--assemble`, write
 `artifacts/<name>/fold<k>_oof.npy` (+ `_idx.npy`, `_test.npy`), and use `kgkit.budget.TrainBudget`
 for deadline, resume and pruning. The image and transformer templates already do all of this. The whole contract

@@ -225,19 +225,18 @@ def cmd_init(a):
     st.save(root)
     for d in WORKSPACE_DIRS:
         (root / d).mkdir(exist_ok=True)
-    gi = root / ".gitignore"
-    if not gi.exists():
-        gi.write_text("data/\nartifacts/\nsubs/*.csv\nwork/\n*.npy\n*.pkl\n*.pt\n*.pth\n*.ckpt\n*.safetensors\n"
-                      "kaggle.json\n__pycache__/\n.ipynb_checkpoints/\nwandb/\n", encoding="utf-8")
-    else:  # a repo's own .gitignore often names the downloaded files only; a file made from them would be committed
-        from . import audit as AU
+    # A repo's own .gitignore often names the downloaded files only, and a file made from them would be committed.
+    # Only never-code files are named: what /kg-showcase removes at cleanup stays tracked (kgkit/repoguard.py).
+    from . import repoguard as RG
 
-        added = AU.ensure_ignored(root, ["data"])
-        if added:
-            print(f"added {', '.join(added)} to .gitignore: competition data (copies and subsets too) stays out of git")
-        added = AU.ensure_ignored(root, ["work"], comment="# Scratch: probes, logs, downloads (kgkit init)")
-        if added:
-            print(f"added {', '.join(added)} to .gitignore: scratch work (probes, logs, downloads) stays out of git")
+    existed = (root / ".gitignore").is_file()
+    added = RG.ensure_gitignore(root)
+    if added and existed:
+        print(f"added {len(added)} pattern(s) to .gitignore ({', '.join(added[:6])}{' ...' if len(added) > 6 else ''}): "
+              "competition data, outputs, logs and credentials stay out of git")
+    if (root / ".git").exists() or RG.toplevel(root) is not None:
+        for note in RG.install_hooks(root):
+            print(f"git hooks: {note}")
     tmpl = _plugin_file("templates/CLAUDE.competition.md")
     cm = root / "CLAUDE.md"
     if not cm.exists() and tmpl is None:
@@ -326,6 +325,36 @@ def cmd_adopt(a):
 def _progress(line: str) -> None:
     """A progress line on stderr, so a long command is visibly working and its report on stdout stays clean."""
     print(line, file=sys.stderr, flush=True)
+
+
+def cmd_repo_guard(a):
+    """Never-public files in what git would commit or push (kgkit/repoguard.py). Exit 1 when credentials or
+    competition data would go; warnings only for other never-public files."""
+    from . import repoguard as RG
+
+    root = RG.toplevel(a.dir)
+    if root is None:
+        raise SystemExit(f"{Path(a.dir).resolve()} is not in a git repository")
+    if a.action == "install":
+        added = RG.ensure_gitignore(root)
+        print(f"added {len(added)} pattern(s) to .gitignore" if added else ".gitignore already names them all")
+        notes = RG.install_hooks(root)
+        for note in notes:
+            print(f"git hooks: {note}")
+        if len(notes) < len(RG.HOOKS):
+            print("git hooks: pre-commit and pre-push check your own commits and pushes too")
+        return
+    if a.action == "hook":
+        sys.exit(RG._hook_main(a.hook))
+    if a.push is not None:
+        items, staged_files = RG.pushed(root, a.push or ["HEAD"], a.remote), False
+    else:
+        items, staged_files = RG.staged(root) + (RG.modified(root) if a.all else []), True
+    refused, asked = RG.check(root, items)
+    if refused or asked:
+        sys.stderr.write(RG.report(refused, asked, staged_files) + "\n")
+    if refused:
+        sys.exit(1)
 
 
 def cmd_audit_repo(a):
@@ -3090,7 +3119,7 @@ def cmd_gpu(a):
               "the background)")
     elif a.gpu_cmd == "push":
         rec = G.push(None, a.dir, force=a.force, hours=a.hours, check_sources=not a.no_source_check,
-                     check_sessions=not a.no_session_check)
+                     check_sessions=not a.no_session_check, account=a.account)
         built = rec.get("jobs") != ["notebook"]
         print(f"pushed {rec['kernel']} v{rec['version']} ({rec['accelerator']}, cap {rec['hours']}h). "
               + ("It runs without some of its inputs: see the WARNING above." if rec.get("dropped_sources") else
@@ -3151,6 +3180,15 @@ def cmd_gpu(a):
         s = G.wait(None, a.kernel, interval=a.interval, max_hours=max_h)
         if s == "complete" and a.collect:
             G.collect(None, a.kernel)
+        elif a.collect and s in ("cancelled", "error") and not G.is_local(a.kernel):
+            saved = G.latest_run(G._root(None), a.kernel).get("saved_files")
+            if saved:  # a run its cap (or a cancel, or an error) stopped keeps the files it wrote before
+                print(f"collecting the {saved} file(s) {a.kernel} saved before it was stopped ({s})")
+                G.collect(None, a.kernel)
+                sys.exit(G.PARTIAL_EXIT)
+            print(f"not collected: {a.kernel} ended {s} and its session saved no files" if saved == 0 else
+                  f"not collected: could not tell whether {a.kernel} saved files (Kaggle did not list them); "
+                  f"`kgkit gpu collect {a.kernel}` gets whatever it saved")
         sys.exit(0 if s == "complete" else 1)
     elif a.gpu_cmd == "collect":
         G.collect(None, a.kernel, from_dir=a.from_dir, weights=a.weights)
@@ -3511,6 +3549,26 @@ def build_parser() -> argparse.ArgumentParser:
                    help="time budget for the whole audit; reading the competition's files gets at most half")
     s.add_argument("--max-blob-mb", type=float, default=50, help="larger blobs are only checked for exact copies")
     s.set_defaults(fn=cmd_audit_repo)
+
+    s = sub.add_parser("repo-guard", help="never-public files (credentials, competition data, outputs) in what git "
+                                         "would commit or push",
+                       description="`check` lists the files a commit (the staged ones; --all adds changed tracked "
+                                   "files) or a push (--push [REF...]: every file version in commits the remote does "
+                                   "not have) would send that must never be public: credentials (by name, or a token "
+                                   "inside) and the competition's data (data/, input/, exact copies) exit 1; other "
+                                   "never-public files (submissions, predictions, weights, logs, kernel outputs) are "
+                                   "warnings. `install` completes .gitignore and writes the git hooks pre-commit and "
+                                   "pre-push (kgkit init does both); the PreToolUse hook runs the same checks on "
+                                   "Claude's git commands.")
+    s.add_argument("action", choices=["check", "install", "hook"])
+    s.add_argument("hook", nargs="*", help=argparse.SUPPRESS)  # `hook pre-commit|pre-push [remote url]`: as git runs it
+    s.add_argument("--dir", default=".")
+    s.add_argument("--staged", action="store_true", help="check what `git commit` would record (the default)")
+    s.add_argument("--all", action="store_true", help="also the changed tracked files, as `git commit -a`")
+    s.add_argument("--push", nargs="*", metavar="REF", default=None,
+                   help="check what pushing REF (default HEAD) would send")
+    s.add_argument("--remote", default=None, help="the remote of --push (default: what no remote has)")
+    s.set_defaults(fn=cmd_repo_guard)
 
     s = sub.add_parser("config", help="show or set competition.json fields, e.g. validation=holdout+lb holdout_n=58")
     s.add_argument("set", nargs="*", metavar="KEY=VALUE")
@@ -3927,6 +3985,11 @@ def build_parser() -> argparse.ArgumentParser:
                         "the session slots look full, or the machine shape is not one Kaggle is known to accept")
     s.add_argument("--no-source-check", action="store_true", help="skip the check that input kernels have finished")
     s.add_argument("--no-session-check", action="store_true", help="skip the busy-session preflight")
+    s.add_argument("--account", help="push as this account registered in the Kaggle pane (alias or username), not the "
+                                     "active one: the kernel becomes its (<user>/<slug>), its quota, sessions and "
+                                     "competition entry are checked, and its token is used; the active account stays. "
+                                     "auto: the account whose plannable hours fit the cap best (the default for a "
+                                     "`gpu build` folder; any other folder defaults to the active account)")
     s.add_argument("--backend", choices=["kaggle", "local"], default="kaggle",
                    help="local: run the `gpu build` folder on this machine's GPU(s) as a background process (no "
                         "quota; kernel id local/<slug>; --hours up to 168, default the build's cap)")
@@ -3936,7 +3999,9 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("kernel")
     s.add_argument("--interval", type=float, default=90)
     s.add_argument("--max-hours", type=float, default=None, help="default 13 (a local run: its cap + 1)")
-    s.add_argument("--collect", action="store_true", help="collect the outputs when it completes")
+    s.add_argument("--collect", action="store_true",
+                   help="collect the outputs when it completes (exit 0), or what it saved when its cap, a cancel or an "
+                        "error stopped it first (exit 3)")
     s = gs.add_parser("collect", help="bring a finished kernel's outputs back and account its GPU hours: a `gpu "
                                       "build` kernel's results go into the ledger, any other kernel's files into "
                                       "data/ext/kout-<slug>/")

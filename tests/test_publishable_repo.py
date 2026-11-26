@@ -328,7 +328,7 @@ def test_journey_on_an_empty_ledger_says_so(repo):
 def test_init_makes_work_and_studies_and_ignores_generated_folders(tmp_path, capsys):
     cli.main(["init", "demo", "--dir", str(tmp_path), "--metric", "auc"])
     assert (tmp_path / "work").is_dir() and (tmp_path / "studies").is_dir()
-    assert "work/" in (tmp_path / ".gitignore").read_text().splitlines()
+    assert "/work/" in (tmp_path / ".gitignore").read_text().splitlines()
     gi = (tmp_path / ".kaggle-gm" / ".gitignore").read_text()
     assert "remote/" in gi.splitlines() and "build/" in gi.splitlines()
     S.load(tmp_path).save(tmp_path)  # saving again adds nothing twice

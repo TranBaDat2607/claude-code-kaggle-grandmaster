@@ -10,6 +10,8 @@ in a public repository for two and a half months. So ``kgkit audit-repo`` compar
   beside a ``train``/``test``/``sample_submission`` file, and those the download zip (``<folder>/<slug>.zip``) lists.
   The rest of the folder (public OOF libraries, notebook outputs, matrices made from the data) is not the
   competition's data and is only checked for exact copies: in UAT a ``data/`` of 39 GB took the audit 39+ minutes.
+  An exact copy of one of those is a judgment call (CHECK), not a leak: which file came first cannot be told, and a
+  kernel output that `gpu collect` brought back (``kout-<slug>/``) holds the repository's own scripts (#150).
   ``--data`` names the reference instead. Indexing it gets at most half the time budget.
 * Every blob reachable from a branch or tag is checked (history too: a file deleted in a later commit is still
   published), and so are the files ``git add -A`` would commit next. A file shares competition data when it is an
@@ -60,6 +62,7 @@ COMPETITION_FILE = re.compile(r"^(?:train|test|sample_submission|solution|train_
 MIN_PASSAGE, MAX_PASSAGE, CHUNK = 45, 300, 150  # characters, after lower-casing and dropping punctuation
 MIN_ROW_CHARS = 20
 LEAK_AT = 3             # matched passages or rows that make a file a leak; fewer is a check
+KOUT_RE = re.compile(r"(?:^|/)kout-[^/]+/")  # a kernel's outputs, collected by `gpu collect` (gpu.kernel_output_dir)
 LABEL_AGREE = 0.995     # share of compared rows whose value equals the competition's label for the row's ID
 MIN_LABEL_ROWS = 5
 ID_OVERLAP = 0.8        # share of a column's values that are competition IDs
@@ -321,6 +324,15 @@ class Reference:
         self._file(path, label, "file", role)  # exact copies only (parquet, images, archives, derived files)
 
     # ------------------------------------------------------------------------ checks
+    def exact(self, size: int, ident: str, algo: str) -> dict:
+        """``{"exact": path, "exact_role": role}`` of the reference file whose contents are exactly a blob's ({} when
+        none): ``role`` is ``competition`` for one of the competition's files, ``other`` for another file of the data
+        folders (a collected kernel output, a public library, a file made from the data)."""
+        path = self.copy_of(size, ident, algo) if size in self.sizes else None
+        if path is None:
+            return {}
+        return {"exact": path, "exact_role": next((f["role"] for f in self.files if f["path"] == path), "competition")}
+
     def copy_of(self, size: int, ident: str, algo: str) -> str | None:
         """The reference file whose contents are exactly a blob's, by git blob id (computed only for equal sizes)."""
         for fi in self.sizes.get(size, ()):
@@ -834,7 +846,10 @@ def _merge(agg: dict, path: str, where: str, ident: str, found: dict) -> None:
         f["labels"] = list(dict.fromkeys(f.get("labels", []) + found["labels"]))
     if found.get("id_col") and found.get("id_rows", 0) >= f.get("id_rows", 0):
         f.update(id_col=found["id_col"], id_rows=found["id_rows"])
-    for k in ("exact", "named", "competition_name", "in_data"):
+    if found.get("exact") and (not f.get("exact") or (f.get("exact_role") == "other"
+                                                       and found.get("exact_role") == "competition")):
+        f.update(exact=found["exact"], exact_role=found.get("exact_role", "competition"))
+    for k in ("named", "competition_name", "in_data"):
         if found.get(k) and not f.get(k):
             f[k] = found[k]
 
@@ -842,9 +857,15 @@ def _merge(agg: dict, path: str, where: str, ident: str, found: dict) -> None:
 def _verdict(f: dict, tables: bool) -> tuple[str, list[str]]:
     """``leak`` (competition data in the file) or ``check`` (a judgment call), with the reasons."""
     why, leak = [], False
-    if f.get("exact"):
-        why.append(f"an exact copy of {f['exact']}")
+    if f.get("exact") and f.get("exact_role", "competition") == "competition":
+        why.append(f"an exact copy of {f['exact']}, a competition file")
         leak = True
+    elif f.get("exact"):  # a copy of a file that is not the competition's: which one came first cannot be told
+        why.append(f"an exact copy of {f['exact']}, which is not one of the competition's files: "
+                   + ("a kernel's output that `gpu collect` brought back, so most likely your own file collected back "
+                      "from a kernel (nothing to do if so)" if KOUT_RE.search(f["exact"]) else
+                      "a public library, a notebook output or a file made from the data (keep it only if it is your "
+                      "own work, or its licence allows)"))
     if f.get("rows"):
         why.append(f"{f['rows']:,} row(s) of {f['row_src']}")
         leak |= f["rows"] >= LEAK_AT
@@ -950,9 +971,8 @@ def run(start=".", data=(), *, max_seconds: float = 300, max_blob_mb: float = 50
     queue, skipped = [], 0
     for ident, size, path in blobs:  # rev-list lists newer blobs first: each path's newest versions come first
         found = names(path)
-        exact = ref.copy_of(size, ident, algo) if size in ref.sizes else None
-        if exact:
-            found["exact"] = exact
+        exact = ref.exact(size, ident, algo)
+        found.update(exact)
         if Path(path).suffix.lower() in NO_CONTENT_EXT or size > max_blob:
             skipped += not exact
             if found:
@@ -1000,9 +1020,7 @@ def run(start=".", data=(), *, max_seconds: float = 300, max_blob_mb: float = 50
         try:
             size = p.stat().st_size
             if size in ref.sizes:
-                exact = ref.copy_of(size, blob_id(p, algo), algo)
-                if exact:
-                    found["exact"] = exact
+                found.update(ref.exact(size, blob_id(p, algo), algo))
             if p.suffix.lower() not in NO_CONTENT_EXT and size <= max_blob:
                 raw = p.read_bytes()
                 if b"\0" not in raw[:8000]:

@@ -241,10 +241,10 @@ def rank_sets(sim: dict, k: int, greater: bool) -> dict:
     for combo in itertools.combinations(range(len(ids)), k):
         best = signed[:, list(combo)].max(1)
         diff = best - top_best
+        sd = float(diff.std(ddof=1)) if len(diff) > 1 else 0.0  # the private split's noise of the gain
         sets.append({"set": [ids[j] for j in combo], "idx": list(combo), "e_best": float(sign * best.mean()),
-                     "gain": float(diff.mean()), "gain_mc": float(diff.std(ddof=1) / math.sqrt(len(diff)))
-                     if len(diff) > 1 else 0.0, "p_top": float((diff > 0).mean()),
-                     "corr": _set_corr(sim["corr"], combo)})
+                     "gain": float(diff.mean()), "gain_sd": sd, "gain_mc": sd / math.sqrt(len(diff)) if sd else 0.0,
+                     "p_top": float((diff > 0).mean()), "corr": _set_corr(sim["corr"], combo)})
     sets.sort(key=lambda s: -s["gain"])
     return {"k": k, "sets": sets, "top": [ids[j] for j in top],
             "top_e_best": float(sign * top_best.mean())}
@@ -255,6 +255,22 @@ def _set_corr(corr: np.ndarray, combo) -> float | None:
     return float(np.nanmax(pairs)) if pairs and np.isfinite(pairs).any() else None
 
 
+TIE_SHARE = 0.3  # a runner-up that scores higher than the top set in this share of the draws or more is tied with it
+
+
+def tie_with_top(ranked: dict) -> dict | None:
+    """The runner-up when the top k by score rank first but are not clear of it: its gap is within twice the
+    simulation's own error (the sign of the expected gain is not known), or it scores higher on the private split in
+    ``TIE_SHARE`` of the draws or more (which set wins there is close to a coin flip). A runner-up that never wins
+    (it differs from the top set only in a pick that never decides the best) is not tied, however small its gap.
+    None when the top set is not first, or is clear of the next."""
+    sets = ranked["sets"]
+    if len(sets) < 2 or sets[0]["set"] != ranked["top"]:
+        return None
+    runner = sets[1]
+    return runner if -runner["gain"] <= 2 * runner["gain_mc"] or runner["p_top"] >= TIE_SHARE else None
+
+
 def settled(ranked: dict) -> bool:
     """True when the best set's gain over the top k by score is clear of the simulation's own error."""
     best = ranked["sets"][0]
@@ -262,8 +278,15 @@ def settled(ranked: dict) -> bool:
 
 
 # ---------------------------------------------------------------------------- output
-def _f(v: float) -> str:
-    return f"{v:.5f}"
+def _digits(values) -> int:
+    """Decimals that tell ``values`` (scores) apart: 5, or more when the closest two differ by less than 1e-5."""
+    xs = sorted({float(v) for v in values if np.isfinite(v)})
+    gaps = [b - a for a, b in zip(xs, xs[1:]) if b > a]
+    return 5 if not gaps else max(5, min(9, math.ceil(-math.log10(min(gaps))) + 1))
+
+
+def _f(v: float, digits: int = 5) -> str:
+    return f"{v:.{digits}f}"
 
 
 def lines(sim: dict, ranked: dict, recs: dict, *, note: str, others: dict | None = None, top_n: int = 5,
@@ -275,24 +298,34 @@ def lines(sim: dict, ranked: dict, recs: dict, *, note: str, others: dict | None
     out.append(f"  {note}")
     if groups_note:
         out.append(f"  {groups_note}")
+    shown = ranked["sets"][:top_n]
+    d = _digits([*sim["value"], *(s["e_best"] for s in shown)])
     out.append("Candidates (score on the evaluation rows, spread of the private score):")
     for j, i in enumerate(ids):
         sub = "" if isinstance(recs[i].get("lb_public"), (int, float)) else "  [not submitted]"
-        out.append(f"  {i:<34} {_f(sim['value'][j])} +/- {_f(sim['se'][j])}{sub}")
+        out.append(f"  {i:<34} {_f(sim['value'][j], d)} +/- {E.fmt_se(sim['se'][j])}{sub}")
     for i, why in excluded:
         out.append(f"  left out: {i}: {why}")
     out.append(f"Sets by E[best of {k}]:" if k > 1 else "By expected private score:")
-    for s in ranked["sets"][:top_n]:
+    for s in shown:
         corr = f"  corr {s['corr']:.3f}" if s["corr"] is not None else ""
         mark = "  <- top by score" if s["set"] == ranked["top"] else ""
-        out.append(f"  {_f(s['e_best'])}  {' + '.join(s['set']):<60} gain {s['gain']:+.5f} "
-                   f"(+/- {s['gain_mc']:.5f}){corr}{mark}")
-    best = ranked["sets"][0]
-    if best["set"] == ranked["top"]:
+        out.append(f"  {_f(s['e_best'], d)}  {' + '.join(s['set']):<60} gain {E.fmt_gain(s['gain'])} "
+                   f"(+/- {E.fmt_se(s['gain_mc'])}){corr}{mark}")
+    best, tie = ranked["sets"][0], tie_with_top(ranked)
+    if tie is not None:
+        how = ("it scores the same in every draw" if tie["gain_sd"] == 0 else
+               f"gap {E.fmt_gain(tie['gain'])}, simulation error {E.fmt_se(tie['gain_mc'])}, private split's noise "
+               f"{E.fmt_se(tie['gain_sd'])}; it scores higher in {tie['p_top']:.0%} of the draws")
+        out.append(f"Recommended: {' + '.join(best['set'])}, the top {k} by score, tied within error with "
+                   f"{' + '.join(tie['set'])} ({how}): a swap gains nothing that can be measured, so keep the "
+                   "current selection unless another reason (a different validation, diversity of the models) "
+                   "favours the other set.")
+    elif best["set"] == ranked["top"]:
         out.append(f"Recommended: {' + '.join(best['set'])}, the top {k} by score: no other set does better here.")
     elif settled(ranked):
-        out.append(f"Recommended: {' + '.join(best['set'])}: E[best] {_f(best['e_best'])} against "
-                   f"{_f(ranked['top_e_best'])} for the top {k} by score ({' + '.join(ranked['top'])}); better "
+        out.append(f"Recommended: {' + '.join(best['set'])}: E[best] {_f(best['e_best'], d)} against "
+                   f"{_f(ranked['top_e_best'], d)} for the top {k} by score ({' + '.join(ranked['top'])}); better "
                    f"in {best['p_top']:.0%} of the draws.")
     else:
         out.append(f"Recommended: {' + '.join(best['set'])}, but within the simulation's error of the top {k} by "

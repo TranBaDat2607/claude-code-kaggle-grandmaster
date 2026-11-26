@@ -46,7 +46,7 @@ Always check the rules about which pretrained models/APIs are allowed and model 
   on 2×T4 or with vLLM.
 - Knowledge distillation: large teacher (e.g. 70B) soft labels → smaller student that fits the
   inference budget; typically beats training the student on hard labels.
-- Memory and speed on 16 GB: QLoRA in fp16, gradient checkpointing, Unsloth (14B on 16 GB in Jigsaw 2025 1st). See
+- Memory and speed on 16 GB: QLoRA in fp16, gradient checkpointing, Unsloth (fits a 14B model in 16 GB). See
   `compute-efficiency` (`references/text-and-llm.md`).
 - Synthetic data: generate extra labelled examples with a strong LLM (if rules allow); validate
   only on real data; deduplicate against test-like distributions to avoid optimistic CV.
@@ -85,10 +85,10 @@ Full checklist with winners' settings: `compute-efficiency` (`references/inferen
 - Sort by length and batch dynamically; FP16; `torch.inference_mode()`; max_len per model.
 - Use both T4 GPUs (data parallel by splitting the test set across two processes).
 - Classification or multiple choice with an LLM: one forward pass reading the answer tokens' logits, not
-  `generate()` (Jigsaw 2025 1st).
-- Quantise LLMs to fit 2×T4: 8-bit GPTQ (LMSYS 1st) or W8A8 INT8 in LMDeploy (MAP 2025 1st) keep accuracy; AWQ int4
-  is faster but lost accuracy in AIMO 2 — measure on validation. vLLM with `dtype="half"` on T4, prefix caching.
-- Average fold LoRA adapters into one model instead of K inference passes (LMSYS 1st); share tokenisation
+  `generate()`.
+- Quantise LLMs to fit 2×T4: 8-bit GPTQ or W8A8 INT8 (LMDeploy) usually keep accuracy; AWQ int4 is faster but can
+  lose accuracy, so measure on validation. vLLM with `dtype="half"` on T4, prefix caching.
+- Average fold LoRA adapters into one model instead of K inference passes; share tokenisation
   across models.
 - Measure the whole pipeline on a hidden-test-sized dummy input before the deadline.
 

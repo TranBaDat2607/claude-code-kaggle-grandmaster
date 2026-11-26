@@ -34,7 +34,8 @@ Load the `kaggle-gpu` skill first and follow its protocol. Commands below are `k
 ## Always first
 1. `gpu quota` and `gpu log`: GPU and TPU hours plannable, reset time, runs in flight (and which pushes
    hold a reservation), measured cost per fold. With several accounts registered in the Kaggle pane,
-   `gpu quota --all` (the hours on each) and `gpu plan` (quota-bound or time-bound, counting them all).
+   `gpu quota --all` (the hours on each) and `gpu plan` (quota-bound or time-bound, counting them all);
+   `gpu push` of a `gpu build` folder then goes to the account whose hours fit its cap best, and says which.
 2. `kgkit status` and `kgkit ledger baseline`: the accepted baseline, its fold
    scores and std.
 

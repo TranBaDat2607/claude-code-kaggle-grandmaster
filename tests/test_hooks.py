@@ -495,6 +495,65 @@ def test_post_script_variables_and_direct_run(plugin_root, ws):
     assert _sub_log(ws)[-1]["file"] == "subs/good.csv" and _sub_log(ws)[-1]["exp_id"] == "0002_cnn"
 
 
+# #152: a Python wrapper (the Kaggle API, with its command-line arguments) whose docstring names the CLI command
+PY_WRAPPER = ('''"""Submit with IPv4 forced: `kaggle competitions submit` hangs on this machine's IPv6 route.
+    python submit_wrapper.py subs/<id>.csv "<message>"
+"""
+import sys
+from kaggle.api.kaggle_api_extended import KaggleApi
+# kaggle competitions submit other-comp -f old.csv -m old  (a comment, not a call)
+COMP = "demo"
+api = KaggleApi(); api.authenticate()
+print(api.competition_submit(sys.argv[1], sys.argv[2], COMP))
+''')
+
+
+def test_post_logs_a_python_wrapper_submit_from_its_arguments(plugin_root, ws):
+    (ws / "submit_wrapper.py").write_text(PY_WRAPPER)
+    cmd = 'python submit_wrapper.py subs/good.csv "0165_stack | CV 0.8"'
+    ctx = hook(plugin_root, "post_tool.py", _post(cmd, "Successfully submitted to Demo", ws))["additionalContext"]
+    (rec,) = _sub_log(ws)
+    assert rec["competition"] == "demo" and rec["file"] == "subs/good.csv" and rec["message"] == "0165_stack | CV 0.8"
+    assert rec["sha256"] and rec["size"] and rec["exp_id"] == "0165_stack"
+    assert "made by submit_wrapper.py" in ctx and "ledger lb 0165_stack" in ctx and "`" + " --format" not in ctx
+    assert "kaggle competitions submissions demo" in ctx
+
+
+def test_python_wrapper_names_unpacked_and_keyword_arguments(plugin_root, ws):
+    (ws / "sub.py").write_text("import sys\nfrom kaggle import api\n_, path, msg = sys.argv\n"
+                               "api.competition_submit(file_name=path, message=msg, competition='demo')\n")
+    hook(plugin_root, "post_tool.py", _post('python3 sub.py subs/good.csv "0007_cnn"', "4 submissions remaining today.",
+                                            ws))
+    rec = _sub_log(ws)[-1]
+    assert (rec["file"], rec["message"], rec["exp_id"], rec["competition"]) == ("subs/good.csv", "0007_cnn",
+                                                                                 "0007_cnn", "demo")
+
+
+def test_python_wrapper_that_runs_the_cli(plugin_root, ws):
+    (ws / "sub.py").write_text("import subprocess, sys\nsubprocess.run(['kaggle', 'competitions', 'submit', 'demo', "
+                               "'-f', sys.argv[1], '-m', sys.argv[2]], check=True)\n")
+    hook(plugin_root, "post_tool.py", _post('python sub.py subs/good.csv "0008_gbm"', "Successfully submitted", ws))
+    rec = _sub_log(ws)[-1]
+    assert rec["file"] == "subs/good.csv" and rec["exp_id"] == "0008_gbm" and rec["sha256"]
+
+
+def test_a_wrapper_whose_arguments_cannot_be_read_falls_back_to_the_command_line(plugin_root, ws):
+    """argparse, a config file: the file and the experiment id are taken from the command line itself, and the
+    competition from the workspace when the script's own value is not a slug."""
+    (ws / "sub.py").write_text("import argparse\nfrom kaggle import api\np = argparse.ArgumentParser()\n"
+                               "p.add_argument('file'); p.add_argument('--msg')\na = p.parse_args()\n"
+                               "api.competition_submit(a.file, a.msg, CONFIG['comp'])\n")
+    ctx = hook(plugin_root, "post_tool.py", _post('python sub.py subs/good.csv --msg "0009_blend v2"',
+                                                  "Successfully submitted", ws))["additionalContext"]
+    rec = _sub_log(ws)[-1]
+    assert rec["file"] == "subs/good.csv" and rec["sha256"] and rec["exp_id"] == "0009_blend"
+    assert rec["competition"] is None and "kaggle competitions submissions demo" in ctx
+    (ws / "bad.sh").write_text('kaggle competitions submit "$COMP" -f "$1" -m "$2"\n')  # $COMP: set elsewhere
+    ctx = hook(plugin_root, "post_tool.py", _post('bash bad.sh subs/good.csv 0010_x', "Successfully submitted",
+                                                  ws))["additionalContext"]
+    assert _sub_log(ws)[-1]["competition"] is None and "kaggle competitions submissions demo" in ctx
+
+
 def test_post_notes_a_reply_it_cannot_attribute(plugin_root, ws):
     ctx = hook(plugin_root, "post_tool.py", _post("make submit", "4 submissions remaining today.", ws))["additionalContext"]
     assert "not in the local log" in ctx and "kgkit status" in ctx

@@ -225,3 +225,67 @@ def test_a_time_series_is_resampled_in_time_blocks(tmp_path, monkeypatch, capsys
     cli.main(["final", "pick", "0002", "0003", "--draws", "200"])
     out = capsys.readouterr().out
     assert "contiguous time blocks (by row order" in out and "bootstrap" in out
+
+
+# ---------------------------------------------------------------------------- #148 small gains, ties
+def _sim(offsets, shared=1e-4, own=2e-6, n_draws=4000, seed=0):
+    """A hand-made simulation: candidates whose private scores move together (``shared``) around 0.9526, apart by
+    ``offsets``, each with ``own`` noise of its own: near-identical stacks of an AUC over a large evaluation set."""
+    rng = np.random.default_rng(seed)
+    base = 0.9526 + shared * rng.normal(size=n_draws)
+    ids = list(offsets)
+    draws = np.stack([base + offsets[i] + own * rng.normal(size=n_draws) for i in ids], axis=1)
+    return {"ids": ids, "value": draws.mean(0), "draws": draws, "corr": np.corrcoef(draws.T), "method": "clt",
+            "caveats": [], "n_units": 700_000, "unit": "rows", "se": draws.std(0, ddof=1)}
+
+
+def _report(sim, k=2):
+    ranked = FP.rank_sets(sim, k, greater=True)
+    recs = {i: {"lb_public": 0.95} for i in sim["ids"]}
+    return ranked, "\n".join(FP.lines(sim, ranked, recs, note="(test)"))
+
+
+def test_gains_of_a_millionth_are_printed_in_significant_digits():
+    sim = _sim({"A": 1.0e-5, "B": 0.9e-5, "C": 0.8e-5, "D": 0.0, "E": -2e-5})
+    ranked, txt = _report(sim)
+    assert "0.00000)" not in txt and "+0.00000" not in txt and "-0.00000" not in txt
+    second = ranked["sets"][1]
+    assert f"gain {FP.E.fmt_gain(second['gain'])} (+/- {FP.E.fmt_se(second['gain_mc'])})" in txt
+    assert "e-0" in txt  # 1e-6 differences show as such
+    # sets whose expected scores differ by more than 1e-8 print differently (up to 9 decimals; two can be equal:
+    # the same pick decides both)
+    rows = txt.splitlines()
+    shown = [l.split()[0] for l in rows[rows.index("Sets by E[best of 2]:") + 1:][:5]]
+    e = [s["e_best"] for s in ranked["sets"][:5]]
+    assert all(shown[i] != shown[i + 1] for i in range(4) if abs(e[i] - e[i + 1]) > 1e-8)
+    assert len(set(shown)) > 1
+
+
+def test_top_sets_within_error_are_called_a_tie():
+    sim = _sim({"A": 1.0e-5, "B": 0.9e-5, "C": 0.85e-5, "D": 0.0, "E": -2e-5}, own=2e-5)
+    ranked, txt = _report(sim)
+    assert ranked["sets"][0]["set"] == ranked["top"] == ["A", "B"]
+    assert "no other set does better" not in txt
+    runner = " + ".join(ranked["sets"][1]["set"])
+    assert f"tied within error with {runner}" in txt and "keep the current selection" in txt
+
+
+def test_a_clear_top_set_is_still_recommended_plainly():
+    # A and B well ahead, each with errors of its own: a set without B never does better, however small its gap
+    sim = _sim({"A": 3e-3, "B": 2.99e-3, "C": 0.0, "D": -1e-4, "E": -2e-4}, own=1e-4)
+    ranked, txt = _report(sim)
+    assert ranked["sets"][0]["set"] == ["A", "B"] and ranked["sets"][1]["p_top"] == 0
+    assert "no other set does better here" in txt and "tied" not in txt
+
+
+def test_a_second_pick_that_never_decides_is_a_tie_with_the_same_score():
+    sim = _sim({"A": 3e-3, "B": 0.0, "C": -1e-4, "D": -2e-4}, own=1e-5)  # A is the best in every draw
+    _, txt = _report(sim)
+    assert "tied within error with A + C (it scores the same in every draw)" in txt
+
+
+def test_rank_sets_gives_the_private_splits_noise_of_each_gain():
+    sim = _sim({"A": 1.0e-5, "B": 0.9e-5, "C": 0.8e-5}, own=2e-5)
+    ranked = FP.rank_sets(sim, 2, greater=True)
+    s = ranked["sets"][1]
+    assert s["gain_sd"] > 0 and s["gain_mc"] == pytest.approx(s["gain_sd"] / np.sqrt(4000))

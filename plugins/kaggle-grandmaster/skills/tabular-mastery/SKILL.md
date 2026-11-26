@@ -121,26 +121,12 @@ that do not help CV. Forward selection by feature *groups* is cheaper than per f
 - Multiclass with ordinal structure → regression + `OptimizedRounder` often beats softmax for QWK.
 - Clip predictions to the observed target range.
 
-## 7. Playground Series specifics
+## 7. Playground Series
 
-Synthetic data generated from an original dataset: large (100k–1M rows), small signal-to-noise
-gains, LB shake-ups of ±0.001 are common. Winning pattern: many diverse models (GBDTs with
-different FE, NNs, linear/kNN/SVR models on transformed features), *many* OOFs, hill climbing
-or ridge/logistic stacking over 20–100 OOFs, appending the original dataset, and selecting finals
-on CV. Keep everything on 5–10 identical folds.
-
-**The data-generation process is a lever of its own.** Late in a Playground most teams stack the same
-public OOF libraries, and rank inside that crowd is noise (`kgkit status`: CROWD). What moves a team out
-of it is a member the libraries lack, and the generator is the usual place to find one:
-- Fingerprint the generator. Compare train/test rows with the original dataset: value grids, rounding
-  and digit patterns, values the original never has, duplicated or near-copied rows, categories
-  that collapse. Each artefact is a feature, or a hint at the model that made the data.
-- Try a **class-conditional generative member**: model the feature distribution of each class and
-  score a row with Bayes' rule, `log P(x | y=1) - log P(x | y=0) + log prior odds`. It errs differently
-  from discriminative GBDTs and NNs, so it adds to a saturated stack. Fit it only on the training folds'
-  labelled rows, exactly like any OOF member. A label-free density model of the rows usually adds ~0.
-- It is expensive, and the evidence so far is one competition: screen it on one fold first, and give it
-  `--gpu-hours` in the backlog. [references/synthetic-generators.md](references/synthetic-generators.md) has that competition's example.
+Synthetic rows generated from an original dataset: read [references/playground.md](references/playground.md)
+before planning (the winning pattern, large multi-level stacks, and the generator as a lever when the stack is
+saturated;
+[references/synthetic-generators.md](references/synthetic-generators.md) is one competition's example).
 
 ## 8. Ensembling for tabular
 
@@ -148,15 +134,9 @@ LightGBM + CatBoost + XGBoost + NN + (optional) linear/kNN/SVR on different feat
 `kgkit blend --exp ... --method hill --folds data/folds.csv:fold`. Level-2 stacking
 with ridge/logistic on OOFs (+ a few raw features) can add more; validate with nested CV.
 
-Playground-scale ensembles are much bigger: the March 2026 churn winner was a 4-level stack of 150
-models selected from 850 experiments; the April 2025 winner stacked Lasso, SVR, kNN, RF, MLP, TabPFN,
-XGBoost and LightGBM under XGBoost + MLP meta-models and a final weighted average. That only pays when
-every experiment saved OOF + test predictions on the same folds (the ledger does this). Tooling:
-`kgkit blend --prune 40` (drop near-duplicate OOFs), `--method stack --levels 2` (layers of
-linear + shallow-GBDT meta-models, then hill climbing; compare the honest score with `--levels 1`), and
-`--method residual --base <id>` (stage 2 learns one strong model's errors). See `ensembling`.
-Distillation also scales here: train a single model on the ensemble's OOF/test predictions as soft
-targets (`leaderboard-boosters`).
+Distillation: train a single model on the ensemble's OOF/test predictions as soft targets
+(`leaderboard-boosters`). A library of 100+ models stacked in several levels is a Playground pattern:
+[references/playground.md](references/playground.md).
 
 ## 9. Cheap screens (sweeps)
 Many values of one lever are one sweep (`/kg-grind --sweep`): screened cheap against a control at the same fidelity, the best confirmed by a full run judged as the best of all of them.

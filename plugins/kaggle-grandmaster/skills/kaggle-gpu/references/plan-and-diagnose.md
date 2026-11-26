@@ -18,6 +18,18 @@ Part of the `kaggle-gpu` skill (section 4).
   cycles. `gpu plan` prints the regime from every account's quota (read live; `--cached` uses the last reading), the
   measured run lengths and the deadline, and names any account whose quota it could not read.
 
+## Several accounts
+- A run counts against the account that owns its kernel (`<owner>/<slug>`): `gpu quota` lists other accounts' runs
+  apart, and `gpu status`, `wait` and `collect` ask Kaggle about each run with its owner's token.
+- `gpu push` of a `gpu build` folder picks the account itself: of those whose plannable hours cover the cap, the one
+  with the fewest (a 10 h run goes to an account with 11 h left, keeping a full week whole for a longer run), that
+  has joined the competition and has a batch session free. It runs as that account without switching, sets the
+  kernel id to `<its user>/<slug>`, and says which account it chose. A kernel reading another account's kernel
+  output stays with that account; a private dataset of another account is copied, private, to the one that runs it.
+- Any other kernel folder (a submission or inference notebook) goes to the active account unless
+  `--account <alias>` (or `auto`) is given. Submissions always use the active account, which the person switches in
+  the Kaggle pane; the submit hook asks when it differs from the competition's earlier submissions.
+
 
 ## When a run disappoints
 

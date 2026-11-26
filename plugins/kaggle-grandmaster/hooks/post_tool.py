@@ -373,7 +373,8 @@ def _log_submission(payload: dict, root: Path, sub: dict, status: str, left: int
             size = f.stat().st_size
         except OSError:
             pass
-    m = C.EXP_ID_RE.search(sub.get("message") or "") or C.EXP_ID_RE.search(sub.get("file") or "")
+    m = (C.EXP_ID_RE.search(sub.get("message") or "") or C.EXP_ID_RE.search(sub.get("file") or "")
+         or C.EXP_ID_RE.search(sub.get("args_text") or ""))  # a wrapper script's command line (#152)
     rec = {
         "time_utc": dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "competition": sub.get("competition"),
@@ -385,6 +386,7 @@ def _log_submission(payload: dict, root: Path, sub: dict, status: str, left: int
         "sha256": sha,
         "size": size,
         "remaining_today": left,
+        "account": C.G.active_user(),  # the account it was submitted as (the Kaggle pane's active one)
     }
     log = C.submissions_log(root)
     log.parent.mkdir(parents=True, exist_ok=True)

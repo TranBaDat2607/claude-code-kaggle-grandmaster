@@ -66,6 +66,8 @@ does around the existing work: submission logging and the daily budget, the sess
    - **CHECK**: ask whether each file is the user's own work, for example labels or predictions they made, keyed
      by the competition's IDs.
    - **NOT IGNORED**: offer `kgkit audit-repo --fix-gitignore`.
+   - Offer `kgkit repo-guard install`: it completes `.gitignore` with what is never code and adds git hooks that
+     refuse a commit or push of credentials or competition data (it leaves the repo's own hooks alone).
 4. **Ledger.** Find the repo's own experiment record (a CSV/markdown/JSON log, a results folder,
    commit messages). For each experiment that matters (the current best, the ones behind
    submissions, the main alternatives, not every run):

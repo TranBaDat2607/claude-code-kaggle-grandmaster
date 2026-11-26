@@ -29,7 +29,9 @@ validation, frozen CV folds and a baseline.
   When the competition ends, `/kg-showcase` gives the repo two ways in: `solution/` for readers who want the
   result, and `journey/` for readers who want to see how the ideas developed, dead ends included.
 - **Free GPUs from Kaggle.** `/kg-gpu` runs your local training script on Kaggle's GPUs and TPUs. It keeps both T4s
-  busy, resumes runs that time out, stops losing ideas early and budgets your weekly quota.
+  busy, resumes runs that time out, stops losing ideas early and budgets your weekly quota. With your teammates'
+  accounts registered in the Kaggle pane, each run goes to the account whose hours fit it best, without switching
+  (Kaggle allows one account per person: register teammates' accounts, not extra ones of your own).
 - **Your Kaggle runs, beside the chat.** `/kaggle-monitor` shows each running kernel's live CPU, GPU, RAM and
   training progress, the time left before its session limit, whether its script has finished and its outputs can be
   read (even while Kaggle still says RUNNING), your submission scores, and the GPU quota of every account you register.

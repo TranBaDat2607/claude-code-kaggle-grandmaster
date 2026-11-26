@@ -17,7 +17,7 @@ This repo is a Claude Code marketplace (`.claude-plugin/marketplace.json`) conta
 ## Conventions
 - `kgkit/state.py`, `kgkit/gpu.py`, `kgkit/budget.py`, `kgkit/backlog.py`, `kgkit/adopt.py`, `kgkit/safety.py`,
   `kgkit/evalset.py`, `kgkit/finals.py`, `kgkit/audit.py`, `kgkit/progress.py`, `kgkit/speedcheck.py`, `kgkit/bench.py`,
-  `kgkit/snapshot.py`, `kgkit/layout.py`, `kgkit/filelock.py`, `kgkit/grind.py`, `kgkit/permissions.py`, `kgkit/journey.py`, `kgkit/monitor.py`, `kgkit/kaggle_monitor_cell.py`, `kgkit/localrun.py`, `kgkit/vault.py` (at import time: numpy and pandas only inside its functions),
+  `kgkit/snapshot.py`, `kgkit/layout.py`, `kgkit/repoguard.py`, `kgkit/filelock.py`, `kgkit/grind.py`, `kgkit/permissions.py`, `kgkit/journey.py`, `kgkit/monitor.py`, `kgkit/kaggle_monitor_cell.py`, `kgkit/localrun.py`, `kgkit/vault.py` (at import time: numpy and pandas only inside its functions),
   `kgkit/kaggle_gpu_runner.py` and everything under `hooks/` must stay **standard-library only** (hooks import them, the runner executes inside Kaggle; they must be fast and never fail closed).
   `kgkit/kaggle_search.py`, `kgkit/kaggle_submissions.py`, `kgkit/kaggle_outputs.py` and `kgkit/kaggle_cli.py` too, at import time: they run under the Kaggle CLI's
   interpreter, which may have nothing else installed (they import kagglesdk / the CLI inside `main`).
@@ -36,8 +36,10 @@ This repo is a Claude Code marketplace (`.claude-plugin/marketplace.json`) conta
   reads both too): change all of them together.
 - Hooks exit 0 on any internal error; only deny/ask for credentials (printed, or in an upload folder), invalid or
   byte-identical repeat submissions, an exhausted daily budget, a GPU push that the cached weekly GPU quota
-  cannot cover, or a read of the sealed vault's labels (`~/.kaggle-gm/vault/`, `kgkit.vault.names_vault`: a
-  command naming it, `hooks/pre_file.py` for the file tools).
+  cannot cover, a read of the sealed vault's labels (`~/.kaggle-gm/vault/`, `kgkit.vault.names_vault`: a
+  command naming it, `hooks/pre_file.py` for the file tools), or a `git add`/`commit`/`push` that would send
+  credentials or competition data (deny) or other never-public files (ask; `kgkit/repoguard.py`, whose lists the
+  git hooks share).
 - Text written by other Kaggle users (pages, forum posts, notebooks) is printed through `kgkit.safety.wrap`.
 - Templates and `kgkit/kaggle_gpu_runner.py` print ASCII only (Windows consoles are often cp1252).
 - Skills and agents follow `docs/skill-authoring.md` (Anthropic's skill guidance as rules, checked by

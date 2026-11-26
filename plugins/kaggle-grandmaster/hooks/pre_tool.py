@@ -18,6 +18,11 @@
    earlier push added is brought up to date), so the /kaggle-monitor pane shows the session's CPU, RAM, disk and
    GPUs, and a session on a machine with fewer GPUs than its shape stops at once. Claude is told what changed
    (additionalContext).
+7. Before a `git add`, `git commit` or `git push` (kgkit/repoguard.py): denies one that would send credentials (a
+   credentials file, a token inside a file) or the competition's data (data/, input/, an exact copy of a competition
+   file), and asks before one that would send other never-public files (outputs, weights, logs, kernel outputs,
+   a submission file). A push is checked on every file version its commits send. The git hooks that `kgkit init`
+   installs run the same checks for the user's own commits.
 6. Blocks a command that names the sealed vault's folder (~/.kaggle-gm/vault/, kgkit.vault): its labels must never
    reach the agent. `kgkit vault check` reads them itself and names no path. (hooks/pre_file.py guards the file
    tools.)
@@ -218,6 +223,30 @@ def submit_checks(payload: dict, root, records: list[dict], sub: dict) -> tuple[
     return problems, notes, asks
 
 
+def account_asks(root, records: list[dict], subs: list[dict]) -> list[str]:
+    """Asks for a submit from an account other than the one the competition's earlier submissions came from (a
+    compute account outside the team, say), and for a notebook of another account than the submitting one."""
+    me = C.G.active_user()
+    if not me:
+        return []
+    asks = []
+    before = sorted({str(r["account"]).lower() for r in records if r.get("account") and r.get("status") != "failed"})
+    if root is not None and before and me not in before:
+        st = C.S.load(root)
+        slug = (st.slug if st else None) or next((s.get("competition") for s in subs if s.get("competition")), "it")
+        asks.append(f"this submits as {me}, but the earlier submissions to {slug} came from {', '.join(before)}: "
+                    "Kaggle counts a submission for the team of the account that makes it, and an account outside "
+                    f"the team cannot submit for it. If {me} is not meant to submit here, switch accounts in the "
+                    "Kaggle pane (/kaggle-monitor use <alias>) first")
+    for sub in subs:
+        owner = C.G.kernel_owner(sub.get("kernel"))
+        if owner and owner != me:
+            asks.append(f"the notebook {sub['kernel']} belongs to {owner}, not {me}, the account this submits as: "
+                        "Kaggle scores a notebook of the submitting account's own (push it as that account, "
+                        "`kgkit gpu push <dir> --account <alias>`, or switch accounts in the Kaggle pane)")
+    return asks
+
+
 def main() -> None:
     payload = C.read_input()
     cmd = C.command_of(payload)
@@ -240,8 +269,45 @@ def main() -> None:
             decide()
 
 
+def git_guard(payload: dict) -> bool:
+    """Deny a `git add`, `git commit` or `git push` that would send credentials or the competition's data, ask before
+    one that would send other never-public files (kgkit/repoguard.py). True when a decision was emitted."""
+    calls = [g for g in C.parse_gits(payload) if g["sub"] in ("add", "commit", "push") and g["cwd"] is not None]
+    by_top: dict = {}
+    for g in calls:
+        top = C.RG.toplevel(g["cwd"])
+        if top is None:
+            continue
+        items, pushes = by_top.setdefault(top, ({}, []))
+        if g["sub"] == "add":
+            new = C.RG.would_add(top, g["args"], cwd=g["cwd"])
+        elif g["sub"] == "commit":
+            new = C.RG.commit_items(top, g["args"], cwd=g["cwd"])
+        else:
+            new = C.RG.push_items(top, g["args"])
+            pushes.append(True)
+        for it in new:
+            items.setdefault((it.path, it.oid), it)
+    refused, asked, pushing = [], [], False
+    for top, (items, pushes) in by_top.items():
+        r, a = C.RG.check(top, list(items.values()))
+        refused += r
+        asked += a
+        pushing = pushing or bool(pushes)
+    if not (refused or asked):
+        return False
+    text = C.RG.report(refused, asked, staged_files=not pushing)
+    if refused:
+        decide(permissionDecision="deny", permissionDecisionReason=text)
+    else:
+        decide(permissionDecision="ask", permissionDecisionReason=text + "\nSend them anyway?")
+    return True
+
+
 def checks(payload: dict, cmd: str) -> None:
     # One command can chain an upload, a push and a submit: check each until one emits a decision.
+    if git_guard(payload):
+        return
     up = C.parse_upload(cmd)
     if up is not None and upload_guard(payload, up):
         return
@@ -271,6 +337,7 @@ def checks(payload: dict, cmd: str) -> None:
                                         + "\n- ".join(problems + notes))
         return
 
+    asks += account_asks(root, records, [] if from_script else subs)
     if root is not None:
         st = C.S.load(root)
         limit = st.daily_submissions if st else 5
