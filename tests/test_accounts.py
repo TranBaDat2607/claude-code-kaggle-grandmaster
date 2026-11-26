@@ -201,10 +201,10 @@ def _kernel(ws, owner="accb", comp="demo", sources=()):
 class AsAccount:
     """A fake Kaggle CLI that answers as the account whose token the call carries (None: the active one, accb)."""
 
-    def __init__(self, tokens, left=None, entered=("demo",), busy=None):
+    def __init__(self, tokens, left=None, entered=("demo",), busy=None, done=()):
         self.by_token = {str(tokens / "access_token_main"): "acca", str(tokens / "access_token_second"): "accb"}
         self.left = left or {"acca": 20.0, "accb": 30.0}
-        self.entered, self.busy, self.calls = set(entered), busy or {}, []
+        self.entered, self.busy, self.done, self.calls = set(entered), busy or {}, set(done), []
 
     def __call__(self, args, timeout=600, env=None):
         who = self.by_token.get((env or {}).get("KAGGLE_API_TOKEN"), "accb")
@@ -219,7 +219,7 @@ class AsAccount:
             rows = [{"ref": k, "lastRunTime": G._now().strftime("%Y-%m-%dT%H:%M:%S")} for k in self.busy.get(who, [])]
             return _cp(json.dumps(rows))
         if args[:2] == ["kernels", "status"]:
-            return _cp(f'{args[2]} has status "KernelWorkerStatus.RUNNING"')
+            return _cp(f'{args[2]} has status "KernelWorkerStatus.{"COMPLETE" if args[2] in self.done else "RUNNING"}"')
         if args[:2] == ["kernels", "push"]:
             kid = json.loads((Path(args[args.index("-p") + 1]) / "kernel-metadata.json").read_text())["id"]
             return _cp(f"Kernel version 3 successfully pushed.  Please check progress at https://www.kaggle.com/code/{kid}")
@@ -323,4 +323,89 @@ def test_cli_push_takes_an_account(ws, accounts, monkeypatch, capsys):
     monkeypatch.chdir(ws)
     cli.main(["gpu", "push", str(_kernel(ws)), "--account", "main"])
     assert seen["account"] == "main" and "pushed acca/train-a v1" in capsys.readouterr().out
+
+
+# ----------------------------------------------------------------------------- the best-fit account
+def _pushed_as(fake):
+    return [who for who, a in fake.calls if a[:2] == ["kernels", "push"]]
+
+
+@pytest.mark.parametrize("cap, left, chosen", [
+    (10.0, {"acca": 11.0, "accb": 30.0}, "acca"),  # the tightest fit: accb's full week stays whole
+    (12.0, {"acca": 11.0, "accb": 30.0}, "accb"),  # acca cannot cover it
+    (10.0, {"acca": 30.0, "accb": 30.0}, "accb"),  # a tie: the active account, no switch of owner
+])
+def test_a_built_kernel_goes_to_the_account_whose_hours_fit_it_best(ws, accounts, monkeypatch, capsys, cap, left,
+                                                                     chosen):
+    k = _kernel(ws)
+    fake = AsAccount(accounts, left=left)
+    monkeypatch.setattr(G, "run_kaggle", fake)
+    rec = G.push(ws, k, hours=cap)
+    assert rec["kernel"] == f"{chosen}/train-a" and _pushed_as(fake) == [chosen]
+    out = capsys.readouterr().out
+    assert f"account: {'main' if chosen == 'acca' else 'second'} ({chosen})" in out and "best fit" in out
+
+
+def test_no_account_with_room_refuses_and_lists_their_hours(ws, accounts, monkeypatch):
+    k = _kernel(ws)
+    monkeypatch.setattr(G, "run_kaggle", AsAccount(accounts, left={"acca": 3.0, "accb": 2.5}))
+    with pytest.raises(SystemExit, match=r"no registered account has 4.00h of GPU quota plannable: main \(acca\) "
+                                         r"3.00h, second \(accb\) 2.50h"):
+        G.push(ws, k)
+
+
+def test_the_best_fit_skips_an_account_that_cannot_take_the_run(ws, accounts, monkeypatch, capsys):
+    k = _kernel(ws)
+    # acca fits best but both its batch GPU sessions are taken
+    G.log_run(ws, {"kernel": "acca/x", "accelerator": "NvidiaTeslaT4", "hours": 0.5, "status": "running",
+                   "pushed_at": _ago(minutes=1), "started_at": _ago(minutes=1)})
+    G.log_run(ws, {"kernel": "acca/y", "accelerator": "NvidiaTeslaT4", "hours": 0.5, "status": "running",
+                   "pushed_at": _ago(minutes=1), "started_at": _ago(minutes=1)})
+    fake = AsAccount(accounts, left={"acca": 12.0, "accb": 30.0}, busy={"acca": ["acca/x", "acca/y"]})
+    monkeypatch.setattr(G, "run_kaggle", fake)
+    assert G.push(ws, k)["kernel"] == "accb/train-a"
+    assert "main (acca) skipped: its 2 batch GPU session(s) are taken" in capsys.readouterr().out
+
+
+def test_the_best_fit_skips_an_account_that_has_not_joined(ws, accounts, monkeypatch, capsys):
+    k = _kernel(ws)
+
+    class NotJoined(AsAccount):
+        def __call__(self, args, timeout=600, env=None):
+            if args[:2] == ["competitions", "list"] and (env or {}).get("KAGGLE_API_TOKEN"):
+                self.calls.append(("acca", list(args)))
+                return _cp("No competitions found\n")
+            return super().__call__(args, timeout, env)
+
+    fake = NotJoined(accounts, left={"acca": 5.0, "accb": 30.0})
+    monkeypatch.setattr(G, "run_kaggle", fake)
+    assert G.push(ws, k)["kernel"] == "accb/train-a"
+    assert "main (acca) skipped: it has not joined demo" in capsys.readouterr().out
+
+
+def test_a_kernel_reading_another_accounts_output_stays_with_that_account(ws, accounts, monkeypatch):
+    k = _kernel(ws, sources=["acca/prep-features"])
+    # accb fits best, but cannot read acca's output
+    fake = AsAccount(accounts, left={"acca": 25.0, "accb": 5.0}, done=["acca/prep-features"])
+    monkeypatch.setattr(G, "run_kaggle", fake)
+    assert G.push(ws, k)["kernel"] == "acca/train-a"
+
+
+def test_a_hand_written_notebook_folder_stays_on_the_active_account(ws, accounts, monkeypatch):
+    k = _kernel(ws)
+    (k / "kg-train.json").unlink()  # not built by `gpu build`: a submission or inference notebook, say
+    fake = AsAccount(accounts, left={"acca": 5.0, "accb": 30.0})
+    monkeypatch.setattr(G, "run_kaggle", fake)
+    assert G.push(ws, k, hours=4.0)["kernel"] == "accb/train-a" and _pushed_as(fake) == ["accb"]
+    # unless asked: --account auto picks the best fit for any folder
+    assert G.push(ws, k, hours=4.0, account="auto")["kernel"] == "acca/train-a"
+
+
+def test_with_one_account_nothing_changes(ws, monkeypatch):
+    monkeypatch.setenv("KAGGLE_USERNAME", "accb")  # no registry (conftest): no quota of other accounts is read
+    k = _kernel(ws)
+    fake = AsAccount(G.Path(ws), left={"acca": 30.0, "accb": 30.0})
+    monkeypatch.setattr(G, "run_kaggle", fake)
+    assert G.push(ws, k)["kernel"] == "accb/train-a"
+    assert [a[:1] for _, a in fake.calls].count(["quota"]) == 1
 

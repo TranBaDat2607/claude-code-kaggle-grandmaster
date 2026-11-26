@@ -301,9 +301,9 @@ def kaggle_username(probe: bool = True) -> str | None:
 # quota, and a private kernel is readable by its owner alone. The session's active account is the one the Kaggle pane
 # switched to (it sets KAGGLE_USERNAME); the others registered there are reached with their own token files.
 ACTIVE_USER = "<active>"  # `user` default of the quota sums: the active account
-ACCOUNTS_HOWTO = ("A push goes to the active account unless `kgkit gpu push <dir> --account <alias>` sends it to another "
-                  "registered one, as that account, without switching; never change KAGGLE_API_TOKEN or "
-                  "KAGGLE_USERNAME yourself.")
+ACCOUNTS_HOWTO = ("`kgkit gpu push` sends a `gpu build` run to the registered account whose plannable hours fit its cap "
+                  "best, as that account, without switching; any other kernel folder goes to the active account unless "
+                  "`--account <alias>` (or `auto`) is given. Never change KAGGLE_API_TOKEN or KAGGLE_USERNAME yourself.")
 
 
 def active_user() -> str | None:
@@ -1909,7 +1909,7 @@ def resolve_account(name: str) -> tuple[str, dict]:
 def push_target(account: str | None) -> PushTarget:
     """Where a push goes: ``account`` (alias or username), else the active account."""
     me = active_user()
-    if account is None:
+    if account is None or account == AUTO:
         hit = account_of(me) if me else None
         return PushTarget(me, None, *(hit or (None, None)))
     alias, entry = resolve_account(account)
@@ -2014,6 +2014,66 @@ def retarget(kdir: Path, kernel: str):
     return undo
 
 
+AUTO = "auto"  # `gpu push --account auto`, the default for a `gpu build` folder
+
+
+def _session_taken(root: Path, resource: str, env: dict[str, str] | None) -> int | None:
+    """How many of the account's batch ``resource`` sessions are taken when all are, else None."""
+    busy = busy_sessions(env=env) or []
+    known = {r.get("kernel"): run_resource(r) for r in runs(root)}
+    n = sum(known.get(k) == resource for k, _ in busy)
+    return n if n >= SESSION_SLOTS.get(resource, 2) else None
+
+
+def best_fit_account(root: Path, kdir: Path, tm: dict, force: bool = False) -> str | None:
+    """The registered account a run goes to: of those whose plannable hours cover its cap, the one with the fewest
+    (the tightest fit, so a fuller week stays whole for a longer run; the active account on a tie) that has joined
+    the competition, has a batch session free and can read the run's inputs. None (the active account) with fewer
+    than two accounts, or none that fits and ``force``."""
+    res, hours, reg = resource_of(tm["accelerator"]), float(tm["hours"]), registry()
+    if res == "CPU" or len(reg) < 2:
+        return None
+    me = active_user()
+    try:
+        meta = json.loads((kdir / "kernel-metadata.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        meta = {}
+    owners = {kernel_owner(src) for src in meta.get("kernel_sources") or []}
+    pinned = {hit[0] for hit in map(account_of, owners) if hit is not None}  # their private outputs: theirs alone
+    accs = fetch_account_quotas(root)
+    cands = []
+    for alias, rec in accs.items():
+        user, q = str(rec.get("user") or "").lower(), rec.get("quota")
+        q = q.get("tpu") if q and res == "TPU" else q
+        if not user or not q or (pinned and alias not in pinned):
+            continue
+        cands.append((available_hours(root, q, res, user), user != me, alias, user))
+    for avail, _, alias, user in sorted(c for c in cands if c[0] >= hours):
+        env, label = (None if user == me else account_env(reg[alias])), f"{alias} ({user})"
+        if env is not None:
+            left_out = next((slug for slug in meta.get("competition_sources") or []
+                             if entered_competition(str(slug), env) is False), None)
+            if left_out:
+                print(f"account: {label} skipped: it has not joined {left_out}")
+                continue
+        taken = _session_taken(root, res, env)
+        if taken:
+            print(f"account: {label} skipped: its {taken} batch {res} session(s) are taken")
+            continue
+        rest = ", ".join(f"{a} {h:.1f}h" for h, _, a, _ in cands if a != alias)
+        print(f"account: {label}, the best fit: {avail:.2f}h of {res} quota plannable for a {hours:g}h cap"
+              + (f" (others: {rest})" if rest else ""))
+        return alias
+    if force:
+        print(f"warning: no registered account can take this {hours:g}h run; pushing as the active account (--force)")
+        return None
+    hours_of = ", ".join(f"{a} ({u}) {h:.2f}h" for h, _, a, u in cands) or "none read"
+    raise SystemExit(f"refusing to push: no registered account has {hours:.2f}h of {res} quota plannable: {hours_of}"
+                     + (f" (only {', '.join(sorted(pinned))} can read its input kernels)" if pinned else "")
+                     + ". Lower --hours, wait for a reset (`kgkit gpu quota --all`), or pass --force to push as the "
+                     "active account.")
+
+
 def push(root: str | Path | None, kdir: str | Path, force: bool = False, hours: float | None = None,
          check_sources: bool = True, check_sessions: bool = True, account: str | None = None) -> dict:
     """Push the kernel folder ``kdir`` to Kaggle as ``account`` (a registered alias or username; default the active
@@ -2021,6 +2081,10 @@ def push(root: str | Path | None, kdir: str | Path, force: bool = False, hours: 
     root = _root(root)
     kdir = Path(kdir)
     tm = push_spec(kdir, hours)
+    if account is None and (kdir / "kg-train.json").is_file():
+        account = AUTO  # a `gpu build` run: any registered account may take it
+    if account == AUTO:
+        account = best_fit_account(root, kdir, tm, force)
     target = push_target(account)
     if target.user:
         tm["kernel"] = f"{target.user}/{str(tm['kernel']).split('/')[-1]}"

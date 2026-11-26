@@ -3929,7 +3929,9 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--no-session-check", action="store_true", help="skip the busy-session preflight")
     s.add_argument("--account", help="push as this account registered in the Kaggle pane (alias or username), not the "
                                      "active one: the kernel becomes its (<user>/<slug>), its quota, sessions and "
-                                     "competition entry are checked, and its token is used; the active account stays")
+                                     "competition entry are checked, and its token is used; the active account stays. "
+                                     "auto: the account whose plannable hours fit the cap best (the default for a "
+                                     "`gpu build` folder; any other folder defaults to the active account)")
     s.add_argument("--backend", choices=["kaggle", "local"], default="kaggle",
                    help="local: run the `gpu build` folder on this machine's GPU(s) as a background process (no "
                         "quota; kernel id local/<slug>; --hours up to 168, default the build's cap)")
