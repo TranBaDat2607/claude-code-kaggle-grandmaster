@@ -24,6 +24,7 @@ import fnmatch
 import os
 import re
 import subprocess
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -126,6 +127,7 @@ STATE_GENERATED = (".kaggle-gm/remote/", ".kaggle-gm/build/", ".kaggle-gm/local/
 BIG = 50 * 1024 * 1024  # GitHub warns above 50 MB and refuses a file above 100 MB
 READ_MAX = 1_000_000  # bytes read from a file for its credentials scan
 SCAN_MAX = 20_000  # files read per check: a first push of a long history is only partly scanned
+SCAN_BYTES = 256 * 1024 * 1024  # and at most this much of them, read by one `git cat-file --batch`
 SECRET_NAMES = (".env", ".env.*", "*.env", "kaggle.json", "access_token", "access_token.txt", "credentials.json",
                 ".netrc", ".pypirc", "id_rsa", "id_ed25519", "id_ecdsa", "*.pem", "*.p12", "*.pfx")  # kgkit.safety
 NOT_SECRET = (".env.example", ".env.sample", ".env.template")
@@ -160,6 +162,37 @@ class Item:
             return r.stdout[:n] if r.returncode == 0 else b""
         except (OSError, subprocess.SubprocessError, TypeError):
             return b""
+
+
+def _prefetch(root: Path, items: list[Item]) -> dict[str, bytes]:
+    """The contents of the git blobs among ``items`` that the credentials scan reads, by one ``git cat-file
+    --batch`` (a process per file would take minutes on a first push of a long history)."""
+    want, total = [], 0
+    for it in items:
+        if it.oid and it.size <= READ_MAX and len(want) < SCAN_MAX and total + it.size <= SCAN_BYTES:
+            want.append(it.oid)
+            total += it.size
+    want = list(dict.fromkeys(want))
+    if not want:
+        return {}
+    try:
+        r = subprocess.run(["git", "cat-file", "--batch"], cwd=str(root), input=("\n".join(want) + "\n").encode(),
+                           capture_output=True, timeout=120)
+    except (OSError, subprocess.SubprocessError):
+        return {}
+    out, data, i = {}, r.stdout, 0
+    while i < len(data):
+        nl = data.find(b"\n", i)
+        if nl < 0:
+            break
+        head = data[i:nl].split()
+        if len(head) != 3:  # "<oid> missing"
+            i = nl + 1
+            continue
+        size = int(head[2])
+        out[head[0].decode()] = data[nl + 1:nl + 1 + size]
+        i = nl + 1 + size + 1
+    return out
 
 
 def _z(r: subprocess.CompletedProcess | None) -> list[str]:
@@ -355,6 +388,7 @@ def check(root: str | Path, items: list[Item]) -> tuple[list[str], list[str]]:
     refused, asked = [], []
     comp = None
     seen = 0
+    blobs = _prefetch(root, items)
     for it in items:
         path = it.path
         name = path.rsplit("/", 1)[-1]
@@ -366,9 +400,9 @@ def check(root: str | Path, items: list[Item]) -> tuple[list[str], list[str]]:
             refused.append(f"{path}: in {d}/, where the competition's files are (Kaggle's rules forbid publishing "
                            "them, copies and subsets too)")
             continue
-        if seen < SCAN_MAX and it.size <= 4 * READ_MAX:
+        if it.oid in blobs or (it.worktree is not None and seen < SCAN_MAX and it.size <= READ_MAX):
             seen += 1
-            hit = _secret_value(it.read(root))
+            hit = _secret_value(blobs[it.oid] if it.oid in blobs else it.read(root))
             if hit:
                 refused.append(f"{path}: holds what looks like a {hit[0]} (line {hit[1]})")
                 continue
@@ -425,13 +459,17 @@ def _quote(p: str) -> str:
 
 def report(refused: list[str], asked: list[str], staged_files: bool = True, limit: int = 12) -> str:
     """The guard's message: what was found, and what to do."""
+    def listed(found):
+        more = [f"  - ... {len(found) - limit} more"] if len(found) > limit else []
+        return [f"  - {x}" for x in found[:limit]] + more
+
     out = []
     if refused:
         out.append("kaggle-grandmaster: these must never be public (credentials, the competition's data):")
-        out += [f"  - {x}" for x in refused[:limit]] + ([f"  - ... {len(refused) - limit} more"] if len(refused) > limit else [])
+        out += listed(refused)
     if asked:
         out.append("kaggle-grandmaster: never-public files (outputs, logs, kernel outputs) that .gitignore keeps out:")
-        out += [f"  - {x}" for x in asked[:limit]] + ([f"  - ... {len(asked) - limit} more"] if len(asked) > limit else [])
+        out += listed(asked)
     out += [f"  {x}" for x in fix_steps(refused, asked, staged_files)]
     return "\n".join(out)
 
@@ -502,3 +540,145 @@ def push_items(root: Path, args: list[str]) -> list[Item]:
         r = _git(root, "remote", "get-url", remote, timeout=10)
         remote = remote if r is not None and r.returncode == 0 else None  # a URL: whatever no remote has
     return pushed(root, tips or ["HEAD"], remote)
+
+
+# --------------------------------------------------------------------------------------------- the git hooks
+HOOK_MARK = "# kaggle-grandmaster repo guard"
+HOOKS = ("pre-commit", "pre-push")
+KGKIT_HOME = Path(__file__).resolve().parents[1]  # the folder that holds this kgkit (the plugin, or a vendored copy)
+
+
+def _sh_path(p) -> str:
+    """A path as a single-quoted sh word (forward slashes: Git for Windows runs hooks with its own sh)."""
+    return "'" + Path(p).as_posix().replace("'", "'\\''") + "'"
+
+
+def hook_script(name: str, python: str | None = None, home: Path | None = None) -> str:
+    """The git hook ``name``: runs this module with the Python and the kgkit folder of the session that wrote it
+    (each Claude Code session rewrites them: :func:`refresh_hooks`), else a `kgkit` on PATH; it lets the commit
+    or push through, saying so, when it finds neither (a hook never stops the user for its own failure)."""
+    py, home = _sh_path(python or sys.executable), _sh_path(home or KGKIT_HOME)
+    verb = "commit" if name == "pre-commit" else "push"
+    return f"""#!/bin/sh
+{HOOK_MARK} ({name}): written by `kgkit init` or `kgkit repo-guard install`, and kept up to date
+# by each Claude Code session in this repository. Refuses a {verb} that would send credentials or the
+# competition's data, and warns about other never-public files. `git {verb} --no-verify` skips it once;
+# delete this file to turn it off.
+KGKIT_PYTHON={py}
+KGKIT_HOME={home}
+if [ -f "$KGKIT_HOME/kgkit/repoguard.py" ] && [ -x "$KGKIT_PYTHON" ]; then
+  PYTHONPATH="$KGKIT_HOME" exec "$KGKIT_PYTHON" -m kgkit.repoguard hook {name} "$@"
+fi
+if command -v kgkit >/dev/null 2>&1; then
+  exec kgkit repo-guard hook {name} "$@"
+fi
+echo "kaggle-grandmaster: the repo guard did not run ($KGKIT_HOME has no kgkit):" \\
+  "open Claude Code in this repository to update the hook" >&2
+exit 0
+"""
+
+
+def _hooks_dir(root: Path) -> tuple[Path | None, str | None]:
+    """(the repository's hooks folder, why not) for writing kgkit's hooks."""
+    r = _git(root, "config", "--get", "core.hooksPath", timeout=10)
+    if r is not None and r.returncode == 0 and r.stdout.strip():
+        return None, (f"core.hooksPath is set ({r.stdout.strip()}): git runs the hooks there, which kgkit does not "
+                      "write; add `kgkit repo-guard check --staged` (pre-commit) and `kgkit repo-guard check --push` "
+                      "(pre-push) to them")
+    r = _git(root, "rev-parse", "--git-path", "hooks", timeout=10)
+    if r is None or r.returncode != 0 or not r.stdout.strip():
+        return None, "not a git repository: no hooks installed (run `kgkit repo-guard install` after `git init`)"
+    d = Path(r.stdout.strip())
+    return (d if d.is_absolute() else Path(root) / d), None
+
+
+def _write_hook(f: Path, text: str) -> None:
+    f.parent.mkdir(parents=True, exist_ok=True)
+    with open(f, "w", encoding="utf-8", newline="\n") as out:
+        out.write(text)
+    try:
+        f.chmod(0o755)
+    except OSError:
+        pass
+
+
+def install_hooks(root: str | Path) -> list[str]:
+    """Write kgkit's pre-commit and pre-push hooks into the repository of ``root`` (its own hooks are rewritten, any
+    other hook is left alone). Returns one line per hook not written, with why. Never raises."""
+    root = Path(root)
+    d, why = _hooks_dir(root)
+    if d is None:
+        return [why]
+    notes = []
+    for name in HOOKS:
+        f = d / name
+        try:
+            if f.is_file() and HOOK_MARK not in f.read_text(encoding="utf-8", errors="replace"):
+                cmd = "check --staged" if name == "pre-commit" else "check --push"
+                notes.append(f"{name}: the repository has its own {name} hook, left as it is; add "
+                             f"`kgkit repo-guard {cmd}` to it")
+                continue
+            _write_hook(f, hook_script(name))
+        except OSError as e:
+            notes.append(f"{name}: not written ({e})")
+    return notes
+
+
+def refresh_hooks(root: str | Path) -> list[str]:
+    """Rewrite kgkit's hooks of ``root``'s repository whose Python or kgkit folder is not this session's (a plugin
+    update moves the plugin). Hooks that are not kgkit's, and missing ones, are left alone. Returns the hooks
+    rewritten. Never raises; fast (a session start runs it)."""
+    try:
+        git_dir = Path(root) / ".git"
+        d = git_dir / "hooks" if git_dir.is_dir() else _hooks_dir(Path(root))[0]
+        out = []
+        for name in HOOKS:
+            f = d / name if d is not None else None
+            if f is None or not f.is_file():
+                continue
+            text = f.read_text(encoding="utf-8", errors="replace")
+            if HOOK_MARK in text and text != hook_script(name):
+                _write_hook(f, hook_script(name))
+                out.append(name)
+        return out
+    except OSError:
+        return []
+
+
+def _hook_main(argv: list[str]) -> int:
+    """``python -m kgkit.repoguard hook pre-commit|pre-push [<remote> <url>]``, as git runs it (pre-push reads its
+    refs from stdin). 1 refuses; warnings alone go to stderr and let it through."""
+    name = argv[0] if argv else ""
+    root = toplevel(".")
+    if root is None or name not in HOOKS:
+        return 0
+    if name == "pre-commit":
+        items, staged_files = staged(root), True
+    else:
+        remote = argv[1] if len(argv) > 1 else None
+        tips = []
+        for line in sys.stdin.read().splitlines():
+            parts = line.split()
+            if len(parts) == 4 and parts[1].strip("0"):  # an all-zero id deletes a remote ref: nothing is sent
+                tips.append(parts[1])
+        if not tips:
+            return 0
+        items, staged_files = pushed(root, tips, remote), False
+    refused, asked = check(root, items)
+    if not (refused or asked):
+        return 0
+    sys.stderr.write(report(refused, asked, staged_files) + "\n")
+    if refused:
+        verb = "commit" if name == "pre-commit" else "push"
+        sys.stderr.write(f"kaggle-grandmaster: {verb} refused. `git {verb} --no-verify` skips this check (only if "
+                         "you are sure: a public repository cannot take back what it published)\n")
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        code = _hook_main(sys.argv[2:]) if sys.argv[1:2] == ["hook"] else 0
+    except Exception:  # a hook never stops the user for its own failure
+        code = 0
+    sys.exit(code)

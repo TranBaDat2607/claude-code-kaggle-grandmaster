@@ -4,8 +4,10 @@ The .gitignore names only what is never code (data, outputs, weights, logs, cred
 /kg-showcase removes at cleanup (copies of scripts, probes, scratch notebooks) stay tracked: experiment snapshots
 (``refs/kg/*``) leave ignored files out, and the journey links to the code that ran."""
 import json
+import os
 import shutil
 import subprocess
+from pathlib import Path
 
 import pytest
 
@@ -107,7 +109,8 @@ def test_guard_refuses_credentials_and_competition_data(ws):
     refused, asked = RG.check(ws, RG.staged(ws))
     assert _paths(refused) == {"kaggle.json", "data/train.csv", "src/util.py", "src/copy.csv"}
     why = dict(x.split(": ", 1) for x in refused)
-    assert "credentials" in why["kaggle.json"] and "Kaggle API key" in why["src/util.py"] and "line 2" in why["src/util.py"]
+    assert "credentials" in why["kaggle.json"]
+    assert "Kaggle API key" in why["src/util.py"] and "line 2" in why["src/util.py"]
     assert "an exact copy of data/train.csv" in why["src/copy.csv"] and "competition" in why["data/train.csv"]
     assert KEY not in "\n".join(refused)  # never the secret itself
     assert asked == []
@@ -150,7 +153,7 @@ def test_a_push_checks_every_file_its_commits_send(ws, tmp_path):
     assert RG.check(ws, RG.pushed(ws, ["HEAD"], "origin")) == ([], [])  # all of it is on the remote already
     (ws / "src" / "tok.txt").write_text(f'{{"key": "{KEY}"}}\n')
     git(ws, "add", "src/tok.txt")
-    git(ws, "commit", "-qm", "oops")
+    git(ws, "commit", "-qm", "oops", "--no-verify")  # the pre-commit hook would refuse it
     git(ws, "rm", "-q", "src/tok.txt")
     git(ws, "commit", "-qm", "remove it")  # gone from the tip, still in a commit the push sends
     refused, _ = RG.check(ws, RG.pushed(ws, ["HEAD"], "origin"))
@@ -215,9 +218,73 @@ def test_hook_checks_what_a_push_sends(ws, plugin_root, tmp_path):
     git(ws, "push", "-q", "origin", "HEAD:refs/heads/main")
     (ws / "notes.md").write_text(f"token: {{'key': '{KEY}'}}\n")
     git(ws, "add", "notes.md")
-    git(ws, "commit", "-qm", "notes")
+    git(ws, "commit", "-qm", "notes", "--no-verify")
     for cmd in ("git push", "git push origin HEAD:main", "git push -u origin HEAD"):
         out = _hook(plugin_root, cmd, ws)
         assert out["permissionDecision"] == "deny" and "notes.md" in out["permissionDecisionReason"], cmd
     git(ws, "reset", "-q", "--hard", "HEAD~1")
     assert _hook(plugin_root, "git push origin HEAD:main", ws) is None
+
+
+# ------------------------------------------------------------------------- the git hooks (the user's own commits)
+def _hooks(root):
+    return root / ".git" / "hooks"
+
+
+def test_init_installs_git_hooks_that_refuse_data_and_warn_about_outputs(ws):
+    for name in ("pre-commit", "pre-push"):
+        f = _hooks(ws) / name
+        assert RG.HOOK_MARK in f.read_text() and (os.name == "nt" or os.access(f, os.X_OK))
+    git(ws, "add", "-f", "data/train.csv")
+    r = git(ws, "commit", "-qm", "data", check=False)
+    assert r.returncode != 0 and "data/train.csv" in r.stderr and "--no-verify" in r.stderr
+    git(ws, "reset", "-q")
+    (ws / "train.log").write_text("epoch 1\n")
+    git(ws, "add", "-f", "train.log")
+    r = git(ws, "commit", "-qm", "log", check=False)
+    assert r.returncode == 0 and "train.log" in r.stderr  # a warning: the user chose to commit it
+
+
+def test_the_pre_push_hook_refuses_a_token_in_any_commit_it_sends(ws, tmp_path):
+    remote = tmp_path / "remote.git"
+    git(tmp_path, "init", "-q", "--bare", str(remote))
+    git(ws, "remote", "add", "origin", str(remote))
+    assert git(ws, "push", "-q", "origin", "HEAD:refs/heads/main", check=False).returncode == 0
+    (ws / "notes.md").write_text(f'"key": "{KEY}"\n')
+    git(ws, "add", "notes.md")
+    git(ws, "commit", "-qm", "notes", "--no-verify")
+    r = git(ws, "push", "-q", "origin", "HEAD:refs/heads/main", check=False)
+    assert r.returncode != 0 and "notes.md" in r.stderr and KEY not in r.stderr
+
+
+def test_install_leaves_other_hooks_alone(repo, capsys):
+    (_hooks(repo)).mkdir(parents=True, exist_ok=True)
+    (_hooks(repo) / "pre-commit").write_text("#!/bin/sh\nnpx lint-staged\n")
+    _init(repo)
+    out = capsys.readouterr().out
+    assert (_hooks(repo) / "pre-commit").read_text() == "#!/bin/sh\nnpx lint-staged\n"
+    assert "pre-commit" in out and "kgkit repo-guard check --staged" in out
+    assert RG.HOOK_MARK in (_hooks(repo) / "pre-push").read_text()
+    git(repo, "config", "core.hooksPath", ".githooks")
+    assert any("core.hooksPath" in x for x in RG.install_hooks(repo))
+    assert not (repo / ".githooks").exists()
+
+
+def test_each_session_points_the_hooks_at_the_current_plugin(ws, plugin_root):
+    f = _hooks(ws) / "pre-commit"
+    f.write_text(f.read_text().replace(RG._sh_path(RG.KGKIT_HOME), "/old/plugin/1.0.0"))
+    assert RG.refresh_hooks(ws) == ["pre-commit"]
+    assert "/old/plugin" not in f.read_text() and RG.refresh_hooks(ws) == []
+    other = _hooks(ws) / "pre-push"
+    other.write_text("#!/bin/sh\nexit 0\n")
+    assert RG.refresh_hooks(ws) == [] and other.read_text() == "#!/bin/sh\nexit 0\n"  # not ours: never touched
+
+
+def test_a_hook_that_cannot_find_kgkit_lets_the_commit_through_and_says_so(ws, monkeypatch):
+    f = _hooks(ws) / "pre-commit"
+    f.write_text(f.read_text().replace(RG._sh_path(RG.KGKIT_HOME), "/no/such/plugin"))
+    monkeypatch.setenv("PATH", os.pathsep.join(p for p in os.environ["PATH"].split(os.pathsep)
+                                               if not (Path(p) / "kgkit").exists()))
+    git(ws, "add", "-f", "data/train.csv")
+    r = git(ws, "commit", "-qm", "data", check=False)
+    assert r.returncode == 0 and "repo guard did not run" in r.stderr

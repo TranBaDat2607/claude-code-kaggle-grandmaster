@@ -282,6 +282,7 @@ def main() -> None:
                      "the kaggle-grandmaster skills the current task needs.")
     root = C.workspace(payload)
     if root is not None:
+        C.RG.refresh_hooks(root)  # a plugin update moved kgkit: the git hooks follow it
         b = brief(root)
         if b:
             parts.append(b)

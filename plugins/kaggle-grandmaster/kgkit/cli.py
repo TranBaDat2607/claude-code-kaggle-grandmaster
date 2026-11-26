@@ -234,6 +234,9 @@ def cmd_init(a):
     if added and existed:
         print(f"added {len(added)} pattern(s) to .gitignore ({', '.join(added[:6])}{' ...' if len(added) > 6 else ''}): "
               "competition data, outputs, logs and credentials stay out of git")
+    if (root / ".git").exists() or RG.toplevel(root) is not None:
+        for note in RG.install_hooks(root):
+            print(f"git hooks: {note}")
     tmpl = _plugin_file("templates/CLAUDE.competition.md")
     cm = root / "CLAUDE.md"
     if not cm.exists() and tmpl is None:
@@ -335,7 +338,14 @@ def cmd_repo_guard(a):
     if a.action == "install":
         added = RG.ensure_gitignore(root)
         print(f"added {len(added)} pattern(s) to .gitignore" if added else ".gitignore already names them all")
+        notes = RG.install_hooks(root)
+        for note in notes:
+            print(f"git hooks: {note}")
+        if len(notes) < len(RG.HOOKS):
+            print("git hooks: pre-commit and pre-push check your own commits and pushes too")
         return
+    if a.action == "hook":
+        sys.exit(RG._hook_main(a.hook))
     if a.push is not None:
         items, staged_files = RG.pushed(root, a.push or ["HEAD"], a.remote), False
     else:
@@ -3547,9 +3557,11 @@ def build_parser() -> argparse.ArgumentParser:
                                    "not have) would send that must never be public: credentials (by name, or a token "
                                    "inside) and the competition's data (data/, input/, exact copies) exit 1; other "
                                    "never-public files (submissions, predictions, weights, logs, kernel outputs) are "
-                                   "warnings. `install` completes .gitignore. The git hooks and the PreToolUse hook "
-                                   "run the same checks.")
-    s.add_argument("action", choices=["check", "install"])
+                                   "warnings. `install` completes .gitignore and writes the git hooks pre-commit and "
+                                   "pre-push (kgkit init does both); the PreToolUse hook runs the same checks on "
+                                   "Claude's git commands.")
+    s.add_argument("action", choices=["check", "install", "hook"])
+    s.add_argument("hook", nargs="*", help=argparse.SUPPRESS)  # `hook pre-commit|pre-push [remote url]`: as git runs it
     s.add_argument("--dir", default=".")
     s.add_argument("--staged", action="store_true", help="check what `git commit` would record (the default)")
     s.add_argument("--all", action="store_true", help="also the changed tracked files, as `git commit -a`")

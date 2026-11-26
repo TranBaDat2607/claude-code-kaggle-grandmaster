@@ -503,7 +503,8 @@ def parse_gits(payload: dict) -> list[dict]:
             args, where, j = cmd[1:], ".", 0
             while j < len(args) and args[j].startswith("-"):
                 if args[j] == "-C" and j + 1 < len(args):
-                    where = where.rstrip("/") + "/" + args[j + 1] if not Path(args[j + 1]).is_absolute() else args[j + 1]
+                    d = args[j + 1]
+                    where = d if Path(d).is_absolute() else where.rstrip("/") + "/" + d
                     j += 2
                 elif args[j] in GIT_GLOBAL_VALUE:
                     j += 2
