@@ -54,8 +54,8 @@ measured about 3x too small on a binary AUC task.
   fixed before it was scored.
 - Files fitted to the public labels (tilted toward an estimate of them, built from publicly shared scored files;
   tag them `public-lb-fitted`, `kgkit ledger tag <id> public-lb-fitted`) are display entries: not pick 1, and
-  unlike an LB-only blend not even the hedge. Their public edge is mostly fit (reported for a Playground
-  S6E9 2nd place: 0.94945 public, 0.94313 private). `kgkit` keeps them out of best CV, the baseline and the
+  unlike an LB-only blend not even the hedge. Their public edge is mostly fit, and such files have dropped far
+  more from public to private than honest candidates. `kgkit` keeps them out of best CV, the baseline and the
   CV-LB correlation.
 - If both CV and LB agree on a candidate, take it, and hedge with the second-best on a
   different axis.
