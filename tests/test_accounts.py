@@ -409,3 +409,86 @@ def test_with_one_account_nothing_changes(ws, monkeypatch):
     assert G.push(ws, k)["kernel"] == "accb/train-a"
     assert [a[:1] for _, a in fake.calls].count(["quota"]) == 1
 
+
+# ----------------------------------------------------------------------------- private dataset copies
+class WithDatasets(AsAccount):
+    """AsAccount, with accb's private dataset accb/feats (one file) and its copies made under other accounts."""
+
+    def __init__(self, tokens, updated="2026-11-20T10:00:00", fail_create=False, **kw):
+        super().__init__(tokens, **kw)
+        self.updated, self.fail_create, self.made = updated, fail_create, {}
+
+    def __call__(self, args, timeout=600, env=None):
+        who = self.by_token.get((env or {}).get("KAGGLE_API_TOKEN"), "accb")
+        if args[:2] == ["datasets", "list"]:
+            self.calls.append((who, list(args)))
+            owner = args[args.index("--user") + 1]
+            return _cp(json.dumps([{"ref": f"{owner}/feats", "lastUpdated": self.updated}] if owner == "accb" else []))
+        if args[:2] == ["datasets", "download"]:
+            self.calls.append((who, list(args)))
+            if who != "accb":
+                return _cp("", 1, "403 Client Error: Forbidden")
+            dest = Path(args[args.index("-p") + 1])
+            (dest / "sub").mkdir(parents=True, exist_ok=True)
+            (dest / "train_feats.parquet").write_bytes(b"PAR1")
+            (dest / "sub" / "more.npy").write_bytes(b"NPY")
+            return _cp("Downloading feats.zip\n")
+        if args[:2] in (["datasets", "create"], ["datasets", "version"]):
+            folder = Path(args[args.index("-p") + 1])
+            meta = json.loads((folder / "dataset-metadata.json").read_text())
+            self.calls.append((who, list(args), meta["id"], sorted(p.name for p in folder.rglob("*") if p.is_file())))
+            if self.fail_create:
+                return _cp("", 1, "400 Client Error: Bad Request")
+            self.made[meta["id"]] = who
+            return _cp("Dataset version is being created. Please check progress at https://www.kaggle.com/datasets/"
+                       + meta["id"])
+        if args[:2] == ["datasets", "status"]:
+            self.calls.append((who, list(args)))
+            return _cp("ready")
+        return super().__call__(args, timeout, env)
+
+
+def test_a_private_dataset_of_another_account_is_copied_to_the_pushing_one(ws, accounts, monkeypatch, capsys):
+    k = _kernel(ws)
+    meta = json.loads((k / "kernel-metadata.json").read_text())
+    meta["dataset_sources"] = ["accb/feats", "someone/public-ds"]
+    (k / "kernel-metadata.json").write_text(json.dumps(meta))
+    fake = WithDatasets(accounts)
+    monkeypatch.setattr(G, "run_kaggle", fake)
+    rec = G.push(ws, k, account="main")
+    assert rec["kernel"] == "acca/train-a"
+    # downloaded as its owner, uploaded as main: private (no --public), with its folders, the same slug
+    down = [w for w, a, *_ in fake.calls if a[:2] == ["datasets", "download"]]
+    up = [c for c in fake.calls if c[1][:2] == ["datasets", "create"]]
+    assert down == ["accb"] and len(up) == 1
+    who, args, ref, files = up[0]
+    assert who == "acca" and ref == "acca/feats" and "--public" not in args and "--dir-mode" in args
+    assert files == ["dataset-metadata.json", "more.npy", "train_feats.parquet"]
+    assert [w for w, a, *_ in fake.calls if a[:2] == ["datasets", "status"]] == ["acca"]  # ready before the push
+    sources = json.loads((k / "kernel-metadata.json").read_text())["dataset_sources"]
+    assert sources == ["acca/feats", "someone/public-ds"]  # only the registered account's dataset is copied
+    assert "copied accb/feats to acca/feats (private)" in capsys.readouterr().out
+    assert not list((ws / ".kaggle-gm").glob("dataset-copies/*/*"))  # the download is not kept
+    # pushed again unchanged: the copy is reused; once the source changes, a new version of the copy is made
+    meta["dataset_sources"] = ["accb/feats"]
+    (k / "kernel-metadata.json").write_text(json.dumps({**meta, "id": "accb/train-a"}))
+    fake.calls.clear()
+    G.push(ws, k, account="main")
+    assert not any(c[1][:2] in (["datasets", "download"], ["datasets", "create"]) for c in fake.calls)
+    fake.updated = "2026-11-25T08:00:00"
+    (k / "kernel-metadata.json").write_text(json.dumps({**meta, "id": "accb/train-a"}))
+    fake.calls.clear()
+    G.push(ws, k, account="main")
+    assert [c[2] for c in fake.calls if c[1][:2] == ["datasets", "version"]] == ["acca/feats"]
+
+
+def test_a_failed_copy_stops_the_push(ws, accounts, monkeypatch):
+    k = _kernel(ws)
+    meta = json.loads((k / "kernel-metadata.json").read_text())
+    (k / "kernel-metadata.json").write_text(json.dumps({**meta, "dataset_sources": ["accb/feats"]}))
+    fake = WithDatasets(accounts, fail_create=True)
+    monkeypatch.setattr(G, "run_kaggle", fake)
+    with pytest.raises(SystemExit, match="could not copy accb/feats to main"):
+        G.push(ws, k, account="main")
+    assert not any(a[:2] == ["kernels", "push"] for _, a, *_ in fake.calls)
+    assert json.loads((k / "kernel-metadata.json").read_text())["dataset_sources"] == ["accb/feats"]

@@ -1990,9 +1990,119 @@ def readable_inputs(kdir: Path, target: PushTarget, force: bool = False) -> None
                              f"at https://www.kaggle.com/competitions/{slug}/rules, or push it to another account.")
 
 
-def retarget(kdir: Path, kernel: str):
-    """Make ``kdir``'s kernel-metadata.json (and kg-train.json) name ``kernel``, the pushing account's; returns the
-    function that puts the files back as they were."""
+# ----------------------------------------------------------------------------- private dataset copies
+COPIES_FILE = "dataset_copies.json"  # source dataset -> its private copies under other registered accounts
+COPY_READY_S = 1800  # how long a push waits for Kaggle to process a new copy
+
+
+def copies_path(root: Path) -> Path:
+    return root / S.STATE_DIR / COPIES_FILE
+
+
+def dataset_updated(ref: str, env: dict[str, str] | None) -> str | None:
+    """When dataset ``ref`` last changed (its ``lastUpdated``, as the account ``env`` sees it); None when the CLI
+    cannot tell."""
+    owner, slug = ref.split("/", 1)
+    try:
+        r = run_kaggle(["datasets", "list", "--user", owner, "--search", slug, "--format", "json"], timeout=120,
+                       **_env_kw(env))
+    except (OSError, subprocess.SubprocessError):
+        return None
+    text = r.stdout or ""
+    try:
+        rows = json.loads(text[text.find("["):]) if r.returncode == 0 and "[" in text else []
+    except ValueError:
+        return None
+    hit = next((x for x in rows if isinstance(x, dict) and str(x.get("ref", "")).lower() == ref.lower()), None)
+    return str(hit["lastUpdated"]) if hit and hit.get("lastUpdated") else None
+
+
+def _copy_dataset(root: Path, src: str, dst: str, src_env: dict[str, str] | None, dst_env: dict[str, str] | None,
+                  exists: bool) -> str | None:
+    """Download ``src`` as its owner and upload it, private, as ``dst`` (a new dataset, else a new version of it) as
+    the pushing account, then wait until Kaggle has it ready; None when done, else what went wrong."""
+    work = root / S.STATE_DIR / "dataset-copies" / dst.replace("/", "__")
+    if work.exists():
+        shutil.rmtree(work)
+    work.mkdir(parents=True)
+    try:
+        r = run_kaggle(["datasets", "download", src, "-p", str(work), "--unzip", "-q"], timeout=4 * 3600,
+                       **_env_kw(src_env))
+        if r.returncode != 0:
+            return f"downloading it failed: {_cli_failure(r)}"
+        bad = safety.scan_upload(work)
+        if bad:
+            return f"its files look like credentials or links out of the folder ({', '.join(bad[:5])})"
+        (work / "dataset-metadata.json").write_text(json.dumps(
+            {"title": dst.split("/", 1)[1].replace("-", " ")[:50], "id": dst, "licenses": [{"name": "other"}]}),
+            encoding="utf-8")
+        args = (["datasets", "version", "-p", str(work), "-m", f"copy of {src}"] if exists else
+                ["datasets", "create", "-p", str(work)]) + ["--dir-mode", "zip", "-q"]
+        r = run_kaggle(args, timeout=4 * 3600, **_env_kw(dst_env))
+        if r.returncode != 0:
+            return f"uploading it failed: {_cli_failure(r)}"
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+    t0 = time.time()
+    while True:
+        r = run_kaggle(["datasets", "status", dst], timeout=120, **_env_kw(dst_env))
+        status = (r.stdout or "").strip().lower()
+        if r.returncode == 0 and "ready" in status:
+            return None
+        if r.returncode == 0 and ("error" in status or "fail" in status):
+            return f"Kaggle could not process it ({status[:200]})"
+        if time.time() - t0 > COPY_READY_S:
+            return f"Kaggle had not made it ready after {COPY_READY_S // 60} min"
+        time.sleep(15)
+
+
+def copy_private_datasets(root: Path, kdir: Path, target: "PushTarget") -> dict[str, str]:
+    """{source: copy} for the datasets ``kdir`` reads that belong to another registered account than ``target``:
+    each is copied, private, under ``target`` with the same slug (the runner finds an input by its slug), once per
+    version of the source. SystemExit when a copy cannot be made."""
+    try:
+        meta = json.loads((kdir / "kernel-metadata.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    if target.user is None:
+        return {}
+    book = _read_json(copies_path(root))
+    book = book if isinstance(book, dict) else {}
+    out = {}
+    for src in meta.get("dataset_sources") or []:
+        owner = kernel_owner(src)
+        hit = account_of(owner) if owner and owner != target.user else None
+        if hit is None:
+            continue
+        src_env = None if owner == active_user() else account_env(hit[1])
+        dst = f"{target.user}/{src.split('/', 1)[1]}"
+        updated = dataset_updated(src, src_env)
+        prev = (book.get(src) or {}).get(target.user) or {}
+        if prev and (updated is None or prev.get("updated") == updated):
+            out[src] = prev["ref"]
+            print(f"using {prev['ref']}, the private copy of {src} made {prev.get('copied_at')}"
+                  + ("" if updated else " (could not tell whether the source changed since)"))
+            continue
+        print(f"copying {src} to {dst} (private), as {target.label or target.user} cannot read it ...")
+        why = _copy_dataset(root, src, dst, src_env, target.env, bool(prev))
+        if why:
+            raise SystemExit(f"refusing to push {kdir}: it reads {src}, a private dataset of {hit[0]} ({owner}), and "
+                             f"kgkit could not copy {src} to {target.label or target.user}: {why}. Push it as "
+                             f"{hit[0]} (--account {hit[0]}), or make the copy by hand.")
+        book.setdefault(src, {})[target.user] = {"ref": dst, "updated": updated, "copied_at": _iso(_now())}
+        try:
+            copies_path(root).parent.mkdir(parents=True, exist_ok=True)
+            copies_path(root).write_text(json.dumps(book, indent=1), encoding="utf-8")
+        except OSError:
+            pass
+        print(f"copied {src} to {dst} (private)")
+        out[src] = dst
+    return out
+
+
+def retarget(kdir: Path, kernel: str, copies: dict[str, str] | None = None):
+    """Make ``kdir``'s kernel-metadata.json (and kg-train.json) name ``kernel``, the pushing account's, and read the
+    private ``copies`` of datasets in place of their sources; returns the function that puts the files back."""
     saved = {}
     for name, key in (("kernel-metadata.json", "id"), ("kg-train.json", "kernel")):
         p = kdir / name
@@ -2001,9 +2111,14 @@ def retarget(kdir: Path, kernel: str):
             data = json.loads(text)
         except (OSError, ValueError):
             continue
-        if data.get(key) and data[key] != kernel:
+        srcs = data.get("dataset_sources") if name == "kernel-metadata.json" else None
+        new_srcs = [(copies or {}).get(x, x) for x in srcs] if isinstance(srcs, list) else srcs
+        if (data.get(key) and data[key] != kernel) or new_srcs != srcs:
             saved[p] = text
-            data[key] = kernel
+            if data.get(key):
+                data[key] = kernel
+            if new_srcs != srcs:
+                data["dataset_sources"] = new_srcs
             p.write_text(json.dumps(data, indent=1), encoding="utf-8")
     if saved:
         print(f"kernel id set to {kernel} in {kdir.as_posix()} (the account it is pushed as)")
@@ -2154,7 +2269,7 @@ def push(root: str | Path | None, kdir: str | Path, force: bool = False, hours: 
     args = ["kernels", "push", "-p", str(kdir), "-t", str(int(hours * 3600))]
     if acc != "none":
         args += ["--accelerator", acc]
-    undo = retarget(kdir, tm["kernel"])
+    undo = retarget(kdir, tm["kernel"], copy_private_datasets(root, kdir, target))
     r = run_kaggle(args, timeout=900, **_env_kw(target.env))
     out = (r.stdout or "") + (r.stderr or "")
     print(out.strip())
