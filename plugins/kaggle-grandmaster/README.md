@@ -65,7 +65,11 @@ public).
     predictiveness` (which signal predicted private, over all submissions and the strongest, with intervals)
   - `audit-repo`: is competition data in git (every branch, the history, what `git add -A` would commit),
     compared by content with the competition's files on your machine, and is the GitHub remote public? Run
-    by `adopt`; `init` adds `data/` to an existing `.gitignore`
+    by `adopt`
+  - `repo-guard`: what a commit or push would send that must never be public. `init` writes `.gitignore` for
+    what is never code (data, outputs, weights, logs, credentials; not the copies and probes `/kg-showcase` cleans
+    up, which snapshots need) and git hooks that refuse credentials and competition data; the PreToolUse hook
+    checks Claude's own `git add`/`commit`/`push` the same way
 - `templates/`: tabular (GBDTs + linear / kNN / SVM / MLP), image and transformer training, offline inference
   kernel, a notebook cell that reports a session's resources to the pane, workspace CLAUDE.md
 - `evals/`: `claude plugin eval` suite (52 cases)
