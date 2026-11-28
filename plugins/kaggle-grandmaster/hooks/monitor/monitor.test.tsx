@@ -83,8 +83,17 @@ test('session start declares /kaggle-monitor, then /kg-update, before anything e
     return { value: { command: e.name } }
   })
   on('session.start', (_, e) => ({ cwd: e.cwd }))
+  // Nothing else answers here, so the start that runs on after session.start fails at its first look around.
+  let noted = (_: unknown) => {}
+  const note = new Promise<unknown>(resolve => (noted = resolve))
+  on('state.set', ($, e, next) => {
+    if (e.key === 'note') noted(e.value)
+    return next(e)
+  })
   await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
   expect(registered).toEqual(['kaggle-monitor', 'kg-update'])
+  // Waited for, so its note is written while the test runs: past its end the write would be refused.
+  expect(JSON.stringify(await note)).toContain('The monitor could not start')
 })
 
 test('/kg-update runs kgkit.update with the first Python that answers, and shows its text', async ($, on) => {
