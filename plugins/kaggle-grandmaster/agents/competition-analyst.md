@@ -35,7 +35,10 @@ A competition slug (and optionally a workspace path). Data may already be in `da
 4. Pull the top 3–5 public notebooks with `kgkit kernels pull
    <ref> --check-access` (needs a workspace for the competition slug, or pass `--competition <slug>`).
    Read each `ref/<slug>/REVIEW.md` and extract: CV scheme, CV score, LB score, model, key
-   features/tricks, and external inputs that must be checked against the rules.
+   features/tricks, and external inputs that must be checked against the rules. When a notebook's latest
+   version scores below its best on record, `kgkit kernels versions <ref>` shows which version scored it and
+   `kgkit kernels pull <ref> --best` gets that one. Run `kgkit kernels lineage -n 10` first: when several
+   top notebooks share a parent, pull the parent and one descendant, and report the family as one approach.
 5. Identify similar past competitions and their winning ideas (brief; the solution-researcher
    agent goes deeper).
 6. Assess shake-up risk and leak potential, and whether the competition awards medals (Featured /
@@ -51,7 +54,9 @@ pulled notebook's `_local.py`, read the "Before running it locally" lines in its
 ## Output
 Write `reports/recon.md` following the template in the `competition-recon` skill (TL;DR, Metric,
 Data, Rules & constraints, Validation plan, Prior art, Leaks/quirks, Shake-up risk, Initial
-backlog). If `.kaggle-gm/competition.json` exists, update metric, greater_is_better, task,
+backlog), and its rules for the prior-art section: a linked score ladder, each number labelled as Kaggle's
+record, a version or private score, or a title's claim, votes never standing in for rank, and a lineage family
+counted once. If `.kaggle-gm/competition.json` exists, update metric, greater_is_better, task,
 target, id_col, code_competition, runtime_limit_hours, internet_allowed, daily_submissions,
 deadline, external_data_allowed with what you verified.
 

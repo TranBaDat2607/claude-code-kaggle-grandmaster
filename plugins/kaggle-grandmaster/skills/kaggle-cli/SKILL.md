@@ -103,16 +103,24 @@ notebook with its metadata into `ref/<slug>/`, writes a `REVIEW.md` (CV scheme, 
 scores, external inputs, with `--check-access` testing that attached datasets are reachable) and a
 local script with Kaggle paths mapped to the workspace. `kgkit kernels top` lists the competition's top
 notebooks with their public score on record: `kaggle kernels list` has no score field, so kgkit reads
-`best_public_score` from Kaggle's search API (`--no-score` skips it).
+`best_public_score` from Kaggle's search API (`--no-score` skips it). `kaggle kernels pull` gets only the
+latest version: `kgkit kernels versions <ref>` lists every version's score (private once the competition ends)
+and `kernels pull <ref> --best` (or `--version N`) gets that one. Both use Kaggle's internal web API, which can
+change without notice, and say so when it fails. `kgkit kernels inputs <ref>` lists the notebook's other inputs
+(datasets, models, notebook outputs) with their folder under `data/ext/`, whether each is there and its size,
+and writes `ref/<slug>/requirements.txt` (packages it added to Kaggle's image). Tell the user the size and
+download only once they agree: `kgkit kernels inputs <ref> --download --max-gb N` refuses a known total over N
+and stops once N is spent (the plugin's hook asks first).
 
 ## Discussions
 
 CLI 2.2.4+ reads competition forums: `kaggle competitions topics list <slug> --format json -s top -p <n>`
 (20 topics a page; `--page-size` is ignored) and `kaggle competitions topic-messages <slug> <id> --format json
--n -1` (the whole thread, replies flattened). `kgkit discussions sync|top|search|solutions|read`
-wraps both, for active and finished competitions (`discussions solutions --competition <slug>` for
-write-ups). `--source meta` reads Meta Kaggle instead (`kaggle/meta-kaggle`, Kaggle's daily export, ~245 MB,
-cached in `~/.kaggle-gm/meta-kaggle`): it leaves `ForumId` empty for every competition that has not ended,
+-n -1` (the whole thread, replies flattened). `kgkit discussions sync|top|search|solutions|writeup|read`
+wraps both, for active and finished competitions. The Writeups tab is not in the CLI: `discussions solutions
+--competition <slug>` ranks its write-ups by the leaderboard (internal web API) and `discussions writeup <rank>`
+prints one's markdown. `--source meta` reads Meta Kaggle instead (`kaggle/meta-kaggle`, Kaggle's daily export,
+~245 MB, cached in `~/.kaggle-gm/meta-kaggle`): it leaves `ForumId` empty for every competition that has not ended,
 so it only serves finished competitions. Windows: piped CLI output is cp1252 and the CLI dies at the first
 emoji in a title, so set `PYTHONIOENCODING=utf-8` when parsing its output yourself (kgkit does). The title must slugify
 to the id's slug. `kaggle kernels output` pages through all output files (`--page-size 200` means fewer

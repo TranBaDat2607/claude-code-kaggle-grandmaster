@@ -8,6 +8,8 @@ This repo is a Claude Code marketplace (`.claude-plugin/marketplace.json`) conta
   instead of 7 on 12 cores; drop `-n auto` for one process; template tests need torch/timm/transformers; LightGBM
   test is skipped if absent)
 - Validate manifests/skills/agents: `claude plugin validate plugins/kaggle-grandmaster`
+- Install path (marketplace install into a temp project, own Claude config dir; the `install` CI job runs it on
+  Linux and Windows): `KGKIT_INSTALL_TEST=1 python -m pytest tests/test_install.py -q`
 - Inventory + token cost: `claude --plugin-dir plugins/kaggle-grandmaster plugin details kaggle-grandmaster`
 - Evals (see `plugins/kaggle-grandmaster/evals/README.md`), from `plugins/kaggle-grandmaster`:
   advice cases, any OS incl. native Windows: `claude plugin eval . --tag portable --model haiku --judge-model sonnet --no-publish`;
@@ -19,7 +21,7 @@ This repo is a Claude Code marketplace (`.claude-plugin/marketplace.json`) conta
   `kgkit/evalset.py`, `kgkit/finals.py`, `kgkit/audit.py`, `kgkit/progress.py`, `kgkit/speedcheck.py`, `kgkit/bench.py`,
   `kgkit/snapshot.py`, `kgkit/layout.py`, `kgkit/repoguard.py`, `kgkit/filelock.py`, `kgkit/grind.py`, `kgkit/permissions.py`, `kgkit/journey.py`, `kgkit/monitor.py`, `kgkit/kaggle_monitor_cell.py`, `kgkit/localrun.py`, `kgkit/vault.py` (at import time: numpy and pandas only inside its functions),
   `kgkit/kaggle_gpu_runner.py` and everything under `hooks/` must stay **standard-library only** (hooks import them, the runner executes inside Kaggle; they must be fast and never fail closed).
-  `kgkit/kaggle_search.py`, `kgkit/kaggle_submissions.py`, `kgkit/kaggle_outputs.py` and `kgkit/kaggle_cli.py` too, at import time: they run under the Kaggle CLI's
+  `kgkit/kaggle_search.py`, `kgkit/kaggle_submissions.py`, `kgkit/kaggle_outputs.py`, `kgkit/kaggle_web.py` and `kgkit/kaggle_cli.py` too, at import time: they run under the Kaggle CLI's
   interpreter, which may have nothing else installed (they import kagglesdk / the CLI inside `main`).
 - kgkit reads no file outside `kgkit/` that a command needs: `kgkit vendor` copies only the package (into a
   project's `src/`, or a Kaggle dataset), and every command must work from such a copy with files of the copy's
@@ -36,7 +38,8 @@ This repo is a Claude Code marketplace (`.claude-plugin/marketplace.json`) conta
   reads both too): change all of them together.
 - Hooks exit 0 on any internal error; only deny/ask for credentials (printed, or in an upload folder), invalid or
   byte-identical repeat submissions, an exhausted daily budget, a GPU push that the cached weekly GPU quota
-  cannot cover, a read of the sealed vault's labels (`~/.kaggle-gm/vault/`, `kgkit.vault.names_vault`: a
+  cannot cover, a download of a public notebook's inputs (`kgkit kernels inputs --download`: ask, naming its
+  --max-gb), a read of the sealed vault's labels (`~/.kaggle-gm/vault/`, `kgkit.vault.names_vault`: a
   command naming it, `hooks/pre_file.py` for the file tools), or a `git add`/`commit`/`push` that would send
   credentials or competition data (deny) or other never-public files (ask; `kgkit/repoguard.py`, whose lists the
   git hooks share).

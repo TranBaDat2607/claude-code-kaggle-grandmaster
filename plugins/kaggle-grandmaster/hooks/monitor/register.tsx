@@ -824,6 +824,20 @@ async function init($: EngineInterface, dir: string) {
 }
 
 /**
+ * Says on the pane why a start or restart failed. It never rejects: the start runs on after session.start has
+ * answered, so this copy of the module may have unloaded by now (a reload, the plugin turned off, a test's end),
+ * and its every `$` call then rejects with no one left to catch it.
+ */
+async function startFailed($: EngineInterface, what: 'start' | 'restart', text: string) {
+  try {
+    $.ui.log(`kaggle-monitor: ${what} failed: ${text}`, { to: 'debug' })
+    await say($, text, true)
+  } catch {
+    // unloaded: nobody to tell, and the next copy starts afresh
+  }
+}
+
+/**
  * Sets the mod up again for the session that took over this process. Its pane starts empty (the host
  * held the old one's state); the accounts, kernels, readings and the poll come back as at a start.
  */
@@ -839,10 +853,7 @@ function restart($: EngineInterface, dir: string): Promise<void> {
     await $.command.register(UPDATE_COMMAND).catch(() => undefined)
     await init($, dir || cwd)
   })()
-    .catch(async err => {
-      $.ui.log(`kaggle-monitor: restart failed: ${String(err)}`, { to: 'debug' })
-      await say($, `The monitor could not start again: ${String(err)}`, true)
-    })
+    .catch(err => startFailed($, 'restart', `The monitor could not start again: ${String(err)}`))
     .finally(() => {
       restarting = undefined
     })
@@ -857,10 +868,7 @@ export const register: Register = on => {
     // The command first: nothing below may keep it from being declared.
     await $.command.register(COMMAND)
     await $.command.register(UPDATE_COMMAND).catch(err => $.ui.log(`kg-update: not declared: ${String(err)}`, { to: 'debug' }))
-    void init($, e.cwd).catch(async err => {
-      $.ui.log(`kaggle-monitor: start failed: ${String(err)}`, { to: 'debug' })
-      await say($, `The monitor could not start: ${String(err)}`, true)
-    })
+    void init($, e.cwd).catch(err => startFailed($, 'start', `The monitor could not start: ${String(err)}`))
     return started
   })
 

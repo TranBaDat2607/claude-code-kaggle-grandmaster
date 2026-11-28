@@ -50,7 +50,8 @@ workspace docs: the endgame often left them wrong.
    risky components helped or hurt, and how big was the shake-up for us and at the top of the LB
    (`kaggle competitions leaderboard <slug> --show`)?
 4. `kgkit discussions sync` (live, so write-ups posted today are included), then
-   `kgkit discussions solutions`. Launch `solution-researcher` with those thread ids to
+   `kgkit discussions solutions` (write-ups ranked by the private leaderboard; read one with
+   `kgkit discussions writeup <rank> --save`). Launch `solution-researcher` with those ranks and thread ids to
    digest the top-5 write-ups of *this* competition: what did winners do that we didn't? Which of our ideas
    matched theirs?
 5. Write `reports/postmortem.md`: result (from step 2), what predicted private (the table from step 3, with n

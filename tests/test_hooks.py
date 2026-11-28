@@ -830,3 +830,16 @@ def test_push_monitor_only_for_real_calls(plugin_root, cmd, runs):
     sys.path.insert(0, str(plugin_root / "hooks"))
     import _kgmon as K
     assert K.is_call(cmd, cmd.index("kaggle")) is runs
+
+
+def test_inputs_download_asks_with_its_size(plugin_root, tmp_path):
+    out = hook(plugin_root, "pre_tool.py", bash("kgkit kernels inputs me/nb --download --max-gb 18", tmp_path))
+    assert out["permissionDecision"] == "ask"
+    assert "inputs of me/nb" in out["permissionDecisionReason"] and "up to 18 GB" in out["permissionDecisionReason"]
+    out = hook(plugin_root, "pre_tool.py", bash("cd ws && python -m kgkit kernels inputs a/b --max-gb=2 --download",
+                                                tmp_path))
+    assert "up to 2 GB" in out["permissionDecisionReason"]
+    out = hook(plugin_root, "pre_tool.py", bash("kgkit kernels inputs a/b --download", tmp_path))
+    assert "no --max-gb given" in out["permissionDecisionReason"]
+    # listing the sizes downloads nothing: no question
+    assert hook(plugin_root, "pre_tool.py", bash("kgkit kernels inputs me/nb", tmp_path)) is None

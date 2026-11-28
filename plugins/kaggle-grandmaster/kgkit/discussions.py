@@ -14,8 +14,14 @@ that has not ended, so this path only serves finished competitions (post-mortems
     python -m kgkit discussions sync                    # index this competition's topics -> .kaggle-gm/cache/ (git-ignored)
     python -m kgkit discussions top -n 20 --sort votes  # votes | recent | replies | views (views: Meta Kaggle only)
     python -m kgkit discussions search "leak|shake|cv.*lb"
-    python -m kgkit discussions solutions --competition <finished-slug>   # "1st place solution" write-ups
+    python -m kgkit discussions solutions --competition <finished-slug>   # write-ups, ranked by the leaderboard
+    python -m kgkit discussions writeup 1 --competition <finished-slug>   # one write-up's markdown (or topic:<id>)
     python -m kgkit discussions read <topic_id>         # full thread
+
+``solutions`` reads the competition's Writeups tab through Kaggle's internal web API (``kgkit.kaggle_web``): each
+write-up with its team's rank on the private leaderboard (the public one while the competition runs). When that API
+is unavailable or the tab is empty (competitions from before it), it falls back to matching "Nth place solution"
+in topic titles, which misses write-ups posted only on the tab and says nothing of rank.
 """
 
 from __future__ import annotations
@@ -208,6 +214,59 @@ def search(t: pd.DataFrame, pattern: str) -> pd.DataFrame:
 def solutions(t: pd.DataFrame) -> pd.DataFrame:
     """Write-up threads ("1st place solution", "gold solution", ...), best-voted first."""
     return t[t["Title"].str.contains(SOLUTION_RX, na=False)].sort_values("Score", ascending=False)
+
+
+def leaderboard_writeups(slug: str) -> tuple[list[dict], str, str | None]:
+    """The competition's write-ups from its Writeups tab, ranked by the leaderboard (``kgkit.kaggle_web``): (rows,
+    which board ranked them, why they are unavailable or None). A title search misses write-ups posted only there
+    and tells nothing of rank."""
+    from . import kaggle_web
+
+    res = kaggle_web.run({"op": "writeups", "competition": slug})
+    if res.get("error"):
+        return [], "none", res["error"]
+    return list(res.get("writeups") or []), str(res.get("ranked_by") or "none"), None
+
+
+def format_writeups(rows: list[dict], by: str) -> str:
+    score = {"private": "private score", "public": "public score"}.get(by, "score")
+    lines = [f"| rank | team | {score} | medal | topic | url |", "|---|---|---|---|---|---|"]
+    for r in rows:
+        lines.append(f"| {r.get('rank') if r.get('rank') is not None else '-'} | {r.get('team', '')} | "
+                     f"{r.get('score') or '-'} | {r.get('medal') or '-'} | {r.get('topic_id') or '-'} | {r['url']} |")
+    return "\n".join(lines)
+
+
+def writeup(slug: str, which: str) -> dict:
+    """One write-up's source markdown: ``which`` is a leaderboard rank (``3``) or a forum topic id
+    (``topic:618866``). Returns the topic (``kaggle_web.topic``) plus ``rank``/``team``; raises SystemExit with the
+    reason when it cannot be read."""
+    from . import kaggle_web
+
+    row: dict = {}
+    if which.lower().startswith("topic:"):
+        tid = int(which.split(":", 1)[1])
+    else:
+        rows, by, err = leaderboard_writeups(slug)
+        if err:
+            raise SystemExit(f"write-ups unavailable ({err}); `kgkit discussions solutions` falls back to a title "
+                             "search of the forum, and `discussions read <id>` prints a thread")
+        rank = int(which)
+        row = next((r for r in rows if r.get("rank") == rank), {})
+        if not row:
+            have = ", ".join(str(r["rank"]) for r in rows if r.get("rank") is not None) or "none"
+            raise SystemExit(f"no write-up at rank {rank} on the {by} leaderboard (ranks with one: {have})")
+        if not row.get("topic_id"):
+            raise SystemExit(f"rank {rank}'s write-up has no forum topic to read: {row['url']}")
+        tid = int(row["topic_id"])
+    t = kaggle_web.run({"op": "topic", "topic_id": tid})
+    if t.get("error"):
+        raise SystemExit(f"write-up topic {tid} unavailable ({t['error']}); read it at "
+                         f"{row.get('url') or f'https://www.kaggle.com/competitions/{slug}/discussion/{tid}'}")
+    if not t.get("markdown"):
+        raise SystemExit(f"topic {tid} is not a write-up (no write-up text): `kgkit discussions read {tid}`")
+    return {**t, "topic_id": tid, "rank": row.get("rank"), "team": row.get("team"),
+            "url": t.get("url") or row.get("url") or ""}
 
 
 def _strip_html(s: str) -> str:

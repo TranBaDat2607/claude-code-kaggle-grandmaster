@@ -17,9 +17,12 @@ description (domain, data type, metric, constraints), find what actually won in 
    solution`, `site:kaggle.com/competitions "<task>" "solution"`, `"<metric>" kaggle winning
    solution`, GitHub `<competition-name> 1st place`, and arXiv papers by winning teams. Aim for
    5–10 relevant competitions across recent years (newer techniques dominate in DL domains).
-   Once you know a past competition's slug, list its write-ups directly from its forum:
-   `kgkit discussions solutions --competition <past-slug>` (thread ids,
-   votes, URLs; `discussions read <id> --competition <past-slug>` prints a whole thread).
+   Once you know a past competition's slug, list its write-ups:
+   `kgkit discussions solutions --competition <past-slug>` (the Writeups tab ranked by the final
+   leaderboard; a title search of the forum when that tab is empty or unavailable). Read one with
+   `discussions writeup <rank> --competition <past-slug>` (its source markdown), a forum thread with
+   `discussions read <id> --competition <past-slug>`. Say which ranks you read: a 1st-place recipe and a
+   40th-place one are different evidence.
 3. For each, extract from the top 1–5 write-ups: validation scheme, models/backbones, key
    features or data processing, training tricks, post-processing, ensembling, what *didn't* work,
    compute used.
@@ -38,4 +41,6 @@ Write `reports/prior-art.md` (if a workspace exists) and return:
 - Recurring winning techniques ranked by (expected gain × applicability) / cost, each with a
   concrete first experiment to test it here.
 - Pitfalls reported by winners (validation traps, shake-ups, leaks).
-Always include links; flag uncertainty when a write-up could not be fetched directly.
+Always include links; flag uncertainty when a write-up could not be fetched directly. Give the rank of each
+write-up you used (from `kgkit discussions solutions`) and only numbers you read in this run's sources: a
+recipe without a source, or a score from memory, does not go in the table.

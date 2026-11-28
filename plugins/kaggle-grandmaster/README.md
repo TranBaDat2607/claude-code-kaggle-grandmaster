@@ -72,7 +72,7 @@ public).
     checks Claude's own `git add`/`commit`/`push` the same way
 - `templates/`: tabular (GBDTs + linear / kNN / SVM / MLP), image and transformer training, offline inference
   kernel, a notebook cell that reports a session's resources to the pane, workspace CLAUDE.md
-- `evals/`: `claude plugin eval` suite (52 cases)
+- `evals/`: `claude plugin eval` suite (57 cases)
 
 ## Data and network access
 

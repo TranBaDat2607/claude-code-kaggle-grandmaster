@@ -89,7 +89,9 @@ score, you're overfitting the blend — use fewer models, simpler weights, or pl
   honest scoring choose. Either way, save OOF + test predictions for *every* experiment, including
   failed ones. A model that loses alone can still add to the blend.
 - Teammates' and public notebooks' predictions join through `kgkit ledger import` (CV recomputed on
-  the shared folds); see `competition-strategy` for the merge protocol.
+  the shared folds); see `competition-strategy` for the merge protocol. Top public notebooks are often
+  re-blends of the same two or three sources: `kgkit kernels lineage` groups them by shared parent, and
+  one family counts as one candidate until OOF correlation says otherwise.
 - Audit public OOF files before stacking them. A notebook that early-stops (or picks its epoch, iteration count
   or threshold) on the same fold it reports OOF predictions for has an optimistic OOF. A stacker then gives it
   weight it has not earned (in one Playground, about +2e-4 of fake OOF gain). Read its training loop: an

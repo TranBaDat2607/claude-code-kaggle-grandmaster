@@ -23,6 +23,8 @@
    file), and asks before one that would send other never-public files (outputs, weights, logs, kernel outputs,
    a submission file). A push is checked on every file version its commits send. The git hooks that `kgkit init`
    installs run the same checks for the user's own commits.
+8. Before `kgkit kernels inputs <ref> --download`: asks, naming the notebook and the --max-gb limit, so the user
+   agrees to the size before a public notebook's datasets, models and outputs (often many GB) are downloaded.
 6. Blocks a command that names the sealed vault's folder (~/.kaggle-gm/vault/, kgkit.vault): its labels must never
    reach the agent. `kgkit vault check` reads them itself and names no path. (hooks/pre_file.py guards the file
    tools.)
@@ -158,6 +160,28 @@ def upload_guard(payload: dict, up: dict) -> bool:
                                     "\nMove them out of the folder or add --ignore-patterns. If they really are "
                                     "meant to be published, the user can run the command themselves.")
     return True
+
+
+INPUTS_RX = re.compile(r"\bkgkit\s+kernels\s+inputs\b([^;&|\n]*)")
+
+
+def inputs_download_guard(cmd: str) -> bool:
+    """Ask before `kgkit kernels inputs <ref> --download`; True when it emitted a decision."""
+    for m in INPUTS_RX.finditer(strip_text_heredocs(cmd)):
+        args = m.group(1).split()
+        if "--download" not in args:
+            continue
+        gb = next((a.split("=", 1)[1] for a in args if a.startswith("--max-gb=")), None)
+        if gb is None and "--max-gb" in args and args.index("--max-gb") + 1 < len(args):
+            gb = args[args.index("--max-gb") + 1]
+        ref = next((a for a in args if not a.startswith("-") and "/" in a), "a public notebook")
+        limit = f"up to {gb} GB" if gb else "no --max-gb given, so kgkit will refuse"
+        decide(permissionDecision="ask",
+               permissionDecisionReason=f"kaggle-grandmaster: this downloads the inputs of {ref} (datasets, models, "
+                                        f"notebook outputs) into data/ext/: {limit}. `kgkit kernels inputs {ref}` "
+                                        "without --download lists each one's size. Download them?")
+        return True
+    return False
 
 
 def gpu_push_guard(payload: dict, push: dict) -> bool:
@@ -306,6 +330,8 @@ def git_guard(payload: dict) -> bool:
 
 def checks(payload: dict, cmd: str) -> None:
     # One command can chain an upload, a push and a submit: check each until one emits a decision.
+    if inputs_download_guard(cmd):
+        return
     if git_guard(payload):
         return
     up = C.parse_upload(cmd)
