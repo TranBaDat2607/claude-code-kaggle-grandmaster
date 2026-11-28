@@ -119,11 +119,25 @@ choose one "CV-best" and one "LB-best/hedge" final.
 ## Data (files, unit of prediction, size, key columns, split construction)
 ## Rules & constraints (code comp/runtime/internet/external data/limits/deadlines)
 ## Validation plan (scheme, groups, why it mirrors the test split)
-## Prior art (best public notebooks + scores, key discussion insights, similar past comps & winning ideas)
+## Prior art (score ladder, best public notebooks and their families, key discussion insights, similar past comps & winning ideas)
 ## Leaks / quirks
 ## Shake-up risk (low/med/high + reasoning)
 ## Initial backlog (ranked ideas; also stored with `kgkit backlog add`)
 ## Fit for the user's goals (medals awarded? solo-gold candidate? teaming plan; see `competition-strategy`)
 ```
+
+The prior-art section is evidence a reader will act on, so it follows these rules:
+
+- **A score ladder**: baseline -> strong -> top as numbers, each rung linked to the notebook or write-up it came
+  from (`https://www.kaggle.com/code/<owner>/<slug>`, a write-up URL with its rank). It shows the gap to beat.
+- **Say what each number is**: Kaggle's record (best public score), one version's score (public, or private after
+  the deadline), a write-up's private rank, or a title's claim. A claim is never shown as a measurement.
+- **Votes measure attention, not rank.** Rank notebooks by score; when scores were unavailable and you ranked by
+  votes, write that down.
+- **Every number comes from this run's sources**, never from memory or another competition; a technique cites
+  the notebook or thread that shows it.
+- **Count a family once**: notebooks that `kgkit kernels lineage` groups under one parent are one approach.
+- **A plot only with a one-line takeaway** (otherwise drop it): names, never bare ids; measured and claimed
+  values visibly different; the score distribution rather than a wall of names the text never discusses.
 
 Then: `kgkit init <slug> --metric <m> --task <t> --target <col> --id-col <id> [--code-competition --runtime-hours 9 --no-internet] --deadline YYYY-MM-DD`.

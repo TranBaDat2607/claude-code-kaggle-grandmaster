@@ -54,7 +54,9 @@ pulled notebook's `_local.py`, read the "Before running it locally" lines in its
 ## Output
 Write `reports/recon.md` following the template in the `competition-recon` skill (TL;DR, Metric,
 Data, Rules & constraints, Validation plan, Prior art, Leaks/quirks, Shake-up risk, Initial
-backlog). If `.kaggle-gm/competition.json` exists, update metric, greater_is_better, task,
+backlog), and its rules for the prior-art section: a linked score ladder, each number labelled as Kaggle's
+record, a version or private score, or a title's claim, votes never standing in for rank, and a lineage family
+counted once. If `.kaggle-gm/competition.json` exists, update metric, greater_is_better, task,
 target, id_col, code_competition, runtime_limit_hours, internet_allowed, daily_submissions,
 deadline, external_data_allowed with what you verified.
 

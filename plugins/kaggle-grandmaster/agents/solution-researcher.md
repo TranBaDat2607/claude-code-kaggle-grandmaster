@@ -41,4 +41,6 @@ Write `reports/prior-art.md` (if a workspace exists) and return:
 - Recurring winning techniques ranked by (expected gain × applicability) / cost, each with a
   concrete first experiment to test it here.
 - Pitfalls reported by winners (validation traps, shake-ups, leaks).
-Always include links; flag uncertainty when a write-up could not be fetched directly.
+Always include links; flag uncertainty when a write-up could not be fetched directly. Give the rank of each
+write-up you used (from `kgkit discussions solutions`) and only numbers you read in this run's sources: a
+recipe without a source, or a score from memory, does not go in the table.
