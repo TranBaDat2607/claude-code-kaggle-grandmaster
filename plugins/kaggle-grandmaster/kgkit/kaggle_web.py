@@ -3,8 +3,9 @@
 - ``writeups``: the competition's solution write-ups, ranked by the leaderboard (the private one once it exists,
   else the public one), each with its forum topic; the Writeups tab, not a title search.
 - ``topic``: one write-up's source markdown (``rawMarkdown``), not HTML.
-- ``versions``: every version of a notebook with the public score of the submission it made, Kaggle's best score
-  for the notebook (which tells the score direction), and its fork parent.
+- ``versions``: every version of a notebook with the score of the submission it made (the public score while the
+  competition runs, the private one after it ended: each row says which), the competition's score direction, the
+  version Kaggle names as the notebook's best (by public score) and its fork parent.
 - ``source``: the source of one version (``kaggle kernels pull`` only gets the latest).
 - ``view``: a notebook's fork parent, the inputs it mounts and the URL of its Docker image's package list.
 
@@ -150,10 +151,26 @@ def view(post, ref: str) -> dict:
             "current_version": v.get("currentVersionNumber"), "title": (v.get("kernel") or {}).get("title") or ""}
 
 
-def versions(post, ref: str, max_versions: int = MAX_VERSIONS, budget: float = 90.0) -> dict:
-    """Every version of ``ref`` (newest ``max_versions`` scored) with the public score of its submission."""
+def notebook_competition(view: dict) -> str | None:
+    """The slug of the competition a notebook mounts (its data source with no type), None when it mounts none."""
+    for d in view.get("dataSources") or []:
+        if not d.get("sourceType") and d.get("mountSlug"):
+            return str(d["mountSlug"])
+    return None
+
+
+def versions(post, ref: str, max_versions: int = MAX_VERSIONS, budget: float = 90.0,
+             competition: str | None = None) -> dict:
+    """Every version of ``ref`` (newest ``max_versions`` scored) with the score of its submission."""
     end = time.monotonic() + budget
     first = _view(post, ref)
+    competition = competition or notebook_competition(first)
+    is_max = None
+    if competition:
+        try:
+            is_max = competition_id(post, competition)[1]
+        except WebError:
+            pass
     kid = int(first["kernel"]["id"])
     total = int(first.get("totalVersionCount") or 0)
     items = (post(LIST_VERSIONS, {"kernelId": kid, "sortOption": "VERSION_ID",
@@ -164,7 +181,7 @@ def versions(post, ref: str, max_versions: int = MAX_VERSIONS, budget: float = 9
         if ver.get("versionNumber") and run_.get("id"):
             rows.append({"version": int(ver["versionNumber"]), "name": ver.get("versionName") or "",
                          "status": str(run_.get("status") or "").lower(), "date": run_.get("dateCreated") or "",
-                         "session_id": int(run_["id"]), "score": None, "scored": False})
+                         "session_id": int(run_["id"]), "score": None, "private": None, "scored": False})
     rows.sort(key=lambda r: -r["version"])
     for r in rows[:max_versions]:
         if time.monotonic() >= end:
@@ -174,15 +191,21 @@ def versions(post, ref: str, max_versions: int = MAX_VERSIONS, budget: float = 9
         except WebError:
             continue
         r["score"], r["scored"] = sub.get("scoreFormatted") or None, True
+        r["private"] = bool(sub.get("scoreIsPrivate")) if r["score"] else None
     best = (first.get("bestSubmissionScore") or {})
     return {"ref": ref, "title": first["kernel"].get("title") or "", "total": total or len(rows),
+            "competition": competition, "greater_is_better": is_max,
             "best": best.get("scoreFormatted") or None, "best_version": best.get("kernelVersionNumber"),
+            "best_public": (first.get("kernel") or {}).get("bestPublicScore"),
             "fork_parent": fork_parent(first), "versions": rows}
 
 
 def direction(rows: list[dict], best: str | None) -> bool | None:
     """Whether a higher score is better, read off Kaggle's best score for the notebook: True when it is the highest
-    version score, False when it is the lowest, None when that cannot be told (fewer than two distinct scores)."""
+    version score, False when it is the lowest, None when that cannot be told (fewer than two distinct scores, or
+    private scores: Kaggle's best is picked by public score, so a private score says nothing of direction)."""
+    if any(r.get("private") for r in rows):
+        return None
     scores = [score_num(r.get("score")) for r in rows]
     scores = [s for s in scores if s is not None]
     b = score_num(best)
@@ -214,7 +237,7 @@ def handle(req: dict, post, post_text) -> dict:
         return topic(post, int(req["topic_id"]))
     if op == "versions":
         return versions(post, str(req["ref"]), int(req.get("max_versions") or MAX_VERSIONS),
-                        float(req.get("budget") or 90))
+                        float(req.get("budget") or 90), req.get("competition"))
     if op == "view":
         return view(post, str(req["ref"]))
     if op == "source":

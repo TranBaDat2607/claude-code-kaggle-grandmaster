@@ -263,3 +263,70 @@ def test_read_falls_back_to_a_writeup_topic(ws, monkeypatch, capsys):
     cli.main(["discussions", "read", "613305"])
     out = capsys.readouterr().out
     assert 'source="kaggle-web"' in out and "the plan" in out and out.strip().endswith("u://x")
+
+
+# ----------------------------------------------------------------------------- item 2: versions, pull --version/--best
+from kgkit import kernels as K  # noqa: E402
+
+NB = json.dumps({"cells": [{"cell_type": "code", "source": "import pandas as pd\nprint('v2')"}], "metadata": {}})
+
+
+def _versions_res(private=False, is_max=True):
+    rows = [{"version": n, "status": "complete", "date": "2025-01-01", "session_id": 100 + n, "scored": True,
+             "score": s, "private": (private if s else None)} for n, s in ((3, "0.80"), (2, "0.90"), (1, None))]
+    return {"ref": "me/nb", "total": 3, "versions": rows, "best": "0.80", "best_version": 3, "best_public": 0.95,
+            "competition": "c", "greater_is_better": is_max, "fork_parent": "orig/nb"}
+
+
+def test_normalize_ref_takes_urls():
+    assert K.normalize_ref("https://www.kaggle.com/code/me/nb?scriptVersionId=1") == "me/nb"
+    assert K.normalize_ref(" me/nb/ ") == "me/nb"
+
+
+def test_choose_version_uses_the_competition_metric():
+    res = _versions_res()
+    assert K.choose_version(res, version=1)["version"] == 1
+    assert K.choose_version(res, best=True)["version"] == 2
+    assert K.choose_version(_versions_res(is_max=False), best=True)["version"] == 3
+    assert K.choose_version(res, best=True, greater_is_better=False)["version"] == 3  # the workspace's wins
+    with pytest.raises(SystemExit, match=r"no version 9 \(versions: 1, 2, 3\)"):
+        K.choose_version(res, version=9)
+    with pytest.raises(SystemExit, match="pass --version N"):
+        K.choose_version(_versions_res(private=True, is_max=None), best=True)  # private scores tell no direction
+
+
+def test_format_versions_labels_private_scores():
+    out = K.format_versions(_versions_res(private=True))
+    assert "| 2 | 2025-01-01 | complete | 0.90 (private) **best** |" in out
+    assert "version scores are private scores" in out and "forked from: orig/nb" in out
+    assert "higher is better (c's metric)" in out and "Kaggle's best by public score: version 3 (public 0.95)" in out
+    assert "(public) **best**" in K.format_versions(_versions_res())
+
+
+def test_pull_version_replaces_the_latest_source(tmp_path, monkeypatch):
+    def fake_kaggle(args, timeout=300):
+        dest = Path(args[args.index("-p") + 1])
+        (dest / "nb.ipynb").write_text(json.dumps({"cells": [{"cell_type": "code", "source": "print('v3')"}]}))
+        (dest / "kernel-metadata.json").write_text(json.dumps({"code_file": "nb.ipynb", "title": "NB"}))
+        return subprocess.CompletedProcess(args, 0, "", "")
+    reqs = []
+    monkeypatch.setattr(K, "_kaggle", fake_kaggle)
+    monkeypatch.setattr(W, "run", _fake_web({"versions": _versions_res(), "source": {"source": NB}}, reqs))
+    rev = K.pull("https://www.kaggle.com/code/me/nb", tmp_path, "c", best=True)
+    d = tmp_path / "nb"
+    assert "print('v2')" in (d / "nb_local.py").read_text(encoding="utf-8")
+    assert sorted(p.name for p in d.iterdir()) == ["REVIEW.md", "kernel-metadata.json", "nb.ipynb", "nb_local.py"]
+    review = (d / "REVIEW.md").read_text(encoding="utf-8")
+    assert "**This copy**: version 2, not the latest (version 3); its public score: 0.90" in review
+    assert rev["version"]["version"] == 2 and reqs[0] == {"op": "versions", "ref": "me/nb", "budget": 90,
+                                                          "competition": "c"}
+    reqs.clear()
+    K.pull("me/nb", tmp_path, "c", version=3)  # the latest: nothing to replace
+    assert [r["op"] for r in reqs] == ["versions"] and "v3" in (d / "nb_local.py").read_text(encoding="utf-8")
+
+
+def test_pull_version_stops_before_pulling_when_versions_are_unavailable(tmp_path, monkeypatch):
+    monkeypatch.setattr(K, "_kaggle", lambda *a, **k: pytest.fail("pulled"))
+    monkeypatch.setattr(W, "run", _fake_web({}))
+    with pytest.raises(SystemExit, match=r"versions of me/nb unavailable \(HTTP 403\)"):
+        K.pull("me/nb", tmp_path, version=2)

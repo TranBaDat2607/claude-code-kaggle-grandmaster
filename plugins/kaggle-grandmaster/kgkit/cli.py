@@ -2802,13 +2802,26 @@ def cmd_kernels(a):
             print(K.TOP_LEGEND + (f"\npublic scores unknown: {err}" if err else ""))
         print(f"\nnext: python -m kgkit kernels pull <ref>{_competition_flag(st, slug)}   (review + local script "
               "under ref/)")
+    elif a.action == "versions":
+        if not a.ref:
+            raise SystemExit("usage: kernels versions <owner/slug>")
+        a.ref = K.normalize_ref(a.ref)
+        res = K.versions(a.ref, a.competition)
+        gib = st.greater_is_better if st and slug and st.slug == slug else None
+        print(SF.UNTRUSTED_NOTE)
+        print(SF.wrap(K.format_versions(res, gib), "kaggle-web", ref=a.ref, view="versions"))
+        print(f"\npull one: python -m kgkit kernels pull {a.ref} --version N   (or --best: the best public score)")
     elif a.action in ("pull", "review"):
         if not a.ref:
             raise SystemExit(f"usage: kernels {a.action} <owner/slug>")
+        a.ref = K.normalize_ref(a.ref)
         holdout = bool(st and st.holdout)
         if a.action == "pull":
+            if a.version is not None and a.best:
+                raise SystemExit("--version and --best: give one")
+            gib = st.greater_is_better if st and slug and st.slug == slug else None
             rev = K.pull(a.ref, a.dest, slug, check_access=a.check_access, holdout=holdout,
-                         score_lookup=not a.no_score)
+                         score_lookup=not a.no_score, version=a.version, best=a.best, greater_is_better=gib)
         else:
             rev = K.analyse_dir(Path(a.dest) / a.ref.split("/")[-1], a.ref, slug, check_access=a.check_access,
                                 holdout=holdout, score_lookup=not a.no_score)
@@ -3850,8 +3863,8 @@ def build_parser() -> argparse.ArgumentParser:
     s.set_defaults(fn=cmd_speedcheck)
 
     s = sub.add_parser("kernels", help="study and reproduce public notebooks")
-    s.add_argument("action", choices=["top", "pull", "review"])
-    s.add_argument("ref", nargs="?", help="owner/slug (pull, review)")
+    s.add_argument("action", choices=["top", "versions", "pull", "review"])
+    s.add_argument("ref", nargs="?", help="owner/slug or its Kaggle URL (versions, pull, review)")
     s.add_argument("--competition", help="default: competition.json slug")
     s.add_argument("-n", type=int, default=20)
     s.add_argument("--sort-by", default="voteCount",
@@ -3859,6 +3872,9 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--dest", default="ref")
     s.add_argument("--check-access", action="store_true", help="check attached datasets are accessible")
     s.add_argument("--no-score", action="store_true", help="skip the public-score lookup (Kaggle search API)")
+    s.add_argument("--version", type=int, help="pull: this version instead of the latest (Kaggle's web API)")
+    s.add_argument("--best", action="store_true",
+                   help="pull: the version with the best public score (Kaggle's web API)")
     s.set_defaults(fn=cmd_kernels)
 
     s = sub.add_parser("blend", help="blend ledger experiments")

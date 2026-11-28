@@ -103,7 +103,10 @@ notebook with its metadata into `ref/<slug>/`, writes a `REVIEW.md` (CV scheme, 
 scores, external inputs, with `--check-access` testing that attached datasets are reachable) and a
 local script with Kaggle paths mapped to the workspace. `kgkit kernels top` lists the competition's top
 notebooks with their public score on record: `kaggle kernels list` has no score field, so kgkit reads
-`best_public_score` from Kaggle's search API (`--no-score` skips it).
+`best_public_score` from Kaggle's search API (`--no-score` skips it). `kaggle kernels pull` gets only the
+latest version; `kgkit kernels versions <ref>` lists every version's score (public while the competition runs,
+private after it) and `kernels pull <ref> --best` (or `--version N`) gets that version's source. Both go
+through Kaggle's internal web API, which can change without notice: when it fails they say so.
 
 ## Discussions
 

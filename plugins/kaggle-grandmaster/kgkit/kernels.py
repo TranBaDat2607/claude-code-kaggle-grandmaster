@@ -3,6 +3,8 @@
     python -m kgkit kernels top -n 20                 # top-voted notebooks of this competition
     python -m kgkit kernels top --sort-by scoreDescending   # best public score first
     python -m kgkit kernels pull <owner>/<slug>       # pull + review + local script, under ref/<slug>/
+    python -m kgkit kernels versions <owner>/<slug>   # every version's public score (Kaggle's web API)
+    python -m kgkit kernels pull <owner>/<slug> --best        # the best-scoring version, not the latest (or --version N)
 
 ``top`` and the review show each notebook's public score as Kaggle records it: the best public score across its
 versions, from Kaggle's search API (``kgkit.kaggle_search``; ``kaggle kernels list`` has no score field). A score
@@ -330,7 +332,10 @@ def format_review(ref: str, rev: dict, holdout: bool = False) -> str:
     else:
         lines.append("- No shell, network, credential-path, dynamic-code or folder-deleting lines found (a pattern scan, "
                      "not a guarantee).")
-    lines += ["", public_line(ref, rev.get("public")), "", "## Checklist", "",
+    lines += ["", public_line(ref, rev.get("public"))]
+    if rev.get("version"):
+        lines += ["", version_line(ref, rev["version"])]
+    lines += ["", "## Checklist", "",
               "- [ ] Read the lines above before running the local script",
               "- [ ] External inputs are public, allowed by the rules, and accessible (private/deleted ones block reproduction)"]
     if infer:
@@ -350,13 +355,25 @@ def format_review(ref: str, rev: dict, holdout: bool = False) -> str:
     return "\n".join(lines) + "\n"
 
 
+def version_line(ref: str, v: dict) -> str:
+    """REVIEW.md's line on which version this copy is, when one other than the latest was asked for."""
+    which = "the latest" if v["version"] == v.get("latest") else f"not the latest (version {v.get('latest')})"
+    kind = "private" if v.get("private") else "public"
+    return (f"**This copy**: version {v['version']}, {which}; its {kind} score: {v.get('score') or 'none on record'}"
+            f" (Kaggle's best version by public score: {v.get('best_version') or 'none'}). Attached inputs above are "
+            f"listed from the "
+            f"latest version's metadata: check that version {v['version']} used the same ones "
+            f"(https://www.kaggle.com/code/{ref}?scriptVersionId={v['session_id']}).")
+
+
 def public_line(ref: str, pub: dict | None) -> str:
     """REVIEW.md's public-score line: Kaggle's record (``rev["public"]``), or where to read it."""
     url = f"https://www.kaggle.com/code/{ref}"
     pub = pub or {}
     if pub.get("found") and pub.get("score") is not None:
         line = (f"Public score on record: {fmt_score(pub['score'])} (Kaggle's best public score across its versions; "
-                f"the version you fork may score differently: {url}).")
+                f"the version you fork may score differently: `kgkit kernels versions {ref}` lists each one's, "
+                f"`kernels pull {ref} --best` gets the best: {url}).")
     elif pub.get("found"):
         line = f"Public score on record: none (no version of it has a public score): {url}."
     else:
@@ -367,19 +384,138 @@ def public_line(ref: str, pub: dict | None) -> str:
     return line
 
 
+def normalize_ref(ref: str) -> str:
+    """``owner/slug`` of a notebook ref or Kaggle URL (``https://www.kaggle.com/code/<owner>/<slug>?...``)."""
+    from .kaggle_web import code_ref
+
+    ref = str(ref).strip()
+    return code_ref(ref) if "/code/" in ref else ref.strip("/")
+
+
+def versions(ref: str, competition: str | None = None) -> dict:
+    """Every version of ``ref`` with the score of its submission (``kaggle_web`` ``versions``); raises SystemExit
+    with the reason when Kaggle's web API cannot answer."""
+    from . import kaggle_web
+
+    res = kaggle_web.run({"op": "versions", "ref": ref, "budget": 90, "competition": competition}, timeout=120)
+    if res.get("error"):
+        raise SystemExit(f"versions of {ref} unavailable ({res['error']}): `kaggle kernels pull` gets only the "
+                         f"latest; the website lists the others: https://www.kaggle.com/code/{ref}/log")
+    return res
+
+
+def score_direction(res: dict, greater_is_better: bool | None) -> tuple[bool | None, str]:
+    """(whether a higher score is better, where that came from): the workspace's metric when given, else the
+    competition's (Kaggle's metric record), else read off Kaggle's best score for the notebook."""
+    from . import kaggle_web
+
+    if greater_is_better is not None:
+        return greater_is_better, "the workspace's metric"
+    if res.get("greater_is_better") is not None:
+        return bool(res["greater_is_better"]), f"{res.get('competition') or 'the competition'}'s metric"
+    d = kaggle_web.direction(res.get("versions") or [], res.get("best"))
+    return d, ("Kaggle's best score for the notebook" if d is not None else "unknown")
+
+
+def choose_version(res: dict, version: int | None = None, best: bool = False,
+                   greater_is_better: bool | None = None) -> dict:
+    """The version row to pull: ``version``, or with ``best`` the one with the best public score."""
+    from . import kaggle_web
+
+    rows = res.get("versions") or []
+    if version is not None:
+        row = next((r for r in rows if r["version"] == int(version)), None)
+        if row is None:
+            have = ", ".join(str(r["version"]) for r in sorted(rows, key=lambda r: r["version"])) or "none"
+            raise SystemExit(f"{res.get('ref')} has no version {version} (versions: {have})")
+        return row
+    d, _ = score_direction(res, greater_is_better)
+    if d is None:
+        raise SystemExit("cannot tell whether a higher or a lower score is better for this notebook (fewer than two "
+                         "distinct version scores, or Kaggle names no best one): pass --version N "
+                         "(`kgkit kernels versions <ref>` lists them)")
+    row = kaggle_web.pick_best(rows, d)
+    if row is None:
+        raise SystemExit(f"no version of {res.get('ref')} has a public score on record: pass --version N")
+    return row
+
+
+def format_versions(res: dict, greater_is_better: bool | None = None) -> str:
+    from . import kaggle_web
+
+    d, why = score_direction(res, greater_is_better)
+    best = kaggle_web.pick_best(res.get("versions") or [], d) if d is not None else None
+    lines = ["| version | date | status | score |", "|---|---|---|---|"]
+    for r in res.get("versions") or []:
+        score = (f"{r['score']} ({'private' if r.get('private') else 'public'})" if r.get("score")
+                 else "-" if r.get("scored") else "not looked up")
+        mark = " **best**" if best is not None and r is best else ""
+        lines.append(f"| {r['version']} | {str(r.get('date') or '')[:10]} | {r.get('status') or '-'} | {score}{mark} |")
+    head = [f"{res.get('ref')}: {res.get('total')} version(s)"
+            + (f"; Kaggle's best by public score: version {res['best_version']}"
+               + (f" (public {res['best_public']})" if res.get("best_public") else "") if res.get("best_version")
+               else "; no scored version on record"),
+            f"score direction: {'higher' if d else 'lower' if d is False else 'unknown'} is better ({why})"]
+    if any(r.get("private") for r in res.get("versions") or []):
+        head.append("the competition has ended: version scores are private scores, so **best** is the best on the "
+                    "private leaderboard (hindsight: study it, do not read it as what the public LB favoured)")
+    unscored = sum(1 for r in res.get("versions") or [] if not r.get("scored"))
+    if unscored:
+        head.append(f"{unscored} older version(s) not looked up (one request each): pull one with --version N")
+    if res.get("fork_parent"):
+        head.append(f"forked from: {res['fork_parent']}")
+    return "\n".join(head + [""] + lines)
+
+
+def _write_version(dest: Path, slug: str, row: dict) -> Path:
+    """Replace the pulled latest source in ``dest`` with ``row``'s version (``kaggle_web`` ``source``)."""
+    from . import kaggle_web
+
+    src = kaggle_web.run({"op": "source", "session_id": row["session_id"]}, timeout=120)
+    if src.get("error") or not src.get("source"):
+        raise SystemExit(f"source of version {row['version']} unavailable ({src.get('error') or 'empty'}); the "
+                         f"latest version is in {dest}")
+    text = src["source"]
+    try:
+        is_nb = isinstance(json.loads(text), dict) and "cells" in json.loads(text)
+    except ValueError:
+        is_nb = False
+    meta_p = dest / "kernel-metadata.json"
+    meta = json.loads(meta_p.read_text(encoding="utf-8")) if meta_p.is_file() else {}
+    for p in dest.iterdir():  # the latest version's source: one code file only, or the review reads the wrong one
+        if p.suffix in (".ipynb", ".py", ".r", ".R") and not p.name.endswith("_local.py"):
+            p.unlink()
+    name = Path(str(meta.get("code_file") or slug)).stem + (".ipynb" if is_nb else ".py")
+    out = dest / name
+    out.write_text(text, encoding="utf-8")
+    return out
+
+
 def pull(ref: str, dest_root: str | Path = "ref", competition: str | None = None, check_access: bool = False,
-         holdout: bool = False, score_lookup: bool = False) -> dict:
+         holdout: bool = False, score_lookup: bool = False, version: int | None = None, best: bool = False,
+         greater_is_better: bool | None = None) -> dict:
+    ref = normalize_ref(ref)
     slug = ref.split("/")[-1]
+    picked = None
+    if version is not None or best:
+        res = versions(ref, competition)  # before the pull: a failed lookup leaves nothing half-done
+        picked = choose_version(res, version, best, greater_is_better)
+        picked = {**picked, "latest": max((r["version"] for r in res["versions"]), default=picked["version"]),
+                  "best": res.get("best"), "best_version": res.get("best_version")}
     dest = Path(dest_root) / slug
     dest.mkdir(parents=True, exist_ok=True)
     r = _kaggle(["kernels", "pull", ref, "-p", str(dest), "-m"])
     if r.returncode != 0:
         raise SystemExit(f"kaggle kernels pull failed: {r.stderr.strip() or r.stdout.strip()}")
-    return analyse_dir(dest, ref, competition, check_access, holdout, score_lookup)
+    if picked is not None and picked["version"] != picked["latest"]:
+        _write_version(dest, slug, picked)
+    rev = analyse_dir(dest, ref, competition, check_access, holdout, score_lookup, picked=picked)
+    return rev
 
 
 def analyse_dir(dest: Path, ref: str, competition: str | None = None, check_access: bool = False,
-                holdout: bool = False, score_lookup: bool = False) -> dict:
+                holdout: bool = False, score_lookup: bool = False, picked: dict | None = None) -> dict:
+    ref = normalize_ref(ref)
     slug = ref.split("/")[-1]
     meta_p = dest / "kernel-metadata.json"
     meta = json.loads(meta_p.read_text(encoding="utf-8")) if meta_p.is_file() else {}
@@ -391,6 +527,8 @@ def analyse_dir(dest: Path, ref: str, competition: str | None = None, check_acce
     cells = code_cells(src)
     rev = review("\n".join(cells), output_text(src), meta, competition)
     rev["risks"] = risky_lines(cells)
+    if picked is not None:
+        rev["version"] = picked
     if check_access:
         rev["inaccessible"] = [d for d in rev["external"]["datasets"]
                                if _kaggle(["datasets", "files", d], timeout=60).returncode != 0]
