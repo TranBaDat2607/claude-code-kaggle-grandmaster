@@ -1,6 +1,7 @@
 """scripts/eval_table.py: the with/without table from `claude plugin eval` results."""
 
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -51,5 +52,6 @@ def test_runs_without_a_baseline_are_refused(tmp_path):
 def test_cli_prints_the_table(tmp_path):
     p = _run(tmp_path / "a.json", [("cv-b", 1.0, 0.0)], "2026-11-01T00:00:00Z", model="sonnet")
     r = subprocess.run([sys.executable, str(ROOT / "scripts" / "eval_table.py"), str(p), "--evals",
-                        str(_evals(tmp_path / "evals"))], capture_output=True, text=True)
-    assert r.returncode == 0 and "### sonnet (1 cases" in r.stdout
+                        str(_evals(tmp_path / "evals"))], capture_output=True, text=True, encoding="utf-8",
+                       env={**os.environ, "PYTHONIOENCODING": "cp1252"})  # a Windows console's encoding
+    assert r.returncode == 0 and "### sonnet (1 cases" in r.stdout and "| Δ |" in r.stdout, r.stderr

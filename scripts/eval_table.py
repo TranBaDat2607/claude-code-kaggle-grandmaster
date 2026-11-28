@@ -101,6 +101,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("results", nargs="+", type=Path, help="aggregate-result.json files of with/without runs")
     ap.add_argument("--evals", type=Path, default=EVALS, help="the eval cases' folder (for their tags)")
     a = ap.parse_args(argv)
+    if hasattr(sys.stdout, "reconfigure"):  # Markdown with a delta sign: UTF-8 even on a cp1252 Windows console
+        sys.stdout.reconfigure(encoding="utf-8")
     print(table(load(a.results), a.evals))
     return 0
 
