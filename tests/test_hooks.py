@@ -2,6 +2,7 @@
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -366,6 +367,53 @@ def test_prompt_router_adopt(plugin_root, tmp_path):
         "hook_event_name": "UserPromptSubmit", "cwd": str(tmp_path), "session_id": uuid.uuid4().hex,
         "prompt": "I'm two months into this Kaggle competition with an existing repo, how do I set up the plugin?"})
     assert "kaggle-grandmaster:kg-adopt" in out["additionalContext"]
+    out = hook(plugin_root, "prompt_router.py", {
+        "hook_event_name": "UserPromptSubmit", "cwd": str(tmp_path), "session_id": uuid.uuid4().hex,
+        "prompt": "Three weeks into a Kaggle image competition; our repo already has its own fold split and logs"})
+    assert "kaggle-grandmaster:kg-adopt" in out["additionalContext"]
+
+
+def test_prompt_router_situation_beats_vocabulary(plugin_root, tmp_path_factory):
+    """Measured on the eval suite: method words ("folds", "weights", "AUC", "LightGBM") repeated in a prompt crowded
+    the skill the prompt was about out of the top 3. Situation routes now take up to 2 places, the third stays with
+    the method and domain routes."""
+    plain = tmp_path_factory.mktemp("plain7")
+
+    def skills(prompt):
+        out = hook(plugin_root, "prompt_router.py", {"hook_event_name": "UserPromptSubmit", "prompt": prompt,
+                                                     "cwd": str(plain), "session_id": uuid.uuid4().hex})
+        return re.findall(r"kaggle-grandmaster:([a-z-]+)", out["additionalContext"]) if out else []
+
+    got = skills("Kaggle: another team ranks just above us with different models. Before deciding whether to merge "
+                 "we'd compare OOF weights and blend weights on our folds, StratifiedKFold with different seeds, AUC "
+                 "metric. The merger deadline is Friday.")
+    assert "competition-strategy" in got and len(got) == 3
+    got = skills("I read the top public notebooks of this Kaggle comp: LightGBM, LightGBM with tuned weights, "
+                 "LightGBM blends of fold weights. Which ideas are worth taking?")
+    assert "competition-recon" in got and "tabular-mastery" in got
+    # a prompt saying the competition is over: the post-mortem wins the tie with mid-competition wording
+    got = skills("The Kaggle competition ended last week. My final picks were two blends and the README is from "
+                 "mid-competition; what should I write down?")
+    assert got[0] == "kg-postmortem"
+    # deciding one experiment: the short procedure replaces the playbook
+    got = skills("Kaggle: experiment 0007 has finished, +0.001 with fold std 0.01, so it is noise. Record it as "
+                 "discarded and close the backlog idea.")
+    assert "kg-experiment" in got and "grandmaster-playbook" not in got
+
+
+def test_prompt_router_weak_gate_alone_stays_silent(plugin_root, tmp_path_factory, ws):
+    """"competition" or "leaderboard" with no Kaggle vocabulary and no keyword hit is not Kaggle work outside a
+    workspace (the playbook fallback fired on both such negative eval cases); inside a workspace it still routes."""
+    plain = tmp_path_factory.mktemp("plain8")
+
+    def ask(prompt, cwd=plain):
+        return hook(plugin_root, "prompt_router.py", {"hook_event_name": "UserPromptSubmit", "prompt": prompt,
+                                                      "cwd": str(cwd), "session_id": uuid.uuid4().hex})
+
+    assert ask("Our bakery faces new competition across the street. Five ideas to keep customers?") is None
+    assert ask("Add a leaderboard page to my chess club website with the top 20 members") is None
+    assert "grandmaster-playbook" in ask("help me with this Kaggle competition")["additionalContext"]
+    assert "grandmaster-playbook" in ask("help me with this competition", ws)["additionalContext"]
 
 
 def test_more_credential_leaks_denied(plugin_root, tmp_path):

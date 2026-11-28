@@ -3,7 +3,9 @@
 Skill descriptions alone often don't make the model load a skill before answering, so the
 checklists inside never reach the context. This hook detects competition work (Kaggle vocabulary
 in the prompt, or a prompt typed inside a competition workspace), picks up to three relevant
-skills by keyword and tells Claude to load them first. Unrelated prompts produce no output.
+skills by keyword and tells Claude to load them first. Unrelated prompts produce no output. Measured with
+``scripts/router_ab.py`` (Haiku, eval suite): the expected skill loads in 91% of runs with this hook, 7% without
+(Sonnet: 98% and 50%).
 
 Only user-typed prompts are routed: harness-injected text (goal check-ins, task notifications) is
 ignored. Each skill is suggested at most once per session (state kept in the temp dir, keyed by
@@ -47,6 +49,14 @@ GATE = re.compile(
     r"\bcompetition\b|\bshake[- ]?up\b|\bgrandmaster\b|\bsubmission\b",
     re.IGNORECASE,
 )
+# GATE words that only mean Kaggle together with Kaggle vocabulary: a business competition, a game's leaderboard.
+# A prompt whose only Kaggle signal is one of these, outside a workspace, gets a route only on a keyword hit, never
+# the playbook fallback (measured: the fallback fired on both such negative eval cases).
+STRONG_GATE = re.compile(
+    r"\bkaggle\b|\b(public|private)\s+(lb|score|leaderboard)\b|\boof\b|out[- ]of[- ]fold|\bshake[- ]?up\b|"
+    r"\bgrandmaster\b",
+    re.IGNORECASE,
+)
 
 # building a model: writing a training or inference script, or training/fine-tuning a model. Loads the compute
 # defaults (and, in a workspace, its domain skill), so they shape the first script instead of a later speed-up.
@@ -57,11 +67,22 @@ BUILD = (r"\b(write|build|implement|create|code|set ?up)\b.{0,30}\b(train(ing)?|
 BUILD_RX = re.compile(BUILD, re.IGNORECASE)
 
 ROUTES: list[tuple[str, str]] = [
+    # the competition is over: ahead of the mid-competition routes, which it rules out
+    ("kg-postmortem", r"post-?mortem|lessons? (learned|from (this|the) competition)|"
+                      r"(competition|deadline) (is over|has (ended|passed)|ended|passed)|after the (competition|deadline)|"
+                      r"final (rank|standing|result)s?\b"),
     ("kg-adopt", r"\badopt\b|existing (repo|repository|project|code ?base|workspace|pipeline)|mid[- ]competition|"
-                 r"(already|been) (working|competing) on|weeks? into (the|this|a) competition|"
+                 r"(already|been) (working|competing) on|(weeks?|months?) into (the|this|a|my|an?) (\w+ ){0,3}competition|"
+                 r"(my|our|the) (repo|repository|project|code ?base) (already )?(has|contains) (its|my|our) own\b|"
                  r"set ?up (the )?(plugin|kgkit|workspace|kaggle-gm) (for|in|on) (my|this|an?)\b"),
     ("cv-lb-debugging", r"(cv|validation|local)\b.{0,60}\b(lb|leaderboard)|(lb|leaderboard)\b.{0,60}\bcv\b|"
                         r"\bgap\b|doesn'?t (match|transfer|track)|disagree|too good|suspicious"),
+    # deciding or recording one experiment: the short procedure, not the playbook (measured: the playbook fallback
+    # used up the turns of a one-call bookkeeping request)
+    ("kg-experiment", r"\b(record|log)\w* (it|this|the|its|a) ?(keep|discard|decision|verdict)|"
+                      r"\b(record|mark)\w* (it|this|the experiment) as (kept|discarded|keep|discard)|"
+                      r"\bexperiment\b.{0,60}\b(has )?(finished|completed)\b|\b(finished|completed) experiment|"
+                      r"(decide|decision)\b.{0,40}\b(against|vs\.?) (the )?(accepted )?baseline|close (the )?backlog idea"),
     ("grandmaster-playbook", r"\bnoise\b|significan|fold[- ]std|(gain|improvement)s? (is|are|was|were) real|"
                              r"keep or discard|reverse ablation|overfit\w* (the |my )?cv|\bbacklog\b|what (to|should i) try"),
     ("validation-strategy", r"cross[- ]?validation|\bk-?fold|\bfolds?\b|\bsplit\b|\bholdout\b|\bleak|adversarial|"
@@ -72,9 +93,6 @@ ROUTES: list[tuple[str, str]] = [
                             r"ndcg|\bdice\b|\biou\b|rounding|calibrat|\bmetric\b"),
     ("final-submission-selection", r"final (submission|pick|selection)|which (two|2) (submission|should)|"
                                    r"\bselect(ion)?\b.{0,40}submission|shake[- ]?up|private (lb|leaderboard)"),
-    ("kg-postmortem", r"post-?mortem|lessons? (learned|from (this|the) competition)|"
-                      r"(competition|deadline) (is over|has (ended|passed)|ended|passed)|after the (competition|deadline)|"
-                      r"final (rank|standing|result)s?\b"),
     ("code-competitions", r"code competition|internet (off|disabled)|offline|\bkernel\b|notebook submission|"
                           r"runtime limit|hidden test|\bwheels?\b"),
     # speed and GPU efficiency in plain words, plus building a model: the compute defaults apply from the first script
@@ -115,12 +133,20 @@ ROUTES: list[tuple[str, str]] = [
     ("competition-recon", r"public (notebooks?|kernels?)|top(-voted)? notebooks?|\bdiscussions?\b|write-?ups?|"
                           r"prior art|\brecon\b|reproduce (a|the|this) (notebook|kernel)|"
                           r"(competition|the) rules\b|rules page|evaluation page|data description"),
-    ("competition-strategy", r"\bteam(ing|mates?| up)\b|\bmerg(e|er|ing)\b.{0,40}\bteams?\b|\bteams?\b.{0,40}\bmerg|"
+    ("competition-strategy", r"\bteam(ing|mates?| up)\b|\bmerg(e|er|ing)\b.{0,80}\bteams?\b|\bteams?\b.{0,80}\bmerg|"
+                             r"merger deadline|team merger|"
                              r"which competitions?|grandmaster (title|tier|rank)|solo gold|\bgold medals?\b|"
                              r"join(ing|ed)? (late|the competition late)|several competitions"),
     ("kaggle-cli", r"kaggle (api|cli)|kaggle competitions|kaggle kernels|kaggle datasets|download (the )?data"),
 ]
 COMPILED = [(name, re.compile(rx, re.IGNORECASE)) for name, rx in ROUTES]
+
+# Routes that name what the user is doing (the phase of the competition, a CV-LB gap, deciding an experiment, teaming,
+# researching it) take up to 2 of the 3 places ahead of the method, domain and Kaggle-mechanics routes, whose vocabulary
+# ("folds", "weights", "metric", "LightGBM") turns up in almost every competition prompt and, counted by hits, crowded
+# the one skill the prompt was about out of the top 3. The third place stays with those routes.
+SITUATION = {"kg-postmortem", "kg-adopt", "cv-lb-debugging", "kg-experiment", "grandmaster-playbook",
+             "final-submission-selection", "competition-recon", "competition-strategy"}
 
 # slash-only commands: (name, pattern, what to tell Claude)
 HINTS: list[tuple[str, str, str]] = [
@@ -194,12 +220,22 @@ def route(prompt: str, in_workspace: bool, task: str = "", ended: bool = False) 
             hits.append((n, name))
     if own and BUILD_RX.search(prompt) and own not in {name for _, name in hits}:
         hits.append((1, own))  # building a model in a workspace: its domain skill carries the recipe and defaults
-    # keep ROUTES priority order among the top hits (debugging/validation before domain skills)
+    if any(name == "kg-experiment" for _, name in hits):
+        # one experiment to decide or record: kg-experiment carries the protocol (playbook section 2) and the paired
+        # noise rule; the whole playbook on top used up the turns of a one-call bookkeeping request
+        hits = [(n, name) for n, name in hits if name != "grandmaster-playbook"]
+    # up to 2 situation routes, then method/domain routes, by hits; keep ROUTES priority order among the top 3
     order = {name: i for i, (name, _) in enumerate(ROUTES)}
-    top = sorted(hits, key=lambda t: (-t[0], order[t[1]]))[:3]
-    chosen = sorted((name for _, name in top), key=lambda n: order[n])
+    ranked = [name for _, name in sorted(hits, key=lambda t: (-t[0], order[t[1]]))]
+    situ = [n for n in ranked if n in SITUATION]
+    rest = [n for n in ranked if n not in SITUATION]
+    top = situ[:2] + rest[:3 - len(situ[:2])]
+    top += situ[2:3 - len(top)]
+    chosen = sorted(top, key=lambda n: order[n])
     if chosen or hints(prompt, in_workspace):  # a slash command to suggest is answer enough without the fallback
         return chosen
+    if not (in_workspace or STRONG_GATE.search(prompt)):
+        return []  # "competition" or "leaderboard" alone, with no keyword hit: not necessarily Kaggle
     return ["kg-postmortem" if ended else "grandmaster-playbook"]
 
 
