@@ -105,6 +105,15 @@ workspace, and writes the fake `kaggle.json` only into the run's temporary `HOME
 - Read the transcripts of failing runs (`--keep-temp` keeps them) before changing a rubric: a failure should be
   fair, and a rubric should not reject a correct answer that is phrased differently.
 
+## Measuring the prompt router
+
+`hooks/prompt_router.py` tells Claude which skills to load. To see what it adds over skill descriptions alone, run
+the suite against a copy of the plugin without it (`python scripts/router_ab.py copy <dir>`, from the repo root) and
+against the plugin itself, both with `--ablation none --json`, then `python scripts/router_ab.py compare on.json
+off.json`. On Haiku (2026-11-28, 45 `portable` cases, 3 runs each) the expected skill loaded in 91% of runs with the
+router and 7% without it, and the result score was 0.875 against 0.721. On Sonnet (1 run each) it was 98% against
+50%, and 0.948 against 0.891. Keep routing, and re-measure when a new model comes out.
+
 ## Adding a case
 
 1. `mkdir evals/<name>/graders` with a `prompt.md` (frontmatter `description`, `tags`, `max_turns`,
@@ -114,6 +123,7 @@ workspace, and writes the fake `kaggle.json` only into the run's temporary `HOME
 3. A shell case also needs `case.yaml` with `scaffold_script: setup.sh`, and a `setup.sh` that calls
    `../_fixtures/make_workspace.sh` (add an option there if the case needs other state).
 4. A new skill must also be added to the `no-plugin-skill` grader of every `negative` case, and given a route in
-   `hooks/prompt_router.py`. `python -m pytest tests/test_evals.py` checks the layout, tags, skill names and the
+   `hooks/prompt_router.py`. `python scripts/router_ab.py routes` (free, offline; `tests/test_router_ab.py` runs it)
+   checks that the router names one of the case's expected skills. `python -m pytest tests/test_evals.py` checks the layout, tags, skill names and the
    negative cases' skill lists.
 5. Run it once with `--runs 1 --ablation none`, read the transcript, then run it with the baseline arm.
