@@ -109,9 +109,10 @@ notebooks with their public score on record: `kaggle kernels list` has no score 
 
 CLI 2.2.4+ reads competition forums: `kaggle competitions topics list <slug> --format json -s top -p <n>`
 (20 topics a page; `--page-size` is ignored) and `kaggle competitions topic-messages <slug> <id> --format json
--n -1` (the whole thread, replies flattened). `kgkit discussions sync|top|search|solutions|read`
-wraps both, for active and finished competitions (`discussions solutions --competition <slug>` for
-write-ups). `--source meta` reads Meta Kaggle instead (`kaggle/meta-kaggle`, Kaggle's daily export, ~245 MB,
+-n -1` (the whole thread, replies flattened). `kgkit discussions sync|top|search|solutions|writeup|read`
+wraps both, for active and finished competitions. The Writeups tab is not in the CLI: `discussions solutions
+--competition <slug>` reads it (ranked by the leaderboard) through Kaggle's internal web API, and `discussions
+writeup <rank>` prints one write-up's markdown. `--source meta` reads Meta Kaggle instead (`kaggle/meta-kaggle`, Kaggle's daily export, ~245 MB,
 cached in `~/.kaggle-gm/meta-kaggle`): it leaves `ForumId` empty for every competition that has not ended,
 so it only serves finished competitions. Windows: piped CLI output is cp1252 and the CLI dies at the first
 emoji in a title, so set `PYTHONIOENCODING=utf-8` when parsing its output yourself (kgkit does). The title must slugify
