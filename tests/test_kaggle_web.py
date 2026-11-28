@@ -388,3 +388,102 @@ def test_forks_op_reports_each_notebook():
     post, _ = _post_from({"GetKernelViewModel": view})
     res = W.forks(post, ["a/kid", "a/orig", "a/gone"])
     assert res["forks"] == {"a/kid": "o/p", "a/orig": None} and "not found" in res["errors"]["a/gone"]
+
+
+# ----------------------------------------------------------------------------- item 4: a notebook's inputs
+META = {"dataset_sources": ["o/oof-lib", "bad"], "competition_sources": ["c"],
+        "model_sources": ["qwen-lm/qwen-3/Transformers/8b/1", "x/y"],
+        "kernel_sources": ["u/util-script", "packagemanager/pm-96608913-at-11-05-2025-15-37-15"],
+        "enable_gpu": True, "machine_shape": "NvidiaTeslaT4", "enable_internet": False,
+        "docker_image": "gcr.io/kaggle-private-byod/python@sha256:abc"}
+
+
+def test_input_list_maps_kaggle_mounts_to_data_ext():
+    assert [(i["kind"], i["ref"], i["local"]) for i in K.input_list(META)] == [
+        ("dataset", "o/oof-lib", "data/ext/oof-lib"),
+        ("model", "qwen-lm/qwen-3/Transformers/8b/1", "data/ext/qwen-3/transformers/8b/1"),
+        ("notebook", "u/util-script", "data/ext/util-script"),
+        ("environment", "packagemanager/pm-96608913-at-11-05-2025-15-37-15",
+         "data/ext/pm-96608913-at-11-05-2025-15-37-15")]
+    assert K.runtime(META) == "GPU (NvidiaTeslaT4), internet off, pinned Docker image"
+
+
+def test_requirements_and_key_pins():
+    text = "pip install autoawq unsloth==2025.8.5 torch==2.6.0 transformers==4.55.3 --no-deps\n# note\n"
+    reqs = K.requirements_from(text)
+    assert reqs == ["autoawq", "unsloth==2025.8.5", "torch==2.6.0", "transformers==4.55.3"]
+    assert K.key_pins("\n".join(reqs)) == ["torch==2.6.0", "transformers==4.55.3"]
+
+
+def _sized(tmp_path):
+    items = K.input_list(META)
+    (tmp_path / "data" / "ext" / "oof-lib").mkdir(parents=True)
+    (tmp_path / "data" / "ext" / "oof-lib" / "a.npy").write_bytes(b"x")
+    return items
+
+
+def test_size_inputs_and_table(tmp_path, monkeypatch):
+    items = _sized(tmp_path)
+    reqs = []
+    monkeypatch.setattr(W, "run", _fake_web({"sizes": {"datasets": {}, "models": {
+        "qwen-lm/qwen-3/Transformers/8b/1": 16 * K.GB}, "kernels": {}, "errors": {"u/util-script": "HTTP 404"}}},
+        reqs))
+    assert K.size_inputs(items, tmp_path) == "1 size(s) unknown"
+    assert reqs[0]["datasets"] == [] and reqs[0]["models"] == ["qwen-lm/qwen-3/Transformers/8b/1"]
+    table = K.format_inputs(items)
+    assert "| dataset | o/oof-lib | data/ext/oof-lib | present | - |" in table
+    assert "| model | qwen-lm/qwen-3/Transformers/8b/1 | data/ext/qwen-3/transformers/8b/1 | missing | 16.0 GB |" in table
+    assert "| notebook | u/util-script | data/ext/util-script | missing | ? |" in table
+    assert "| environment | packagemanager/pm-96608913-at-11-05-2025-15-37-15 | - | requirements only | - |" in table
+    miss, known, unknown = K.to_download(items)
+    assert known == 16 * K.GB and unknown == 1
+
+
+def test_download_inputs_stops_at_the_limit_and_copies_utility_scripts(tmp_path, monkeypatch):
+    items = _sized(tmp_path)
+    ref_dir = tmp_path / "ref" / "nb"
+    ref_dir.mkdir(parents=True)
+    calls = []
+
+    def fake_kaggle(args, timeout=300):
+        calls.append(args[:2])
+        dest = Path(args[args.index("-p") + 1])
+        if args[0] == "kernels":
+            (dest / "helpers.py").write_text("X = 1\n")
+            (dest / "helpers.log").write_text("[]")
+        else:
+            (dest / "w.bin").write_bytes(b"0" * 2048)
+        return subprocess.CompletedProcess(args, 0, "", "")
+    monkeypatch.setattr(K, "_kaggle", fake_kaggle)
+    for it in items:
+        it["present"] = it["kind"] == "dataset"
+    said = K.download_inputs(items, tmp_path, ref_dir, max_bytes=10 * 1024 ** 2)
+    assert calls == [["models", "instances"], ["kernels", "output"]]  # the package manager's wheels: never
+    assert (ref_dir / "helpers.py").is_file() and any("utility script: copied helpers.py" in s for s in said)
+    for it in items:
+        it["present"] = it["kind"] == "dataset"
+    calls.clear()
+    said = K.download_inputs(items, tmp_path, ref_dir, max_bytes=1024)  # the model alone passes 1 KB
+    assert calls == [["models", "instances"]] and "skipped, the 1.0 KB limit is spent" in said[-1]
+
+
+def test_inputs_command_lists_then_downloads_within_the_limit(ws, monkeypatch, capsys):
+    ref_dir = ws / "ref" / "nb"
+    ref_dir.mkdir(parents=True)
+    (ref_dir / "kernel-metadata.json").write_text(json.dumps(META))
+    monkeypatch.setattr(K, "size_inputs", lambda items, root: [it.update(present=False, size=3 * K.GB)
+                                                              for it in items] and None)
+    monkeypatch.setattr(K, "environment", lambda ref, d, items: ["requirements.txt: 2 package(s)"])
+    capsys.readouterr()
+    cli.main(["kernels", "inputs", "me/nb"])
+    out = capsys.readouterr().out
+    assert "to download: 3 input(s), 9.0 GB" in out and "Ask the user before downloading" in out
+    assert "python -m kgkit kernels inputs me/nb --download --max-gb 10" in out
+    with pytest.raises(SystemExit, match="--download needs --max-gb"):
+        cli.main(["kernels", "inputs", "me/nb", "--download"])
+    with pytest.raises(SystemExit, match="more than --max-gb 5: nothing downloaded"):
+        cli.main(["kernels", "inputs", "me/nb", "--download", "--max-gb", "5"])
+    got = []
+    monkeypatch.setattr(K, "download_inputs", lambda items, root, d, limit: got.append(limit) or ["done"])
+    cli.main(["kernels", "inputs", "me/nb", "--download", "--max-gb", "10"])
+    assert got == [10 * K.GB] and "done" in capsys.readouterr().out

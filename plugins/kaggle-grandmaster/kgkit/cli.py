@@ -2823,6 +2823,56 @@ def cmd_kernels(a):
             print(f"{ref}: {why}")
         if err:
             print(f"public scores unknown: {err}")
+    elif a.action == "inputs":
+        import math
+
+        if not a.ref:
+            raise SystemExit("usage: kernels inputs <owner/slug> [--download --max-gb N]")
+        a.ref = K.normalize_ref(a.ref)
+        ref_dir = Path(a.dest) / a.ref.split("/")[-1]
+        meta_p = ref_dir / "kernel-metadata.json"
+        if not meta_p.is_file():
+            ref_dir.mkdir(parents=True, exist_ok=True)
+            r = K._kaggle(["kernels", "pull", a.ref, "-p", str(ref_dir), "-m"])
+            if r.returncode != 0:
+                raise SystemExit(f"kaggle kernels pull failed: {r.stderr.strip() or r.stdout.strip()}")
+        meta = json.loads(meta_p.read_text(encoding="utf-8"))
+        root = S.find_root() or Path.cwd()
+        items = K.input_list(meta)
+        if not items:
+            print(f"{a.ref} mounts nothing but the competition data (data/)")
+            return
+        err = K.size_inputs(items, root)
+        print(SF.UNTRUSTED_NOTE)
+        print(SF.wrap(K.format_inputs(items), "kaggle-cli", ref=a.ref, view="inputs"))
+        if err:
+            print(f"sizes unknown: {err}")
+        for line in K.environment(a.ref, ref_dir, items):
+            print(line)
+        miss, known, unknown = K.to_download(items)
+        if not miss:
+            print("every input is present locally")
+            return
+        total = f"{K.human(known)}" + (f" plus {unknown} input(s) of unknown size" if unknown else "")
+        if not a.download:
+            gb = max(1, math.ceil(known / K.GB * 1.05))
+            print(f"\nto download: {len(miss)} input(s), {total}, into data/ext/. Ask the user before downloading "
+                  f"(name the size), then:\n  python -m kgkit kernels inputs {a.ref} --download --max-gb {gb}"
+                  + ("\n  (--max-gb also stops the inputs of unknown size once it is spent)" if unknown else ""))
+            return
+        if a.max_gb is None:
+            raise SystemExit(f"--download needs --max-gb: the most you agree to download ({total} missing)")
+        limit = int(a.max_gb * K.GB)
+        if known > limit:
+            raise SystemExit(f"the missing inputs total {K.human(known)}, more than --max-gb {a.max_gb:g}: "
+                             "nothing downloaded")
+        if sys.stdin.isatty() and not a.yes:
+            if input(f"Download {total} into data/ext/ (at most {a.max_gb:g} GB)? [y/N] ").strip().lower() != "y":
+                raise SystemExit("nothing downloaded")
+        for line in K.download_inputs(items, root, ref_dir, limit):
+            print(line)
+        print("the local script maps /kaggle/input/<name> to data/ext/<name>; inputs the notebook mounts in another "
+              f"layout need a path change in {ref_dir.as_posix()}/{a.ref.split('/')[-1]}_local.py")
     elif a.action == "versions":
         if not a.ref:
             raise SystemExit("usage: kernels versions <owner/slug>")
@@ -3884,7 +3934,7 @@ def build_parser() -> argparse.ArgumentParser:
     s.set_defaults(fn=cmd_speedcheck)
 
     s = sub.add_parser("kernels", help="study and reproduce public notebooks")
-    s.add_argument("action", choices=["top", "lineage", "versions", "pull", "review"])
+    s.add_argument("action", choices=["top", "lineage", "versions", "pull", "review", "inputs"])
     s.add_argument("ref", nargs="?", help="owner/slug or its Kaggle URL (versions, pull, review)")
     s.add_argument("--competition", help="default: competition.json slug")
     s.add_argument("-n", type=int, default=None, help="top: notebooks listed (default 20); lineage: default 10")
@@ -3896,6 +3946,10 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--version", type=int, help="pull: this version instead of the latest (Kaggle's web API)")
     s.add_argument("--best", action="store_true",
                    help="pull: the version with the best public score (Kaggle's web API)")
+    s.add_argument("--download", action="store_true",
+                   help="inputs: download the missing inputs into data/ext/ (needs --max-gb; ask the user first)")
+    s.add_argument("--max-gb", type=float, help="inputs --download: the most to download, in GB")
+    s.add_argument("--yes", action="store_true", help="inputs --download: no y/N prompt in a terminal")
     s.set_defaults(fn=cmd_kernels)
 
     s = sub.add_parser("blend", help="blend ledger experiments")

@@ -12,6 +12,7 @@ allowed-tools:
   - 'Bash(kgkit kernels top *)'
   - 'Bash(kgkit kernels pull *)'
   - 'Bash(kgkit kernels versions *)'
+  - 'Bash(kgkit kernels inputs *)'
   - 'Bash(kgkit ledger *)'
   - 'Bash(kgkit status *)'
 ---

@@ -36,7 +36,8 @@ This repo is a Claude Code marketplace (`.claude-plugin/marketplace.json`) conta
   reads both too): change all of them together.
 - Hooks exit 0 on any internal error; only deny/ask for credentials (printed, or in an upload folder), invalid or
   byte-identical repeat submissions, an exhausted daily budget, a GPU push that the cached weekly GPU quota
-  cannot cover, a read of the sealed vault's labels (`~/.kaggle-gm/vault/`, `kgkit.vault.names_vault`: a
+  cannot cover, a download of a public notebook's inputs (`kgkit kernels inputs --download`: ask, naming its
+  --max-gb), a read of the sealed vault's labels (`~/.kaggle-gm/vault/`, `kgkit.vault.names_vault`: a
   command naming it, `hooks/pre_file.py` for the file tools), or a `git add`/`commit`/`push` that would send
   credentials or competition data (deny) or other never-public files (ask; `kgkit/repoguard.py`, whose lists the
   git hooks share).

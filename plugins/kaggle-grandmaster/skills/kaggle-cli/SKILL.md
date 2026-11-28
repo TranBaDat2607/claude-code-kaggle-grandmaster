@@ -107,6 +107,13 @@ notebooks with their public score on record: `kaggle kernels list` has no score 
 latest version; `kgkit kernels versions <ref>` lists every version's score (public while the competition runs,
 private after it) and `kernels pull <ref> --best` (or `--version N`) gets that version's source. Both go
 through Kaggle's internal web API, which can change without notice: when it fails they say so.
+`kgkit kernels inputs <ref>` lists what the notebook mounts besides the competition data (datasets, models,
+other notebooks' outputs) with each one's local folder (`data/ext/<name>`, as the local script maps
+`/kaggle/input/<name>`; a model under `<model>/<framework>/<variation>/<version>`), whether it is already there
+and its size, and writes `ref/<slug>/requirements.txt`: the packages the notebook added to Kaggle's image (a
+package-manager input `pm-<id>-at-<date>` is read for its requirements, never its wheels). Tell the user the
+size and download only after they agree: `kgkit kernels inputs <ref> --download --max-gb N` refuses when the
+known total is over N and stops once N is spent (the plugin's hook asks before it runs).
 
 ## Discussions
 

@@ -9,6 +9,10 @@
 - ``source``: the source of one version (``kaggle kernels pull`` only gets the latest).
 - ``view``: a notebook's fork parent, the inputs it mounts and the URL of its Docker image's package list.
 - ``forks``: the fork parent of each of several notebooks (``kernels lineage``).
+- ``sizes``: the download size of datasets, models and notebook outputs (``kernels inputs``), from the public API:
+  ``total_bytes`` of a dataset, ``total_uncompressed_bytes`` of a model instance (its latest version), and for a
+  notebook's output the sum of its files' sizes, read with a one-byte ranged GET each (the API lists no sizes, and
+  Kaggle's file host answers HEAD with 404).
 
 These endpoints serve the website. They are not Kaggle's public API and can change without notice, so every
 caller falls back to the public path when one fails (``discussions solutions`` to its title search, ``kernels
@@ -176,6 +180,94 @@ def forks(post, refs: list[str], budget: float = 60.0) -> dict:
     return {"forks": out, "errors": errors}
 
 
+def framework_enum(name: str, enum):
+    """The SDK's ModelFramework member for a framework as model refs spell it ('Transformers', 'PyTorch',
+    'TensorFlow2'); None when there is none."""
+    want = re.sub(r"[^a-z0-9]", "", str(name).lower())
+    for m in enum:
+        if m.name.replace("MODEL_FRAMEWORK_", "").replace("_", "").lower() == want:
+            return m
+    return None
+
+
+def sizes(kc, req: dict, head=None, budget: float = 60.0) -> dict:
+    """{"datasets": {ref: bytes}, "models": {ref: bytes}, "kernels": {ref: bytes}, "errors": {ref: why}}. A size
+    is None when Kaggle has none; ``kernels`` sums the files' sizes (``head(url) -> int | None``), 0 when the
+    notebook's last run kept no output."""
+    end = time.monotonic() + budget
+    out: dict = {"datasets": {}, "models": {}, "kernels": {}, "errors": {}}
+
+    def guard(kind, ref, fn):
+        if time.monotonic() >= end:
+            out["errors"][ref] = "out of time"
+            return
+        try:
+            out[kind][ref] = fn(ref)
+        except Exception as e:  # one input's failure leaves the others' sizes
+            out["errors"][ref] = f"{type(e).__name__}: {e}"[:200]
+
+    def dataset(ref):
+        from kagglesdk.datasets.types.dataset_api_service import ApiGetDatasetRequest
+
+        r = ApiGetDatasetRequest()
+        r.owner_slug, r.dataset_slug = ref.split("/")[:2]
+        return int(kc.datasets.dataset_api_client.get_dataset(r).total_bytes or 0) or None
+
+    def model(ref):
+        from kagglesdk.models.types.model_api_service import ApiGetModelInstanceRequest
+        from kagglesdk.models.types.model_enums import ModelFramework
+
+        owner, model_, fw, variation = (ref.split("/") + ["", "", "", ""])[:4]
+        r = ApiGetModelInstanceRequest()
+        r.owner_slug, r.model_slug, r.instance_slug = owner, model_, variation
+        r.framework = framework_enum(fw, ModelFramework)
+        if r.framework is None:
+            raise WebError(f"unknown model framework {fw!r}")
+        return int(kc.models.model_api_client.get_model_instance(r).total_uncompressed_bytes or 0) or None
+
+    def kernel(ref):
+        from kagglesdk.kernels.types.kernels_api_service import ApiListKernelSessionOutputRequest
+
+        owner, _, slug = ref.partition("/")
+        total, token = 0, ""
+        for _ in range(10):
+            r = ApiListKernelSessionOutputRequest()
+            r.user_name, r.kernel_slug, r.page_size = owner, slug, 200
+            if token:
+                r.page_token = token
+            resp = kc.kernels.kernels_api_client.list_kernel_session_output(r)
+            for f in resp.files or []:
+                if time.monotonic() >= end:
+                    raise WebError("out of time while sizing its files")
+                n = head(f.url) if head and f.url else None
+                if n is None:
+                    return None
+                total += n
+            token = resp.next_page_token
+            if not token:
+                break
+        return total
+    for ref in req.get("datasets") or []:
+        guard("datasets", ref, dataset)
+    for ref in req.get("models") or []:
+        guard("models", ref, model)
+    for ref in req.get("kernels") or []:
+        guard("kernels", ref, kernel)
+    return out
+
+
+def remote_size(url: str) -> int | None:
+    """Size of a signed download URL (no credentials sent) from a one-byte ranged GET's Content-Range
+    (``bytes 0-0/<total>``); None when the server gives none. The body is never read past that byte."""
+    import urllib.request
+
+    req = urllib.request.Request(url, headers={"Range": "bytes=0-0"})
+    with urllib.request.urlopen(req, timeout=15) as r:
+        total = (r.headers.get("Content-Range") or "").rpartition("/")[2]
+        n = total if r.status == 206 else r.headers.get("Content-Length")
+    return int(n) if n and n.isdigit() else None
+
+
 def versions(post, ref: str, max_versions: int = MAX_VERSIONS, budget: float = 90.0,
              competition: str | None = None) -> dict:
     """Every version of ``ref`` (newest ``max_versions`` scored) with the score of its submission."""
@@ -246,8 +338,10 @@ def pick_best(rows: list[dict], greater_is_better: bool) -> dict | None:
                                       r["version"]))
 
 
-def handle(req: dict, post, post_text) -> dict:
+def handle(req: dict, post, post_text, kc=None) -> dict:
     op = req.get("op")
+    if op == "sizes":
+        return sizes(kc, req, remote_size, float(req.get("budget") or 60))
     if op == "writeups":
         return writeups(post, str(req["competition"]))
     if op == "topic":
@@ -307,8 +401,8 @@ def main() -> int:
         from .kaggle_search import _client
 
         with _client() as kc:
-            post, post_text = _session(kc)
-            res = handle(req, post, post_text)
+            post, post_text = (None, None) if req.get("op") == "sizes" else _session(kc)
+            res = handle(req, post, post_text, kc)
     except ImportError as e:
         res = {"error": f"this Python has no Kaggle SDK ({e}; pip install -U kaggle)"}
     except SystemExit:  # authenticate() exits when no credentials are found

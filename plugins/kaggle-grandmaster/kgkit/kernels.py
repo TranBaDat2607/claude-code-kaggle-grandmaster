@@ -5,6 +5,8 @@
     python -m kgkit kernels pull <owner>/<slug>       # pull + review + local script, under ref/<slug>/
     python -m kgkit kernels versions <owner>/<slug>   # every version's public score (Kaggle's web API)
     python -m kgkit kernels lineage -n 10             # which top notebooks derive from which (forks, inputs, links)
+    python -m kgkit kernels inputs <owner>/<slug>     # its datasets/models/notebook outputs: local or not, sizes
+    python -m kgkit kernels inputs <owner>/<slug> --download --max-gb 20    # after the user agreed to that size
     python -m kgkit kernels pull <owner>/<slug> --best        # the best-scoring version, not the latest (or --version N)
 
 ``top`` and the review show each notebook's public score as Kaggle records it: the best public score across its
@@ -278,7 +280,18 @@ def review(code: str, outputs: str, meta: dict, competition: str | None) -> dict
     inference_only = TRAIN_RX.search(strip_strings(code)) is None and SUBMIT_RX.search(code) is not None
     return {"cv": cv, "libs": libs, "scores": scores, "inputs": inputs, "external": external,
             "other_inputs": other_inputs, "seeds_fixed": bool(re.search(r"seed|random_state", code)),
-            "inference_only": inference_only}
+            "inference_only": inference_only, "runtime": runtime(meta)}
+
+
+def runtime(meta: dict) -> str:
+    """The machine the notebook ran on, from its metadata: accelerator, shape, internet, pinned image."""
+    if not meta:
+        return ""
+    acc = "TPU" if meta.get("enable_tpu") else "GPU" if meta.get("enable_gpu") else "CPU"
+    shape = f" ({meta['machine_shape']})" if meta.get("machine_shape") else ""
+    net = "internet on" if meta.get("enable_internet") else "internet off"
+    img = ", pinned Docker image" if "@sha256:" in str(meta.get("docker_image") or "") else ""
+    return f"{acc}{shape}, {net}{img}"
 
 
 def to_local_script(cells: list[str], competition: str | None, ref_slug: str) -> str:
@@ -320,6 +333,8 @@ def format_review(ref: str, rev: dict, holdout: bool = False) -> str:
              f"- **Attached datasets**: {', '.join(ext['datasets']) or '-'}; **kernels**: "
              f"{', '.join(ext['kernels']) or '-'}; **models**: {', '.join(ext['models']) or '-'}",
              f"- **Seeds fixed**: {'yes' if rev['seeds_fixed'] else 'no'}"]
+    if rev.get("runtime"):
+        facts.append(f"- **Ran on**: {rev['runtime']}")
     lines = [f"# Review: {ref}", "", safety.UNTRUSTED_NOTE, "",
              safety.wrap("\n".join(facts), "kaggle-notebook", ref=ref), "",
              "## Before running it locally", "",
@@ -339,6 +354,10 @@ def format_review(ref: str, rev: dict, holdout: bool = False) -> str:
     lines += ["", "## Checklist", "",
               "- [ ] Read the lines above before running the local script",
               "- [ ] External inputs are public, allowed by the rules, and accessible (private/deleted ones block reproduction)"]
+    if any(ext.values()):
+        lines += [f"- [ ] Its inputs locally: `kgkit kernels inputs {ref}` lists them with their sizes (and writes the "
+                  "packages it added as requirements.txt); download only after the user agrees to the size "
+                  "(`--download --max-gb N`)"]
     if infer:
         lines += ["- [ ] Every attached dataset/model is pinned to a version you can attach too (code competitions "
                   "refuse notebooks with non-versioned datasets); note which version produced the public score",
@@ -694,3 +713,208 @@ def format_lineage(rows: list[dict], lin: dict) -> str:
         lines += ["", "No parent found (originals, or credit given in a way this scan does not read): "
                   + ", ".join(roots)]
     return "\n".join(lines)
+
+
+# ----------------------------------------------------------------------------- a public notebook's inputs
+GB = 1024 ** 3
+KEY_PACKAGES = ("torch", "transformers", "timm", "vllm", "peft", "accelerate", "bitsandbytes", "lightgbm", "xgboost",
+                "catboost", "scikit-learn", "numpy", "pandas", "polars", "tensorflow", "keras", "jax")
+REQ_LINE_RX = re.compile(r"^\s*(?:!?\s*(?:python\s+-m\s+)?pip3?\s+install\s+)?(.+?)\s*$")
+
+
+def input_list(meta: dict) -> list[dict]:
+    """What a notebook mounts besides the competition data (``kernel-metadata.json``), with the local folder each
+    one belongs in: ``data/ext/<name>`` as ``_local.py`` maps ``/kaggle/input/<name>``; a model under
+    ``<model>/<framework>/<variation>/<version>`` as Kaggle mounts it. Package-manager notebooks are kind
+    ``environment``: only their requirements list is fetched, not their wheels."""
+    out = []
+    for ref in meta.get("dataset_sources") or []:
+        ref = str(ref).strip()
+        if ref.count("/") == 1:
+            out.append({"kind": "dataset", "ref": ref, "local": f"data/ext/{ref.split('/')[1]}"})
+    for ref in meta.get("model_sources") or []:
+        parts = str(ref).strip().split("/")
+        if len(parts) == 5:
+            model, fw, var, ver = parts[1:]
+            out.append({"kind": "model", "ref": "/".join(parts), "local": f"data/ext/{model}/{fw.lower()}/{var}/{ver}"})
+    for ref in meta.get("kernel_sources") or []:
+        ref = str(ref).strip()
+        if ref.count("/") != 1:
+            continue
+        kind = "environment" if PM_RX.search(ref) else "notebook"
+        out.append({"kind": kind, "ref": ref, "local": f"data/ext/{ref.split('/')[1]}"})
+    return out
+
+
+def _filled(p: Path) -> bool:
+    return p.is_dir() and any(p.iterdir())
+
+
+def size_inputs(items: list[dict], root: Path) -> str | None:
+    """Fill each item's ``present`` and, for the missing ones, ``size`` (bytes, None unknown) from Kaggle
+    (``kaggle_web`` ``sizes``). Returns why sizes are unknown, or None."""
+    from . import kaggle_web
+
+    for it in items:
+        it["present"] = _filled(root / it["local"]) if it["kind"] != "environment" else False
+        it["size"] = None
+    want = {"datasets": [], "models": [], "kernels": []}
+    for it in items:
+        if not it["present"] and it["kind"] != "environment":
+            want[{"dataset": "datasets", "model": "models", "notebook": "kernels"}[it["kind"]]].append(it["ref"])
+    if not any(want.values()):
+        return None
+    res = kaggle_web.run({"op": "sizes", **want, "budget": 30 + 10 * sum(map(len, want.values()))},
+                         timeout=60 + 10 * sum(map(len, want.values())))
+    if res.get("error"):
+        return res["error"]
+    for it in items:
+        key = {"dataset": "datasets", "model": "models", "notebook": "kernels"}.get(it["kind"])
+        if key and it["ref"] in (res.get(key) or {}):
+            it["size"] = res[key][it["ref"]]
+        elif key and it["ref"] in (res.get("errors") or {}):
+            it["error"] = res["errors"][it["ref"]]
+    errs = res.get("errors") or {}
+    return f"{len(errs)} size(s) unknown" if errs else None
+
+
+def human(n: int | None) -> str:
+    if n is None:
+        return "?"
+    for unit, f in (("GB", GB), ("MB", 1024 ** 2), ("KB", 1024)):
+        if n >= f:
+            return f"{n / f:.1f} {unit}"
+    return f"{n} B"
+
+
+def to_download(items: list[dict]) -> tuple[list[dict], int, int]:
+    """(missing items to download, their known total in bytes, how many have no known size); a package
+    manager's wheels are never downloaded."""
+    miss = [it for it in items if not it.get("present") and it["kind"] != "environment"]
+    known = sum(it["size"] for it in miss if isinstance(it.get("size"), int))
+    unknown = sum(1 for it in miss if not isinstance(it.get("size"), int))
+    return miss, known, unknown
+
+
+def format_inputs(items: list[dict]) -> str:
+    lines = ["| kind | input | local folder | status | size |", "|---|---|---|---|---|"]
+    for it in items:
+        status = ("present" if it.get("present") else "requirements only" if it["kind"] == "environment"
+                  else "missing")
+        size = "-" if it.get("present") or it["kind"] == "environment" else (
+            "no output files" if it.get("size") == 0 and it["kind"] == "notebook" else human(it.get("size")))
+        lines.append(f"| {it['kind']} | {it['ref']} | {it['local'] if it['kind'] != 'environment' else '-'} | "
+                     f"{status} | {size} |")
+    return "\n".join(lines)
+
+
+def requirements_from(text: str) -> list[str]:
+    """Package lines of a Kaggle package manager's ``input_requirements.txt`` (``pip install x==1`` -> ``x==1``)."""
+    out = []
+    for line in text.splitlines():
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        out += REQ_LINE_RX.match(line).group(1).split()
+    return [p for p in out if not p.startswith("-")]
+
+
+def key_pins(text: str) -> list[str]:
+    """The pins of the packages that most change results (torch, transformers, ...) in a pip freeze."""
+    pins = {}
+    for line in text.splitlines():
+        m = re.match(r"^\s*([A-Za-z0-9_.-]+)\s*(?:==|@)\s*(\S+)", line)
+        if m and m.group(1).lower().replace("_", "-") in KEY_PACKAGES:
+            pins[m.group(1).lower()] = f"{m.group(1)}=={m.group(2)}"
+    return [pins[k] for k in sorted(pins)]
+
+
+def _fetch_text(url: str, limit: int = 4 * 1024 ** 2) -> str:
+    import urllib.request
+
+    with urllib.request.urlopen(urllib.request.Request(url), timeout=30) as r:
+        return r.read(limit).decode("utf-8", "replace")
+
+
+def environment(ref: str, ref_dir: Path, items: list[dict]) -> list[str]:
+    """Write ``ref_dir/requirements.txt``: the packages the notebook added to Kaggle's image, from Kaggle's
+    requirements record of its latest version (web API), else from its package-manager inputs'
+    ``input_requirements.txt`` (the wheels are not downloaded). Returns lines saying what was found. Never raises."""
+    from . import kaggle_web
+
+    said, reqs, where = [], [], ""
+    v = kaggle_web.run({"op": "view", "ref": ref})
+    if v.get("requirements_url"):
+        try:
+            reqs, where = requirements_from(_fetch_text(v["requirements_url"])), "Kaggle's requirements record"
+        except OSError as e:
+            said.append(f"Kaggle's requirements record not fetched: {e}")
+    for it in items if not reqs else []:
+        if it["kind"] != "environment":
+            continue
+        tmp = ref_dir / ".pm" / it["ref"].split("/")[1]
+        tmp.mkdir(parents=True, exist_ok=True)
+        r = _kaggle(["kernels", "output", it["ref"], "-p", str(tmp), "--file-pattern", "input_requirements.txt"],
+                    timeout=120)
+        found = list(tmp.rglob("input_requirements.txt"))
+        if r.returncode != 0 or not found:
+            said.append(f"{it['ref']}: no input_requirements.txt ({safety.clean((r.stderr or r.stdout).strip())[:120]})")
+            continue
+        reqs += requirements_from(found[0].read_text(encoding="utf-8", errors="replace"))
+        where = "its package-manager input"
+    shutil.rmtree(ref_dir / ".pm", ignore_errors=True)
+    if reqs:
+        reqs = list(dict.fromkeys(reqs))
+        (ref_dir / "requirements.txt").write_text("\n".join(reqs) + "\n", encoding="utf-8")
+        pins = key_pins("\n".join(reqs))
+        said.append(f"{ref_dir.as_posix()}/requirements.txt: {len(reqs)} package(s) the notebook added to Kaggle's "
+                    f"image ({where})" + (f": {', '.join(pins)}" if pins else "")
+                    + f". Install them into a separate environment (pip install -r {ref_dir.as_posix()}/requirements.txt)")
+    elif not said:
+        said.append("no packages added to Kaggle's image on record: it ran on the image's own versions")
+    return said
+
+
+def _du(p: Path) -> int:
+    return sum(f.stat().st_size for f in p.rglob("*") if f.is_file()) if p.exists() else 0
+
+
+def download_inputs(items: list[dict], root: Path, ref_dir: Path, max_bytes: int) -> list[str]:
+    """Download the missing inputs into their local folders, stopping once ``max_bytes`` have been written (sizes
+    Kaggle did not give are only known afterwards). A notebook output holding only a .py (and its log) is a utility
+    script: it is copied into ``ref_dir`` so the local script's ``import`` finds it. Returns what happened."""
+    from . import datasets as DS
+
+    said, spent = [], 0
+    for it in items:
+        if it.get("present") or it["kind"] == "environment":
+            continue
+        if spent >= max_bytes:
+            said.append(f"{it['ref']}: skipped, the {human(max_bytes)} limit is spent")
+            continue
+        dest = root / it["local"]
+        dest.mkdir(parents=True, exist_ok=True)
+        try:
+            if it["kind"] == "dataset":
+                DS.pull(it["ref"], dest)
+                ok, why = True, ""
+            else:
+                args = (["models", "instances", "versions", "download", it["ref"], "-p", str(dest), "--untar"]
+                        if it["kind"] == "model" else ["kernels", "output", it["ref"], "-p", str(dest)])
+                r = _kaggle(args, timeout=6 * 3600)
+                ok, why = r.returncode == 0, (r.stderr or r.stdout).strip().splitlines()[-1:] or [""]
+                why = safety.clean(why[0])[:200]
+        except SystemExit as e:
+            ok, why = False, safety.clean(str(e))[:200]
+        got = _du(dest)
+        spent += got
+        if not ok:
+            said.append(f"{it['ref']}: FAILED ({why}); {human(got)} in {it['local']}")
+            continue
+        said.append(f"{it['ref']}: {human(got)} -> {it['local']}")
+        files = [p for p in dest.rglob("*") if p.is_file()]
+        py = [p for p in files if p.suffix == ".py"]
+        if it["kind"] == "notebook" and len(py) == 1 and all(p.suffix in (".py", ".log") for p in files):
+            shutil.copy2(py[0], ref_dir / py[0].name)
+            said.append(f"  utility script: copied {py[0].name} into {ref_dir.as_posix()}/ so `import "
+                        f"{py[0].stem}` resolves")
+    return said
