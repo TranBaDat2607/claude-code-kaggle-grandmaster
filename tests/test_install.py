@@ -22,9 +22,11 @@ import pytest
 REPO = Path(__file__).resolve().parents[1]
 PLUGIN = REPO / "plugins" / "kaggle-grandmaster"
 SH = shutil.which("sh")
+# Its full path: on Windows npm installs `claude.cmd`, which subprocess finds only by its full name.
+CLAUDE = shutil.which("claude")
 
 pytestmark = pytest.mark.skipif(
-    not os.environ.get("KGKIT_INSTALL_TEST") or shutil.which("claude") is None or SH is None,
+    not os.environ.get("KGKIT_INSTALL_TEST") or CLAUDE is None or SH is None,
     reason="opt-in: KGKIT_INSTALL_TEST=1 with the Claude Code CLI and sh on PATH")
 
 
@@ -51,8 +53,8 @@ def installed(tmp_path_factory):
     env = _clean_env(CLAUDE_CONFIG_DIR=str(cfg))
     market = json.loads((REPO / ".claude-plugin" / "marketplace.json").read_text(encoding="utf-8"))["name"]
     version = json.loads((PLUGIN / ".claude-plugin" / "plugin.json").read_text(encoding="utf-8"))["version"]
-    _run(["claude", "plugin", "marketplace", "add", str(REPO), "--scope", "project", "--json"], proj, env)
-    _run(["claude", "plugin", "install", "kaggle-grandmaster", "--scope", "project", "-y", "--json"], proj, env)
+    _run([CLAUDE, "plugin", "marketplace", "add", str(REPO), "--scope", "project", "--json"], proj, env)
+    _run([CLAUDE, "plugin", "install", "kaggle-grandmaster", "--scope", "project", "-y", "--json"], proj, env)
     cache = cfg / "plugins" / "cache" / market / "kaggle-grandmaster" / version
     return SimpleNamespace(cfg=cfg, proj=proj, env=env, cache=cache, version=version, market=market, base=base)
 
@@ -69,7 +71,7 @@ def test_install_puts_a_complete_copy_in_the_cache(installed):
     assert f'"{installed.version}"' in init or f"'{installed.version}'" in init
     settings = json.loads((installed.proj / ".claude" / "settings.json").read_text(encoding="utf-8"))
     assert settings["enabledPlugins"] == {f"kaggle-grandmaster@{installed.market}": True}
-    listed = _run(["claude", "plugin", "list"], installed.proj, installed.env).stdout
+    listed = _run([CLAUDE, "plugin", "list"], installed.proj, installed.env).stdout
     assert "kaggle-grandmaster" in listed
 
 
@@ -110,7 +112,7 @@ def test_a_vendored_copy_finds_templates_through_kgkit_home(installed):
 
 def _plugin_test(path: Path, cwd: Path, env: dict) -> list[str]:
     """The per-test lines of `claude plugin test` ("(pass) name", "(fail) name"), timings dropped."""
-    r = subprocess.run(["claude", "plugin", "test", str(path)], cwd=str(cwd), env=env, capture_output=True,
+    r = subprocess.run([CLAUDE, "plugin", "test", str(path)], cwd=str(cwd), env=env, capture_output=True,
                        text=True, encoding="utf-8", errors="replace", timeout=600)
     return sorted(line.split(" [")[0].strip() for line in r.stdout.splitlines() if line.startswith(("(pass)", "(fail)")))
 
@@ -118,6 +120,6 @@ def _plugin_test(path: Path, cwd: Path, env: dict) -> list[str]:
 def test_the_installed_copy_validates_and_tests_like_the_source(installed):
     """The mod's own tests (tests/test_monitor_mod.py runs them on the source) give the same results from the
     cache: an install that drops or changes a file shows as a difference."""
-    _run(["claude", "plugin", "validate", str(installed.cache)], installed.proj, installed.env)
+    _run([CLAUDE, "plugin", "validate", str(installed.cache)], installed.proj, installed.env)
     cached = _plugin_test(installed.cache, installed.proj, installed.env)
     assert cached and cached == _plugin_test(PLUGIN, installed.proj, installed.env)

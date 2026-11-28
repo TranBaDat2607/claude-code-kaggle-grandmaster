@@ -80,7 +80,7 @@ jobs:
           node-version: "22"
       - name: Install
         run: |
-          pip install pytest numpy pandas
+          pip install -r requirements-dev.txt  # kgkit's own: `kgkit init` imports scipy and scikit-learn
           npm install -g @anthropic-ai/claude-code
       - name: Install the plugin from the marketplace and check it
         env:
