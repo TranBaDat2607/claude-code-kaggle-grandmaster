@@ -19,7 +19,7 @@ This repo is a Claude Code marketplace (`.claude-plugin/marketplace.json`) conta
   `kgkit/evalset.py`, `kgkit/finals.py`, `kgkit/audit.py`, `kgkit/progress.py`, `kgkit/speedcheck.py`, `kgkit/bench.py`,
   `kgkit/snapshot.py`, `kgkit/layout.py`, `kgkit/repoguard.py`, `kgkit/filelock.py`, `kgkit/grind.py`, `kgkit/permissions.py`, `kgkit/journey.py`, `kgkit/monitor.py`, `kgkit/kaggle_monitor_cell.py`, `kgkit/localrun.py`, `kgkit/vault.py` (at import time: numpy and pandas only inside its functions),
   `kgkit/kaggle_gpu_runner.py` and everything under `hooks/` must stay **standard-library only** (hooks import them, the runner executes inside Kaggle; they must be fast and never fail closed).
-  `kgkit/kaggle_search.py`, `kgkit/kaggle_submissions.py`, `kgkit/kaggle_outputs.py` and `kgkit/kaggle_cli.py` too, at import time: they run under the Kaggle CLI's
+  `kgkit/kaggle_search.py`, `kgkit/kaggle_submissions.py`, `kgkit/kaggle_outputs.py`, `kgkit/kaggle_web.py` and `kgkit/kaggle_cli.py` too, at import time: they run under the Kaggle CLI's
   interpreter, which may have nothing else installed (they import kagglesdk / the CLI inside `main`).
 - kgkit reads no file outside `kgkit/` that a command needs: `kgkit vendor` copies only the package (into a
   project's `src/`, or a Kaggle dataset), and every command must work from such a copy with files of the copy's
