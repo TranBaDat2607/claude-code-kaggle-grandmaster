@@ -10,6 +10,7 @@ allowed-tools:
   - 'Bash(kgkit pages *)'
   - 'Bash(kgkit discussions *)'
   - 'Bash(kgkit kernels top *)'
+  - 'Bash(kgkit kernels lineage *)'
   - 'Bash(kgkit config *)'
   - 'Bash(kaggle competitions list *)'
   - 'PowerShell(kaggle competitions list *)'

@@ -4,6 +4,7 @@
     python -m kgkit kernels top --sort-by scoreDescending   # best public score first
     python -m kgkit kernels pull <owner>/<slug>       # pull + review + local script, under ref/<slug>/
     python -m kgkit kernels versions <owner>/<slug>   # every version's public score (Kaggle's web API)
+    python -m kgkit kernels lineage -n 10             # which top notebooks derive from which (forks, inputs, links)
     python -m kgkit kernels pull <owner>/<slug> --best        # the best-scoring version, not the latest (or --version N)
 
 ``top`` and the review show each notebook's public score as Kaggle records it: the best public score across its
@@ -547,3 +548,149 @@ def analyse_dir(dest: Path, ref: str, competition: str | None = None, check_acce
         (dest / f"{slug}_local.py").write_text(to_local_script(cells, competition, slug), encoding="utf-8")
     rev["dir"] = str(dest)
     return rev
+
+
+# ----------------------------------------------------------------------------- lineage among public notebooks
+CODE_LINK_RX = re.compile(r"kaggle\.com/code/([A-Za-z0-9_-]+)/([A-Za-z0-9_.-]+[A-Za-z0-9_-])")
+# Kaggle's package-manager notebooks (``packagemanager/pm-<id>-at-<date>``): the pip environment a notebook added
+# packages to, mounted as an input. Not where its ideas came from (``kernels pull`` reads their requirements).
+PM_RX = re.compile(r"(?:^|/)pm-\d+-at-[\d-]+$")
+LINEAGE_FRESH_S = 86400  # a cached pull younger than this is reused
+
+
+def all_source(path: Path) -> str:
+    """Every cell's source (code and markdown: credits live in markdown), or a script's text; no outputs."""
+    if path.suffix == ".ipynb":
+        try:
+            nb = json.loads(path.read_text(encoding="utf-8"))
+        except ValueError:
+            return ""
+        return "\n".join("".join(c.get("source", "")) if isinstance(c.get("source"), list) else str(c.get("source", ""))
+                         for c in nb.get("cells", []))
+    return path.read_text(encoding="utf-8", errors="replace")
+
+
+def lineage_edges(ref: str, meta: dict, source: str, fork: str | None, slugs: dict[str, str]) -> list[dict]:
+    """Where notebook ``ref`` comes from: its fork parent (``fork``), the notebooks whose output it mounts
+    (``kernel_sources`` in its metadata) and the notebooks its cells link to or whose output folder they read.
+    ``slugs`` maps the slug of each notebook in the list to its ref, so a ``/kaggle/input/<slug>`` path names one.
+    Each edge: {"parent", "kind": "fork" | "metadata" | "code ref", "what"}."""
+    me = ref.lower()
+    out: dict[tuple, dict] = {}
+
+    def add(parent: str, kind: str, what: str):
+        p = parent.strip("/").lower()
+        if p and p != me and "/" in p and not PM_RX.search(p) and (p, kind) not in out:
+            out[(p, kind)] = {"parent": p, "kind": kind, "what": what}
+    if fork:
+        add(fork, "fork", "forked from")
+    for k in meta.get("kernel_sources") or []:
+        add(str(k), "metadata", "mounts its output")
+    for owner, slug in CODE_LINK_RX.findall(source):
+        add(f"{owner}/{slug}", "code ref", "links to it")
+    for mount in set(INPUT_RX.findall(source)):
+        other = slugs.get(mount.lower())
+        if other:
+            add(other, "code ref", f"reads /kaggle/input/{mount}")
+    return list(out.values())
+
+
+def families(refs: list[str], edges: dict[str, list[dict]]) -> list[dict]:
+    """Groups of the listed notebooks joined by an edge between them or a parent they share (a notebook outside
+    the list counts): [{"members": [...], "via": [shared parents]}], biggest first; singletons are left out."""
+    up = {r.lower(): r.lower() for r in refs}
+
+    def find(x):
+        while up[x] != x:
+            up[x] = up[up[x]]
+            x = up[x]
+        return x
+    by_parent: dict[str, list[str]] = {}
+    for r in refs:
+        for e in edges.get(r, []):
+            by_parent.setdefault(e["parent"], []).append(r.lower())
+    for parent, kids in by_parent.items():
+        group = kids + ([parent] if parent in up else [])
+        for k in group[1:]:
+            up[find(k)] = find(group[0])
+    comps: dict[str, list[str]] = {}
+    for r in refs:
+        comps.setdefault(find(r.lower()), []).append(r)
+    out = []
+    for members in comps.values():
+        if len(members) < 2:
+            continue
+        low = {m.lower() for m in members}
+        via = sorted(p for p, kids in by_parent.items() if len(set(kids) & low) >= 2 or (p in low and kids))
+        out.append({"members": members, "via": via})
+    return sorted(out, key=lambda f: -len(f["members"]))
+
+
+def shared_inputs(metas: dict[str, dict]) -> list[tuple[str, list[str]]]:
+    """Datasets and models attached to two or more of the notebooks: [(kind ref, [notebooks])]."""
+    use: dict[str, list[str]] = {}
+    for ref, meta in metas.items():
+        for kind, key in (("dataset", "dataset_sources"), ("model", "model_sources")):
+            for s in {str(s).strip() for s in meta.get(key) or [] if str(s or "").strip()}:
+                use.setdefault(f"{kind} {s}", []).append(ref)
+    return sorted(((k, v) for k, v in use.items() if len(v) >= 2), key=lambda kv: -len(kv[1]))
+
+
+def _pull_cached(ref: str, root: Path) -> tuple[dict, str, str | None]:
+    """(metadata, all cell source, error) of ``ref``, pulled into ``root/<owner>__<slug>`` (reused for a day)."""
+    import time
+
+    d = root / ref.replace("/", "__")
+    meta_p = d / "kernel-metadata.json"
+    if not (meta_p.is_file() and time.time() - meta_p.stat().st_mtime < LINEAGE_FRESH_S):
+        d.mkdir(parents=True, exist_ok=True)
+        r = _kaggle(["kernels", "pull", ref, "-p", str(d), "-m"], timeout=120)
+        if r.returncode != 0:
+            tail = (r.stderr or r.stdout or "").strip().splitlines()
+            return {}, "", safety.clean(tail[-1] if tail else f"exit {r.returncode}")[:200]
+    meta = json.loads(meta_p.read_text(encoding="utf-8")) if meta_p.is_file() else {}
+    code = [p for p in d.iterdir() if p.suffix in (".ipynb", ".py", ".r", ".R")]
+    return meta, (all_source(code[0]) if code else ""), None
+
+
+def lineage(rows: list[dict], cache_root: Path) -> dict:
+    """Lineage of the listed notebooks (``top`` rows): {"edges": {ref: [edge]}, "families", "shared",
+    "errors": {ref: why}, "fork_error": why the fork parents are unknown, or None}."""
+    from . import kaggle_web
+
+    refs = [r["ref"] for r in rows if r.get("ref")]
+    slugs = {ref.split("/")[-1].lower(): ref.lower() for ref in refs}
+    fk = kaggle_web.run({"op": "forks", "refs": refs, "budget": 15 + 3 * len(refs)}, timeout=30 + 3 * len(refs))
+    forks = fk.get("forks") or {}
+    metas, edges, errors = {}, {}, dict(fk.get("errors") or {})
+    for ref in refs:
+        meta, source, err = _pull_cached(ref, cache_root)
+        if err:
+            errors[ref] = err
+        metas[ref] = meta
+        edges[ref] = lineage_edges(ref, meta, source, forks.get(ref), slugs)
+    return {"edges": edges, "families": families(refs, edges), "shared": shared_inputs(metas), "errors": errors,
+            "fork_error": fk.get("error")}
+
+
+def format_lineage(rows: list[dict], lin: dict) -> str:
+    listed = {r["ref"].lower() for r in rows if r.get("ref")}
+    lines = ["| # | notebook | score | comes from |", "|---|---|---|---|"]
+    for i, r in enumerate(rows, start=1):
+        es = lin["edges"].get(r["ref"], [])
+        parents = "; ".join(f"{e['parent']}{' (listed)' if e['parent'] in listed else ''} [{e['kind']}: {e['what']}]"
+                            for e in es) or "-"
+        score = r.get("score")
+        lines.append(f"| {i} | {r['ref']} | {fmt_score(score) if isinstance(score, float) else '-'} | {parents} |")
+    lines += ["", "Families (notebooks sharing a source: correlated as ensemble members; study the shared source):"]
+    lines += [f"- {', '.join(f['members'])}: via {', '.join(f['via']) or 'each other'}" for f in lin["families"]] \
+        or ["- none: no two listed notebooks share a parent"]
+    if lin["shared"]:
+        lines += ["", "Inputs attached to two or more of them (shared base models are common; a shared dataset of "
+                  "predictions or weights makes the notebooks correlated):"]
+        lines += [f"- {k}: {', '.join(v)}" for k, v in lin["shared"][:15]]
+    roots = [r["ref"] for r in rows if r.get("ref") and not lin["edges"].get(r["ref"])]
+    if roots:
+        lines += ["", "No parent found (originals, or credit given in a way this scan does not read): "
+                  + ", ".join(roots)]
+    return "\n".join(lines)

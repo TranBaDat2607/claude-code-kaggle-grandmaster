@@ -8,6 +8,7 @@
   version Kaggle names as the notebook's best (by public score) and its fork parent.
 - ``source``: the source of one version (``kaggle kernels pull`` only gets the latest).
 - ``view``: a notebook's fork parent, the inputs it mounts and the URL of its Docker image's package list.
+- ``forks``: the fork parent of each of several notebooks (``kernels lineage``).
 
 These endpoints serve the website. They are not Kaggle's public API and can change without notice, so every
 caller falls back to the public path when one fails (``discussions solutions`` to its title search, ``kernels
@@ -159,6 +160,22 @@ def notebook_competition(view: dict) -> str | None:
     return None
 
 
+def forks(post, refs: list[str], budget: float = 60.0) -> dict:
+    """{ref: owner/slug of its fork parent, or None when it was not forked}; refs not reached in time, or that
+    failed, are absent and named in ``errors``."""
+    end = time.monotonic() + budget
+    out, errors = {}, {}
+    for ref in refs:
+        if time.monotonic() >= end:
+            errors[ref] = "out of time"
+            continue
+        try:
+            out[ref] = fork_parent(_view(post, ref))
+        except WebError as e:
+            errors[ref] = str(e)[:200]
+    return {"forks": out, "errors": errors}
+
+
 def versions(post, ref: str, max_versions: int = MAX_VERSIONS, budget: float = 90.0,
              competition: str | None = None) -> dict:
     """Every version of ``ref`` (newest ``max_versions`` scored) with the score of its submission."""
@@ -240,6 +257,8 @@ def handle(req: dict, post, post_text) -> dict:
                         float(req.get("budget") or 90), req.get("competition"))
     if op == "view":
         return view(post, str(req["ref"]))
+    if op == "forks":
+        return forks(post, [str(r) for r in req.get("refs") or []], float(req.get("budget") or 60))
     if op == "source":
         text = post_text(SOURCE, {"kernelSessionId": int(req["session_id"]), "includeOutputIfAvailable": False})
         return {"source": text}

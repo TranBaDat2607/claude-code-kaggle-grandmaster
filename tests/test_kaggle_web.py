@@ -330,3 +330,61 @@ def test_pull_version_stops_before_pulling_when_versions_are_unavailable(tmp_pat
     monkeypatch.setattr(W, "run", _fake_web({}))
     with pytest.raises(SystemExit, match=r"versions of me/nb unavailable \(HTTP 403\)"):
         K.pull("me/nb", tmp_path, version=2)
+
+
+# ----------------------------------------------------------------------------- item 3: lineage of public notebooks
+def test_lineage_edges_read_forks_metadata_and_code():
+    slugs = {"base": "a/base", "blend": "b/blend"}
+    src = ("Credit: https://www.kaggle.com/code/C/Orig-NB.\npd.read_csv('/kaggle/input/base/oof.csv')\n"
+           "see kaggle.com/code/me/blend2 (myself) and /kaggle/input/unrelated/x")
+    meta = {"kernel_sources": ["a/base", "packagemanager/pm-90995342-at-09-01-2025-08-14-30", ""]}
+    edges = K.lineage_edges("me/blend2", meta, src, "x/forked", slugs)
+    assert [(e["parent"], e["kind"]) for e in edges] == [("x/forked", "fork"), ("a/base", "metadata"),
+                                                       ("c/orig-nb", "code ref"), ("a/base", "code ref")]
+
+
+def test_families_join_shared_parents_and_direct_edges():
+    refs = ["a/one", "b/two", "c/three", "d/four", "e/five"]
+    edges = {"a/one": [{"parent": "x/src"}], "b/two": [{"parent": "x/src"}], "c/three": [{"parent": "d/four"}],
+             "d/four": [], "e/five": [{"parent": "y/alone"}]}
+    fam = K.families(refs, edges)
+    assert fam == [{"members": ["a/one", "b/two"], "via": ["x/src"]},
+                   {"members": ["c/three", "d/four"], "via": ["d/four"]}]
+
+
+def test_shared_inputs_ignore_blanks_and_repeats():
+    metas = {"a/one": {"dataset_sources": ["o/oof", "o/oof", ""], "model_sources": ["q/m/pt/x/1"]},
+             "b/two": {"dataset_sources": ["o/oof"], "model_sources": ["q/m/pt/x/1"]}, "c/three": {}}
+    assert K.shared_inputs(metas) == [("dataset o/oof", ["a/one", "b/two"]), ("model q/m/pt/x/1", ["a/one", "b/two"])]
+
+
+def test_lineage_command(ws, monkeypatch, capsys):
+    rows = [{"ref": "a/one", "title": "One"}, {"ref": "b/two", "title": "Two"}]
+    monkeypatch.setattr(K, "top", lambda slug, n, sort_by: rows)
+
+    def fake_kaggle(args, timeout=300):
+        dest, ref = Path(args[args.index("-p") + 1]), args[2]
+        if ref == "b/two":
+            return subprocess.CompletedProcess(args, 1, "", "403 Forbidden\n")
+        (dest / "one.ipynb").write_text(json.dumps({"cells": [{"cell_type": "markdown", "source": "fork of b/two"}]}))
+        (dest / "kernel-metadata.json").write_text(json.dumps({"kernel_sources": ["b/two"]}))
+        return subprocess.CompletedProcess(args, 0, "", "")
+    monkeypatch.setattr(K, "_kaggle", fake_kaggle)
+    monkeypatch.setattr(W, "run", _fake_web({"forks": {"forks": {"a/one": "z/orig", "b/two": "z/orig"},
+                                                       "errors": {}}}))
+    capsys.readouterr()
+    cli.main(["kernels", "lineage", "--no-score"])
+    out = capsys.readouterr().out
+    assert "| 1 | a/one | - | z/orig [fork: forked from]; b/two (listed) [metadata: mounts its output] |" in out
+    assert "- a/one, b/two: via b/two, z/orig" in out and "b/two: 403 Forbidden" in out
+    assert (ws / ".kaggle-gm" / "cache" / "lineage" / "a__one" / "kernel-metadata.json").is_file()
+
+
+def test_forks_op_reports_each_notebook():
+    def view(body):
+        if body["kernelSlug"] == "gone":
+            return {}
+        return {"kernel": {"id": 1, "forkParent": {"url": "/code/o/p"} if body["kernelSlug"] == "kid" else None}}
+    post, _ = _post_from({"GetKernelViewModel": view})
+    res = W.forks(post, ["a/kid", "a/orig", "a/gone"])
+    assert res["forks"] == {"a/kid": "o/p", "a/orig": None} and "not found" in res["errors"]["a/gone"]

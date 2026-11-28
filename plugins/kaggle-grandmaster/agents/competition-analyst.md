@@ -37,7 +37,8 @@ A competition slug (and optionally a workspace path). Data may already be in `da
    Read each `ref/<slug>/REVIEW.md` and extract: CV scheme, CV score, LB score, model, key
    features/tricks, and external inputs that must be checked against the rules. When a notebook's latest
    version scores below its best on record, `kgkit kernels versions <ref>` shows which version scored it and
-   `kgkit kernels pull <ref> --best` gets that one.
+   `kgkit kernels pull <ref> --best` gets that one. Run `kgkit kernels lineage -n 10` first: when several
+   top notebooks share a parent, pull the parent and one descendant, and report the family as one approach.
 5. Identify similar past competitions and their winning ideas (brief; the solution-researcher
    agent goes deeper).
 6. Assess shake-up risk and leak potential, and whether the competition awards medals (Featured /

@@ -2789,6 +2789,8 @@ def cmd_kernels(a):
 
     st = S.load()
     slug = a.competition or (st.slug if st else None)
+    if a.n is None:
+        a.n = 10 if a.action == "lineage" else 20
     if a.action == "top":
         if not slug:
             raise SystemExit("--competition required (no competition state found)")
@@ -2802,6 +2804,25 @@ def cmd_kernels(a):
             print(K.TOP_LEGEND + (f"\npublic scores unknown: {err}" if err else ""))
         print(f"\nnext: python -m kgkit kernels pull <ref>{_competition_flag(st, slug)}   (review + local script "
               "under ref/)")
+    elif a.action == "lineage":
+        if not slug:
+            raise SystemExit("--competition required (no competition state found)")
+        rows = K.top(slug, a.n, a.sort_by)
+        err = None if a.no_score else K.add_public_scores(rows, slug)
+        if a.sort_by == "scoreDescending" and not a.no_score:
+            rows = K.sort_by_score(rows, st.greater_is_better if st and st.slug == slug else True)
+        lin = K.lineage(rows, S.cache_dir(S.find_root() or Path.home()) / "lineage")
+        print(SF.UNTRUSTED_NOTE)
+        print(SF.wrap(K.format_lineage(rows, lin), "kaggle-cli", competition=slug, view="lineage"))
+        print("\nedges: [fork] Kaggle's fork record (internal web API); [metadata] the notebook mounts the other's "
+              "output; [code ref] its cells link to the other or read its output folder. A notebook can credit a "
+              "source in a way none of these catch.")
+        if lin["fork_error"]:
+            print(f"fork parents unknown ({lin['fork_error']}): metadata and code refs only")
+        for ref, why in lin["errors"].items():
+            print(f"{ref}: {why}")
+        if err:
+            print(f"public scores unknown: {err}")
     elif a.action == "versions":
         if not a.ref:
             raise SystemExit("usage: kernels versions <owner/slug>")
@@ -3863,10 +3884,10 @@ def build_parser() -> argparse.ArgumentParser:
     s.set_defaults(fn=cmd_speedcheck)
 
     s = sub.add_parser("kernels", help="study and reproduce public notebooks")
-    s.add_argument("action", choices=["top", "versions", "pull", "review"])
+    s.add_argument("action", choices=["top", "lineage", "versions", "pull", "review"])
     s.add_argument("ref", nargs="?", help="owner/slug or its Kaggle URL (versions, pull, review)")
     s.add_argument("--competition", help="default: competition.json slug")
-    s.add_argument("-n", type=int, default=20)
+    s.add_argument("-n", type=int, default=None, help="top: notebooks listed (default 20); lineage: default 10")
     s.add_argument("--sort-by", default="voteCount",
                    help="voteCount | scoreDescending (best public score on record first) | dateRun | hotness")
     s.add_argument("--dest", default="ref")
