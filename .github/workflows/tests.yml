@@ -57,3 +57,32 @@ jobs:
         run: npm install -g @anthropic-ai/claude-code
       - name: Validate the plugin
         run: claude plugin validate plugins/kaggle-grandmaster
+
+  # The plugin as users get it: installed from the marketplace into a fresh project (tests/test_install.py), not
+  # loaded with --plugin-dir. Catches what only an install breaks: a file missing from the cache copy, bin/kgkit's
+  # mode, KGKIT_HOME resolution. Its own Claude config dir; needs no login and no Kaggle account.
+  install:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Install
+        run: |
+          pip install pytest numpy pandas
+          npm install -g @anthropic-ai/claude-code
+      - name: Install the plugin from the marketplace and check it
+        env:
+          KGKIT_INSTALL_TEST: "1"
+        run: python -m pytest tests/test_install.py -q -rs

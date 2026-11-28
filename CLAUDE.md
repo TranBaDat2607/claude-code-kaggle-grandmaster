@@ -8,6 +8,8 @@ This repo is a Claude Code marketplace (`.claude-plugin/marketplace.json`) conta
   instead of 7 on 12 cores; drop `-n auto` for one process; template tests need torch/timm/transformers; LightGBM
   test is skipped if absent)
 - Validate manifests/skills/agents: `claude plugin validate plugins/kaggle-grandmaster`
+- Install path (marketplace install into a temp project, own Claude config dir; the `install` CI job runs it on
+  Linux and Windows): `KGKIT_INSTALL_TEST=1 python -m pytest tests/test_install.py -q`
 - Inventory + token cost: `claude --plugin-dir plugins/kaggle-grandmaster plugin details kaggle-grandmaster`
 - Evals (see `plugins/kaggle-grandmaster/evals/README.md`), from `plugins/kaggle-grandmaster`:
   advice cases, any OS incl. native Windows: `claude plugin eval . --tag portable --model haiku --judge-model sonnet --no-publish`;
